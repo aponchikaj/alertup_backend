@@ -45,4 +45,4 @@ const BUILDINGS_SCHEMA = new mongoose.Schema({
 })
 
 const BUILDINGS = mongoose.model('buildings',BUILDINGS_SCHEMA);
-module.exports = BUILDINGS;
+export default BUILDINGS;

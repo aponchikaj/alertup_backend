@@ -62,8 +62,12 @@ const USER_SCHEMA = new mongoose.Schema({
                 type:Number
             }
         }
-    ]
+    ],
+    verified:{
+        type:Boolean,
+        default:false
+    }
 })
 
 const USERS = mongoose.model('users',USER_SCHEMA);
-module.exports = USERS;
+export default USERS;

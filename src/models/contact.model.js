@@ -16,4 +16,4 @@ const CONTACT_SCHEMA = new mongoose.Schema({
 })
 
 const CONTACTS = mongoose.model('contacts',CONTACT_SCHEMA);
-module.exports = CONTACTS
+export default CONTACTS

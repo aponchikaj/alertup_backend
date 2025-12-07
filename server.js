@@ -3,7 +3,7 @@ import express from 'express'
 import bparser from 'body-parser'
 import cparser from 'cookie-parser'
 import mongoose from 'mongoose'
-require('dotenv').config()
+import 'dotenv/config'
 
 const app = express();
 const PORT = process.env.PORT || 3000;
