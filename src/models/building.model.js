@@ -25,11 +25,12 @@ const BUILDINGS_SCHEMA = new mongoose.Schema({
                 type:String
             },
             scanned:{
-                type:Array
+                type:Array,
+                default:[]
             }
         }
     ],
-    scanned:[
+    scanned:[ 
         {
             userID:{
                 type:String
@@ -41,6 +42,10 @@ const BUILDINGS_SCHEMA = new mongoose.Schema({
     ],
     updatedAt:{
         type:Date
+    },
+    isDeactivated:{
+        type:Boolean,
+        default:false
     }
 })
 

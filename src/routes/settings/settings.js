@@ -4,29 +4,35 @@ const router = express.Router();
 import USERS from '../../models/user.model';
 import VERIFICATIONS from '../../models/verificatios.model';
 import whoami from '../../middlewares/whoami'
+import { Filter } from 'bad-words';
 import bcrypt, { compare } from 'bcrypt'
 import sendMail from '../../services/sendEmail'
 
 const checkUsername = async(username,currentUsername) => {
-  if (!username) {
-    return "Invalid username.";
-  }
+    if (!username) {
+        return "Invalid username.";
+    }
 
-  if (username.length < 4 || username.length > 24) {
-    return "Username must be from 4 to 24 characters.";
-  }
+    if (username.length < 4 || username.length > 24) {
+        return "Username must be from 4 to 24 characters.";
+    }
 
-  // allow only letters, numbers, underscore
-  if (!/^[a-zA-Z0-9_]+$/.test(username)) {
-    return "Username contains invalid symbols.";
-  }
+    if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+        return "Username contains invalid symbols.";
+    }
 
-  const findUsername = await USERS.findOne({username:username})
-  if(findUsername && findUsername.username !== currentUsername){
-    return "Username already exists."
-  }
+    const filter= new Filter()
 
-  return null;
+    if(filter.isProfane(username)){
+        return "Username name contains forbidden words."
+    }
+
+    const findUsername = await USERS.findOne({username:username})
+    if(findUsername && findUsername.username !== currentUsername){
+        return "Username already exists."
+    }
+
+    return null;
 };
 
 router.put('/api/settings/save',whoami,async(req,res)=>{

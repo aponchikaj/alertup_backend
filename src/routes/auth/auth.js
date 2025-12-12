@@ -3,6 +3,7 @@ const router = express.Router()
 
 import bcrypt from 'bcrypt'
 import jwt from 'jsonwebtoken'
+import {Filter} from 'bad-words'
 
 import USERS from '../../models/user.model'
 import sendMail from '../../services/sendEmail'
@@ -19,6 +20,12 @@ const checkUsername = async(username) => {
   // allow only letters, numbers, underscore
   if (!/^[a-zA-Z0-9_]+$/.test(username)) {
     return "Username contains invalid symbols.";
+  }
+
+  const filter = new Filter()
+
+  if(filter.isProfane(username)){
+    return "Username contains forbidden words."
   }
 
   const findUsername = await USERS.findOne({username:username})

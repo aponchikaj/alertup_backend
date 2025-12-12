@@ -66,7 +66,27 @@ const USER_SCHEMA = new mongoose.Schema({
     verified:{
         type:Boolean,
         default:false
-    }
+    },
+    premium:{
+        hasPremium:{
+            type:Boolean,
+            default:false
+        },
+        premiumType:{
+            type:String,
+            default:''
+        },
+        from:{
+            type:Date,
+        },
+        to:{
+            type:Date
+        }
+    },
+    transactions:{
+        type:Array
+    },
+
 })
 
 const USERS = mongoose.model('users',USER_SCHEMA);
