@@ -19,6 +19,18 @@ const whoami = async(req,res,next)=>{
             return res.send({Success:false,Message:'Invalid User ID.'})
         }
 
+        if (
+                user.premium?.hasPremium &&
+                user.premium?.to &&
+                new Date(user.premium.to) < new Date()
+            ) {
+                user.premium.hasPremium = false;
+                user.premium.premiumType = null;
+                user.premium.to = null;
+
+            await user.save();
+        }
+
         req.user = user;
         next()
     }catch{

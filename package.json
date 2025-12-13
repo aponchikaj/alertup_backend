@@ -17,6 +17,7 @@
   "author": "Lazare Mirziashvili",
   "license": "ISC",
   "dependencies": {
+    "@paypal/checkout-server-sdk": "^1.0.3",
     "bad-words": "^4.0.0",
     "bcrypt": "^6.0.0",
     "body-parser": "^2.2.1",
