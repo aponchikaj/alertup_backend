@@ -17,8 +17,7 @@ const USER_SCHEMA = new mongoose.Schema({
         type:String
     },
     phones:{
-        type:Array,
-        default:[]
+        type:String,
     },
     Buildings:[
         {

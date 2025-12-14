@@ -109,7 +109,7 @@ router.post('/api/auth/register', async (req, res) => {
       username,
       password:HashedPassword,
       email,
-      phone,
+      phones:phone,
       country,
       countryCode,
       updatedAt:`${new Date().toISOString()}`

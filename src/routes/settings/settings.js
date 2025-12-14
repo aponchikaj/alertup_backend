@@ -56,7 +56,7 @@ router.put('/api/settings/save',whoami,async(req,res)=>{
                 username:username,
                 country:country,
                 countryCode:countryCode,
-                phone:phone
+                phones:phone
             },
             {
                 new:true

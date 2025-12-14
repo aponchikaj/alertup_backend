@@ -168,6 +168,17 @@ router.post('/api/premium/webhook', express.json({ type: 'application/json' }), 
           premiumType: planOption,
           to: expires
         };
+
+        user.transactions.push(
+          {
+            orderID:orderID,
+            date:Date.now(),
+            plan:planOption,
+            transmissionId:transmissionId,
+            transmissionTime:transmissionTime
+          }
+        )
+
         await user.save();
       }
     }
