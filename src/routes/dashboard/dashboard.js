@@ -1,8 +1,8 @@
 import express from 'express';
 const router = express.Router();
 
-import whoami from '../../middlewares/whoami';
-import USERS from '../../models/user.model';
+import whoami from '../../middlewares/whoami.js';
+import USERS from '../../models/user.model.js';
 
 
 router.get('/api/dashboard',whoami,async(req,res)=>{

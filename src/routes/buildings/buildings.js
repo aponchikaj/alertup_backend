@@ -1,9 +1,9 @@
 import express from 'express'
-import upload from '../../middlewares/upload'
-import whoami from '../../middlewares/whoami'
+import upload from '../../middlewares/upload.js'
+import whoami from '../../middlewares/whoami.js'
 import QRCode from 'qrcode'
-import USERS from '../../models/user.model'
-import BUILDINGS from '../../models/building.model'
+import USERS from '../../models/user.model.js'
+import BUILDINGS from '../../models/building.model.js'
 import { Filter } from 'bad-words'
 
 const router = express.Router()

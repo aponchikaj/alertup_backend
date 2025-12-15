@@ -1,14 +1,14 @@
 import express from 'express';
-import USERS from '../../models/user.model';
-import BUILDINGS from '../../models/building.model';
-import CONTACTS from '../../models/contact.model';
-import REPORTS from '../../models/report.model';
+import USERS from '../../models/user.model.js';
+import BUILDINGS from '../../models/building.model.js';
+import CONTACTS from '../../models/contact.model.js';
+import REPORTS from '../../models/report.model.js';
 import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken'
 dotenv.config()
 
-import isAdmin from '../../middlewares/isAdmin';
-import sendMail from '../../services/sendEmail';
+import isAdmin from '../../middlewares/isAdmin.js';
+import sendMail from '../../services/sendEmail.js';
 
 const router = express.Router();
 
@@ -458,4 +458,4 @@ router.delete('/api/admin/contacts/:id',isAdmin,async(req,res)=>{
     }
 })
 
-module.exports = router
+export default router

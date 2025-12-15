@@ -1,12 +1,12 @@
 import express from 'express';
 const router = express.Router();
 
-import USERS from '../../models/user.model';
-import VERIFICATIONS from '../../models/verificatios.model';
-import whoami from '../../middlewares/whoami'
+import USERS from '../../models/user.model.js';
+import VERIFICATIONS from '../../models/verificatios.model.js';
+import whoami from '../../middlewares/whoami.js'
 import { Filter } from 'bad-words';
 import bcrypt, { compare } from 'bcrypt'
-import sendMail from '../../services/sendEmail'
+import sendMail from '../../services/sendEmail.js'
 
 const checkUsername = async(username,currentUsername) => {
     if (!username) {

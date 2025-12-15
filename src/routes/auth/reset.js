@@ -3,10 +3,10 @@ const router = express.Router()
 
 import bcrypt from 'bcrypt'
 
-import USERS from '../../models/user.model'
+import USERS from '../../models/user.model.js'
 // import VEFIFICATIONS from '../../models/verificatios.model'
-import VERIFICATIONS from '../../models/verificatios.model'
-import sendMail from '../../services/sendEmail'
+import VERIFICATIONS from '../../models/verificatios.model.js'
+import sendMail from '../../services/sendEmail.js'
 
 const findUSER = async(user)=>{
     try{    

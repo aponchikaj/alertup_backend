@@ -1,7 +1,7 @@
 import express from 'express';
 const router = express.Router()
 
-import REPORTS from '../../models/report.model';
+import REPORTS from '../../models/report.model.js';
 
 router.post('/api/report',async(req,res)=>{
     const {email,message,reason} = req.body

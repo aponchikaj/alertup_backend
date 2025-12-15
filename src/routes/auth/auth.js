@@ -5,8 +5,8 @@ import bcrypt from 'bcrypt'
 import jwt from 'jsonwebtoken'
 import {Filter} from 'bad-words'
 
-import USERS from '../../models/user.model'
-import sendMail from '../../services/sendEmail'
+import USERS from '../../models/user.model.js'
+import sendMail from '../../services/sendEmail.js'
 
 const checkUsername = async(username) => {
   if (!username) {

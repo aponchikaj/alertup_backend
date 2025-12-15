@@ -1,7 +1,7 @@
 import express from 'express'
 const router = express.Router()
 
-import CONTACTS from '../../models/contact.model';
+import CONTACTS from '../../models/contact.model.js';
 
 router.post('/api/contact',async(req,res)=>{
     const {email,message,reason} = req.body;

@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken'
-import USERS from '../models/user.model'
+import USERS from '../models/user.model.js'
 
 const whoami = async(req,res,next)=>{
     const userToken = req.cookies['userToken']
