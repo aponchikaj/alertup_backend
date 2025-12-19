@@ -18,21 +18,37 @@ const PREMIUM_OPTIONS = {
   Elite: { title: "Elite", limits: { maxBuildings: 10, maxFloors: 20 }, price: 19.99, onSale: false, salePrice: 0 },
   Professional: { title: "Professional", limits: { maxBuildings: 25, maxFloors: 50 }, price: 29.99, onSale: false, salePrice: 0 }
 };
+
+// ########################################### IF ADMIN? SECTION ###########################################
+
+router.get('/api/admin/isAdmin',isAdmin,async(req,res)=>{
+  try{
+    if(req.isAdmin = false){
+      return res.send({Success:false})
+    }
+
+    return res.send({Success:true})
+  }catch{
+    return res.send({Success:false,Message:"Something went wrong."})
+  }
+})
+
 // ########################################### LOGIN SECTION ###########################################
 
 router.post('/api/admin/login', async (req, res) => {
+  // console.log(req.body)
   const { user, password } = req.body;
 
   try {
     if (!user || !password) {
-      return res.status(400).send({ Success: false, Message: 'Invalid credentials.' });
+      return res.send({ Success: false, Message: 'Invalid credentials.' });
     }
 
     const ADMIN_USER = process.env.ADMIN_USER;
     const ADMIN_PASS = process.env.ADMIN_PASS;
 
     if (user !== ADMIN_USER || password !== ADMIN_PASS) {
-      return res.status(401).send({ Success: false, Message: 'Invalid credentials.' });
+      return res.send({ Success: false, Message: 'Invalid credentials.' });
     }
 
     await sendMail(
@@ -55,15 +71,15 @@ router.post('/api/admin/login', async (req, res) => {
 
     res.cookie('adminToken', adminToken, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-      maxAge: 60 * 60 * 1000 // 1 hour in ms
+      secure: false, // false in dev
+      sameSite: 'lax', // allows sending cookies for top-level navigation
+      maxAge: 60 * 60 * 1000
     });
 
     return res.send({ Success: true, Message: 'Logged in.' });
 
   } catch (err) {
-    return res.status(500).send({ Success: false, Message: 'Server error.' });
+    return res.send({ Success: false, Message: 'Server error.' });
   }
 });
 
@@ -150,7 +166,7 @@ router.get('/api/admin/users', isAdmin, async (req, res) => {
     });
 
   } catch (err) {
-    return res.status(500).send({ Success: false, Message: 'Server error' });
+    return res.send({ Success: false, Message: 'Server error' });
   }
 });
 

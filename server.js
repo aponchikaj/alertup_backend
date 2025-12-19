@@ -20,7 +20,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cparser())
-app.use(cors())
+app.use(cors({credentials:true,origin:'http://localhost:5173'}))
 app.use(bparser.json())
 
 app.use(adminRoutes)
