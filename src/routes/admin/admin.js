@@ -83,12 +83,18 @@ router.post('/api/admin/login', async (req, res) => {
   }
 });
 
-router.post('/api/admin/logout',isAdmin,async(req,res)=>{
+router.post('/api/admin/logout',async(req,res)=>{
   try{
-    if(req.isAdmin == false){
-      return {Success:false,Message:"Something went wrong."}
-    }
-    res.clearCookie('adminToken')
+    // if(req.isAdmin == false){
+    //   return {Success:false,Message:"Something went wrong."}
+    // }
+    res.cookie('adminToken', '', {
+      httpOnly: true,
+      secure: false,
+      sameSite: 'lax',
+      expires: new Date(0),
+      path: '/',
+    });
     return res.send({Success:true,Message:"Logged out."})
   }catch{
     return {Success:false,Message:"Something went wrong."}
