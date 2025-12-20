@@ -83,6 +83,18 @@ router.post('/api/admin/login', async (req, res) => {
   }
 });
 
+router.post('/api/admin/logout',isAdmin,async(req,res)=>{
+  try{
+    if(req.isAdmin == false){
+      return {Success:false,Message:"Something went wrong."}
+    }
+    res.clearCookie('adminToken')
+    return res.send({Success:true,Message:"Logged out."})
+  }catch{
+    return {Success:false,Message:"Something went wrong."}
+  }
+})
+
 // ########################################### SendMail SECTION ###########################################
 
 router.post('/api/admin/sendMail',isAdmin,async(req,res)=>{
