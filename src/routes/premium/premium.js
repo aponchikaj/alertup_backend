@@ -53,6 +53,10 @@ router.get('/api/premium/plans', (req, res) => {
 router.post('/api/premium/checkout', whoami, async (req, res) => {
   const { option } = req.body;
 
+  if(req.user.verified ==false){
+    return res.send({Success:false,Message:"Not verified."})
+  }
+
   if (!option || !PREMIUM_OPTIONS[option]) {
     return res.send({ Success: false, Message: "Invalid premium option." });
   }

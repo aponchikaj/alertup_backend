@@ -4,7 +4,7 @@ const router = express.Router()
 import REPORTS from '../../models/report.model.js';
 
 router.post('/api/report',async(req,res)=>{
-    const {email,message,reason} = req.body
+    const {email,message,reason} = req.body 
     const date = new Date().toISOString()
 
     try{

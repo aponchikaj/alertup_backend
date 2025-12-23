@@ -64,7 +64,6 @@ const checkPremiumSettings = async (userPremiumSettings) => {
   return { Success: true, Message: plan };
 };
 
-
 router.post('/api/building/new', whoami, upload.array('maps'), async (req, res) => {
   try {
     const USER = await USERS.findById(req.user._id)
@@ -94,6 +93,10 @@ router.post('/api/building/new', whoami, upload.array('maps'), async (req, res) 
         createdAt: Date.now(),
         scanned: []
       })
+    }
+
+    if(USER.verified == false){
+      return res.send({Success:false,Message:"Not verified."})
     }
 
     let user_max_floors = 3
