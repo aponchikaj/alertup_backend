@@ -178,34 +178,55 @@ router.post("/api/premium/capture", whoami, async (req, res) => {
 /* ---------------------------------- */
 /* PAYPAL WEBHOOK */
 /* ---------------------------------- */
+/* ---------------------------------- */
+/* PAYPAL WEBHOOK (SECURE FOR LIVE) */
+/* ---------------------------------- */
+
 router.post(
   "/api/premium/webhook",
   express.json({ type: "application/json" }),
   async (req, res) => {
     try {
-      // Note: @paypal/checkout-server-sdk doesn't include webhook verification
-      // For production, consider using @paypal/payouts-sdk or implementing manual verification
-      // For now, we'll process webhooks without SDK verification
-      // In production, you should verify the webhook signature manually or use PayPal's REST API SDK
-      
-      // Basic validation: check if required fields exist
-      if (!req.body || !req.body.event_type) {
-        console.error("Invalid webhook payload");
+      const webhookId = process.env.PAYPAL_WEBHOOK_ID;
+      const transmissionId = req.headers['paypal-transmission-id'];
+      const transmissionTime = req.headers['paypal-transmission-time'];
+      const certUrl = req.headers['paypal-cert-url'];
+      const authAlgo = req.headers['paypal-auth-algo'];
+      const transmissionSig = req.headers['paypal-transmission-sig'];
+      const webhookEventBody = req.body;
+
+      if (!transmissionId || !transmissionSig) {
+        console.error("Missing PayPal webhook headers");
+        return res.sendStatus(400);
+      }
+
+      // Create the verification request
+      const verifyRequest = new paypal.notifications.VerifyWebhookSignatureRequest();
+      verifyRequest.requestBody({
+        auth_algo: authAlgo,
+        cert_url: certUrl,
+        transmission_id: transmissionId,
+        transmission_sig: transmissionSig,
+        transmission_time: transmissionTime,
+        webhook_id: webhookId,
+        webhook_event: webhookEventBody
+      });
+
+      // Verify the webhook signature
+      const verifyResponse = await paypalClient.execute(verifyRequest);
+
+      if (verifyResponse.result.verification_status !== "SUCCESS") {
+        console.error("Webhook verification failed");
         return res.sendStatus(400);
       }
 
       // Only process payment completion events
-      if (req.body.event_type !== "PAYMENT.CAPTURE.COMPLETED") {
-        return res.sendStatus(200);
+      if (webhookEventBody.event_type !== "PAYMENT.CAPTURE.COMPLETED") {
+        return res.sendStatus(200); // ignore other events
       }
 
-      const capture = req.body.resource;
-      if (!capture || !capture.supplementary_data?.related_ids?.order_id) {
-        console.error("Invalid capture data in webhook");
-        return res.sendStatus(200);
-      }
-
-      const orderID = capture.supplementary_data.related_ids.order_id;
+      const capture = webhookEventBody.resource;
+      const orderID = capture.supplementary_data?.related_ids?.order_id;
       const description =
         capture.purchase_units?.[0]?.description || "Premium-Basic";
 
@@ -243,27 +264,3 @@ router.post(
 );
 
 export default router;
-
-/* ---------------------------------- */
-/* Test-only: activate premium for current user (non-production only) */
-/* ---------------------------------- */
-router.post('/api/premium/test-activate', whoami, async (req, res) => {
-  if (process.env.NODE_ENV === 'production') return res.sendStatus(404);
-
-  try {
-    const { option } = req.body;
-    if (!isValidPlan(option)) return res.send({ Success: false, Message: 'Invalid plan' });
-
-    const user = await USERS.findById(req.user._id);
-    if (!user) return res.send({ Success: false, Message: 'User not found' });
-
-    user.premium = { hasPremium: true, premiumType: option, to: addDays(30) };
-    user.transactions.push({ orderID: `TEST-${Date.now()}`, plan: option, amount: PREMIUM_PLANS[option].price, date: new Date() });
-    await user.save();
-
-    res.send({ Success: true, Message: 'Test premium activated' });
-  } catch (err) {
-    console.error(err);
-    res.send({ Success: false, Message: 'Test activation failed' });
-  }
-});
