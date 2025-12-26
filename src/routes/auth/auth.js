@@ -151,7 +151,7 @@ router.post('/api/auth/login',async(req,res)=>{
     res.cookie('userToken', userToken, cookieOptions2);
 
 
-    res.send({Success:true,Message:"Logged in."})
+    return res.send({Success:true,Message:"Logged in."})
     try {
       await sendMail(USER.email,"New Login - AlertUp",`Hey someone has logged into your account. was that you? contact us if it wasn't you.`)
     } catch (err) {
