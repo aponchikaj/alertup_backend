@@ -21,19 +21,27 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cparser())
-const allowedOrigins = ['https://alertup.world', 'https://alertup.vercel.app'];
+const allowedOrigins = [
+  'https://alertup.world',
+  'https://www.alertup.world',
+  'https://alertup.vercel.app'
+];
 
 app.use(cors({
-  origin: function(origin, callback){
-    if(!origin) return callback(null, true); // allow non-browser requests like Postman
-    if(allowedOrigins.includes(origin)){
+  origin: (origin, callback) => {
+    // Allow non-browser requests like Postman
+    if (!origin) return callback(null, true);
+
+    // Check if the origin is in allowedOrigins
+    if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      callback(new Error('Not allowed by CORS'));
+      callback(new Error(`CORS error: ${origin} not allowed`));
     }
   },
   credentials: true
 }));
+
 app.use(bparser.json())
 
 app.use(adminRoutes)
