@@ -8,22 +8,16 @@ dotenv.config();
 const router = express.Router();
 
 /* ---------------- PayPal Client ---------------- */
-const paypalEnv =
-  process.env.PAYPAL_ENV === "live"
-    ? new paypal.core.LiveEnvironment(
-        process.env.PAYPAL_CLIENT_ID,
-        process.env.PAYPAL_CLIENT_SECRET
-      )
-    : new paypal.core.SandboxEnvironment(
-        process.env.PAYPAL_CLIENT_ID,
-        process.env.PAYPAL_CLIENT_SECRET
-      );
+const paypalEnv = new paypal.core.LiveEnvironment(
+  process.env.PAYPAL_CLIENT_ID,
+  process.env.PAYPAL_CLIENT_SECRET
+);
 
 const paypalClient = new paypal.core.PayPalHttpClient(paypalEnv);
 
 /* ---------------- Premium Plans ---------------- */
 const PREMIUM_PLANS = {
-  Basic: { price: 4.99, limits: { maxBuildings: 3, maxFloors: 5 } },
+  Basic: { price: 0.09, limits: { maxBuildings: 3, maxFloors: 5 } },
   Platinum: { price: 9.99, limits: { maxBuildings: 6, maxFloors: 10 } },
   Elite: { price: 19.99, limits: { maxBuildings: 10, maxFloors: 20 } },
   Professional: { price: 29.99, limits: { maxBuildings: 25, maxFloors: 50 } },
