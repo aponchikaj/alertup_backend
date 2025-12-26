@@ -33,6 +33,7 @@ router.get('/api/settings', whoami, async (req, res) => {
       username: user.username,
       country: user.country,
       phone: user.phones,
+      verified:user.verified
     };
 
     return res.send({ Success: true, Message: settings });
