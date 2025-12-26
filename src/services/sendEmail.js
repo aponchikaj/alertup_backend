@@ -1,26 +1,29 @@
 import nodemailer from 'nodemailer';
-import 'dotenv/config'
+import 'dotenv/config';
 
 const transport = nodemailer.createTransport({
-    service:"gmail",
-    auth:{
-        user:process.env.GMAIL_USER,
-        pass:process.env.GMAIL_PASS
-    },
-    connectionTimeout: 10000, 
-})
+  host: "smtp.sendgrid.net",
+  port: 587,
+  auth: {
+    user: "apikey", // this must literally be "apikey"
+    pass: process.env.SENDGRID_API_KEY
+  }
+});
 
-const sendMail = async(to,subject,text)=>{
-    if(!to||!subject||!text){
-        return false
-    }
+const sendMail = async (to, subject, text, html) => {
+  if (!to || !subject || (!text && !html)) {
+    return false;
+  }
 
-    await transport.sendMail({
-        from:process.env.GMAIL_USER,
-        to,
-        subject,
-        text
-    })
-}
+  await transport.sendMail({
+    from: "lazaremirziashvili@alertup.world", // use your verified sender
+    to,
+    subject,
+    text,
+    html
+  });
 
-export default sendMail
+  return true;
+};
+
+export default sendMail;
