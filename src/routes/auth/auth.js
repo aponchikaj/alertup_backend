@@ -85,6 +85,7 @@ router.post('/api/auth/register', async (req, res) => {
       httpOnly: true,
       secure: reqIsSecure,
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      path: '/', // Ensure cookie is available across all paths
     };
 
     // Use SameSite=None only when cookie is Secure (required by browsers for cross-site cookies)
@@ -145,18 +146,19 @@ router.post('/api/auth/login',async(req,res)=>{
       httpOnly: true,
       secure: reqIsSecure2,
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      path: '/', // Ensure cookie is available across all paths
     };
     cookieOptions2.sameSite = reqIsSecure2 ? 'None' : 'Lax';
 
     res.cookie('userToken', userToken, cookieOptions2);
 
-
-    return res.send({Success:true,Message:"Logged in."})
     try {
       await sendMail(USER.email,"New Login - AlertUp",`Hey someone has logged into your account. was that you? contact us if it wasn't you.`)
     } catch (err) {
       console.error("MAIL ERROR:", err);
     }
+
+    return res.send({Success:true,Message:"Logged in."})
   }catch{
     return res.send({Success:false,Message:"Server error."})
   }

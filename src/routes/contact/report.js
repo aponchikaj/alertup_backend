@@ -15,9 +15,9 @@ router.post('/api/report',async(req,res)=>{
             createdAt:date
         })
 
-        newReport.save()
+        await newReport.save()
 
-        return res.send({Success:false,Message:"Sent."})
+        return res.send({Success:true,Message:"Sent."})
     }catch{
         return res.send({Success:false,Message:"Server error."})
     }

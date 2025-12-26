@@ -236,7 +236,15 @@ router.post('/api/settings/account', whoami, async (req, res) => {
 
     await USERS.findByIdAndDelete(user._id);
     await VERIFICATIONS.deleteMany({ verificationBy: user._id });
-    res.clearCookie('userToken');
+    
+    // Determine whether the current request is secure (HTTPS)
+    const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
+    res.clearCookie('userToken', {
+        httpOnly: true,
+        secure: reqIsSecure,
+        sameSite: reqIsSecure ? 'None' : 'Lax',
+        path: '/',
+    });
 
     res.send({ Success: true, Message: "Account deleted." });
     try {
@@ -251,12 +259,15 @@ router.post('/api/settings/account', whoami, async (req, res) => {
 
 // POST /api/settings/logout
 router.post('/api/settings/logout', whoami, async (req, res) => {
-    console.log("Logoutze shemovida")
   try {
+    // Determine whether the current request is secure (HTTPS)
+    const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
+    
     res.clearCookie('userToken', {
         httpOnly: true,
-        secure: process.env.NODE_ENV === 'production', // must match login
-        sameSite: 'lax', // must match login
+        secure: reqIsSecure, // must match login
+        sameSite: reqIsSecure ? 'None' : 'Lax', // must match login
+        path: '/', // must match login
     });
     return res.send({ Success: true, Message: "Logged out successfully." });
   } catch {

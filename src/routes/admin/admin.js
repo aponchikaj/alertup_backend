@@ -57,11 +57,15 @@ router.post('/api/admin/login', async (req, res) => {
       { expiresIn: '1h' }
     );
 
+    // Determine whether the current request is secure (HTTPS)
+    const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
+
     res.cookie('adminToken', adminToken, {
       httpOnly: true,
-      secure: false, // false in dev
-      sameSite: 'lax', // allows sending cookies for top-level navigation
-      maxAge: 60 * 60 * 1000
+      secure: reqIsSecure,
+      sameSite: reqIsSecure ? 'None' : 'Lax',
+      maxAge: 60 * 60 * 1000,
+      path: '/', // Ensure cookie is available across all paths
     });
 
     res.send({ Success: true, Message: 'Logged in.' });
@@ -92,16 +96,18 @@ router.post('/api/admin/logout',async(req,res)=>{
     // if(req.isAdmin == false){
     //   return {Success:false,Message:"Something went wrong."}
     // }
-    res.cookie('adminToken', '', {
+    // Determine whether the current request is secure (HTTPS)
+    const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
+    
+    res.clearCookie('adminToken', {
       httpOnly: true,
-      secure: false,
-      sameSite: 'lax',
-      expires: new Date(0),
+      secure: reqIsSecure,
+      sameSite: reqIsSecure ? 'None' : 'Lax',
       path: '/',
     });
     return res.send({Success:true,Message:"Logged out."})
   }catch{
-    return {Success:false,Message:"Something went wrong."}
+    return res.send({Success:false,Message:"Something went wrong."})
   }
 })
 

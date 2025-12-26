@@ -32,6 +32,7 @@ if (process.env.NODE_ENV !== 'production') {
         httpOnly: false,
         secure: reqIsSecure,
         maxAge: 60 * 60 * 1000,
+        path: '/',
       };
       cookieOptions.sameSite = reqIsSecure ? 'None' : 'Lax';
 

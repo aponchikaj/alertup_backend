@@ -22,7 +22,7 @@ router.post('/api/contact',async(req,res)=>{
             contactType:reason,
             createdAt:date
         })
-        newContact.save()
+        await newContact.save()
         res.send({Success:true,Message:"Sent."})
         try {
             await sendMail(process.env.GMAIL_USER,'New Message - Alertup',`Author: ${email}, Reason: ${reason}, Message: ${message}. ${date}`)
