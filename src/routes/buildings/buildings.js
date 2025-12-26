@@ -142,7 +142,7 @@ router.post(
         const file = files[i]?.path || null;
 
         const qrCode = await QRCode.toDataURL(
-          `http://192.168.100.5:5173/building/${encodeURIComponent(
+          `https://www.alertup.world/building/${encodeURIComponent(
             buildingName
           )}/${encodeURIComponent(floorName)}`
         );
