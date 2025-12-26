@@ -21,7 +21,6 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cparser())
-import cors from "cors";
 
 app.set("trust proxy", 1);
 
