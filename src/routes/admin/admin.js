@@ -51,17 +51,21 @@ router.post('/api/admin/login', async (req, res) => {
       return res.send({ Success: false, Message: 'Invalid credentials.' });
     }
 
-    await sendMail(
-      process.env.GMAIL_USER,
-      'New admin login – AlertUp',
-      `
-        <h2>Admin Login Alert</h2>
-        <p>Someone logged in as <b>admin</b> on AlertUp.</p>
-        <p><b>IP:</b> ${req.ip}</p>
-        <p><b>Device:</b> ${req.headers['user-agent']}</p>
-        <p>If this wasn’t you, secure your account immediately.</p>
-      `
-    );
+    try {
+        await sendMail(
+        process.env.GMAIL_USER,
+        'New admin login – AlertUp',
+        `
+          <h2>Admin Login Alert</h2>
+          <p>Someone logged in as <b>admin</b> on AlertUp.</p>
+          <p><b>IP:</b> ${req.ip}</p>
+          <p><b>Device:</b> ${req.headers['user-agent']}</p>
+          <p>If this wasn’t you, secure your account immediately.</p>
+        `
+      );
+    } catch (err) {
+        console.error("MAIL ERROR:", err);
+    }
 
     const adminToken = jwt.sign(
       { isAdmin: true },
@@ -117,7 +121,11 @@ router.post('/api/admin/sendMail',isAdmin,async(req,res)=>{
             return res.send({Success:false,Message:"User not found."})
         }
 
-        await sendMail(findUser.email,subject,text);
+        try {
+          return res.send({Success:true,Message:"Sent."})
+        } catch (err) {
+            console.error("MAIL ERROR:", err);
+        }
 
         return res.send({Success:true,Message:"Sent."})
 
@@ -225,7 +233,7 @@ router.get('/api/admin/premiumUsers', isAdmin, async (req, res) => {
     });
 
   } catch (err) {
-    return res.status(500).send({
+    return res.send({
       Success: false,
       Message: 'Server error'
     });
@@ -249,7 +257,7 @@ router.get('/api/admin/user/:id', isAdmin, async (req, res) => {
     return res.send({ Success: true, Message: user });
 
   } catch {
-    return res.status(500).send({ Success: false, Message: 'Server error.' });
+    return res.send({ Success: false, Message: 'Server error.' });
   }
 });
 
@@ -267,7 +275,11 @@ router.delete('/api/admin/user/:id',isAdmin,async(req,res)=>{
             return res.send({Success:false,Message:"User not found."})
         }
 
-        await sendMail(user.email,'Account deleted - AlertUp',`Hello Dear ${user.username} we've decided that your account should be deleted. reason:${reason}. we are sorry goodbye.`)
+        try {
+          await sendMail(user.email,'Account deleted - AlertUp',`Hello Dear ${user.username} we've decided that your account should be deleted. reason:${reason}. we are sorry goodbye.`)
+        } catch (err) {
+          console.error("MAIL ERROR:", err);
+        }
     
         await USERS.findOneAndDelete({_id:user._id})
 
@@ -306,7 +318,7 @@ router.put('/api/admin/user/:id', isAdmin, async (req, res) => {
     return res.send({ Success: true, Message: "Updated." });
 
   } catch {
-    return res.status(500).send({ Success: false, Message: "Server error." });
+    return res.send({ Success: false, Message: "Server error." });
   }
 });
 
@@ -350,7 +362,7 @@ router.post('/api/admin/user/givePremium/:id', isAdmin, async (req, res) => {
     return res.send({ Success: true, Message: "Saved." });
 
   } catch {
-    return res.status(500).send({ Success: false, Message: "Server error." });
+    return res.send({ Success: false, Message: "Server error." });
   }
 });
 

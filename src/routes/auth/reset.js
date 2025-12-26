@@ -33,13 +33,13 @@ router.post("/api/reset/send-code", async (req, res) => {
     const { user } = req.body;
 
     if (!user) {
-        return res.status(400).json({ success: false, message: "Invalid user." });
+        return res.json({ success: false, message: "Invalid user." });
     }
 
     try {
         const result = await findUser(user);
         if (!result.success) {
-            return res.status(404).json(result);
+            return res.json(result);
         }
 
         const USER = result.user;
@@ -59,17 +59,21 @@ router.post("/api/reset/send-code", async (req, res) => {
             expires: Date.now() + 10 * 60 * 1000, // 10 minutes
         });
 
-        await sendMail(
+        try {
+            await sendMail(
             USER.email,
             "Reset password - AlertUp",
             `Hello ${USER.username}, your password reset code is ${code}. 
 If this wasn't you, please contact support immediately.`
         );
+        } catch (err) {
+            console.error("MAIL ERROR:", err);
+        }
 
         return res.json({ success: true, message: "Verification code sent." });
     } catch (err) {
         console.error(err);
-        return res.status(500).json({ success: false, message: "Server error." });
+        return res.json({ success: false, message: "Server error." });
     }
 });
 
@@ -79,13 +83,13 @@ router.post("/api/reset/verify-code", async (req, res) => {
     const { user, code } = req.body;
 
     if (!user || !code) {
-        return res.status(400).json({ success: false, message: "Invalid fields." });
+        return res.json({ success: false, message: "Invalid fields." });
     }
 
     try {
         const result = await findUser(user);
         if (!result.success) {
-            return res.status(404).json(result);
+            return res.json(result);
         }
 
         const USER = result.user;
@@ -96,16 +100,16 @@ router.post("/api/reset/verify-code", async (req, res) => {
         });
 
         if (!verification) {
-            return res.status(400).json({ success: false, message: "Invalid or expired code." });
+            return res.json({ success: false, message: "Invalid or expired code." });
         }
 
         if (verification.expires < Date.now()) {
             await VERIFICATIONS.deleteOne({ _id: verification._id });
-            return res.status(400).json({ success: false, message: "Code expired." });
+            return res.json({ success: false, message: "Code expired." });
         }
 
         if (verification.verificationCode !== code) {
-            return res.status(400).json({ success: false, message: "Invalid code." });
+            return res.json({ success: false, message: "Invalid code." });
         }
 
         // Mark verification as confirmed
@@ -117,17 +121,21 @@ router.post("/api/reset/verify-code", async (req, res) => {
             USER.verified = true;
             await USER.save();
 
-            await sendMail(
+            try {
+                await sendMail(
                 USER.email,
                 "Account Verified - AlertUp",
                 `Hello ${USER.username}, your account has been verified successfully.`
-            );
+                );
+            } catch (err) {
+                console.error("MAIL ERROR:", err);
+            }
         }
 
         return res.json({ success: true, message: "Code verified." });
     } catch (err) {
         console.error(err);
-        return res.status(500).json({ success: false, message: "Server error." });
+        return res.json({ success: false, message: "Server error." });
     }
 });
 
@@ -137,7 +145,7 @@ router.post("/api/reset/password", async (req, res) => {
     const { user, newPassword } = req.body;
 
     if (!user || !newPassword || newPassword.length < 6) {
-        return res.status(400).json({
+        return res.json({
             success: false,
             message: "Password must be at least 6 characters.",
         });
@@ -146,7 +154,7 @@ router.post("/api/reset/password", async (req, res) => {
     try {
         const result = await findUser(user);
         if (!result.success) {
-            return res.status(404).json(result);
+            return res.json(result);
         }
 
         const USER = result.user;
@@ -158,7 +166,7 @@ router.post("/api/reset/password", async (req, res) => {
         });
 
         if (!verification) {
-            return res.status(403).json({
+            return res.json({
                 success: false,
                 message: "Reset verification required.",
             });
@@ -177,7 +185,7 @@ router.post("/api/reset/password", async (req, res) => {
         return res.json({ success: true, message: "Password changed successfully." });
     } catch (err) {
         console.error(err);
-        return res.status(500).json({ success: false, message: "Server error." });
+        return res.json({ success: false, message: "Server error." });
     }
 });
 

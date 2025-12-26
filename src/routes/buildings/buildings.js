@@ -62,14 +62,14 @@ router.post(
       /* ───────────────────────── USER CHECK ───────────────────────── */
       const USER = await USERS.findById(req.user._id);
       if (!USER) {
-        return res.status(404).send({
+        return res.send({
           Success: false,
           Message: 'User not found.'
         });
       }
 
       if (!USER.verified) {
-        return res.status(403).send({
+        return res.send({
           Success: false,
           Message: 'Verify account first.'
         });
@@ -79,14 +79,14 @@ router.post(
       const { buildingName, floorNames } = req.body;
 
       if (!buildingName || typeof buildingName !== 'string') {
-        return res.status(400).send({
+        return res.send({
           Success: false,
           Message: 'Invalid building name.'
         });
       }
 
       if (!Array.isArray(floorNames) || floorNames.length === 0) {
-        return res.status(400).send({
+        return res.send({
           Success: false,
           Message: 'Invalid floor names.'
         });
@@ -99,7 +99,7 @@ router.post(
 
       const uniqueFloors = new Set(normalizedFloors);
       if (uniqueFloors.size !== normalizedFloors.length) {
-        return res.status(400).send({
+        return res.send({
           Success: false,
           Message: 'Floor names must be unique.'
         });
@@ -111,14 +111,14 @@ router.post(
       const maxBuildings = premiumCheck.Message.buildings;
 
       if (floorNames.length > maxFloors) {
-        return res.status(403).send({
+        return res.send({
           Success: false,
           Message: `Your plan allows up to ${maxFloors} floors.`
         });
       }
 
       if (USER.Buildings.length >= maxBuildings) {
-        return res.status(403).send({
+        return res.send({
           Success: false,
           Message: `Your plan allows up to ${maxBuildings} buildings.`
         });
@@ -128,7 +128,7 @@ router.post(
       const files = req.files || [];
 
       if (files.length > floorNames.length) {
-        return res.status(400).send({
+        return res.send({
           Success: false,
           Message: 'Too many map files uploaded.'
         });
@@ -174,7 +174,7 @@ router.post(
         $push: { Buildings: NEW_BUILDING._id }
       });
 
-      return res.status(201).send({
+      return res.send({
         Success: true,
         Message: 'Building created successfully.',
         buildingID: NEW_BUILDING._id
@@ -182,7 +182,7 @@ router.post(
 
     } catch (error) {
       console.error(error);
-      return res.status(500).send({
+      return res.send({
         Success: false,
         Message: 'Server error.'
       });
@@ -285,7 +285,7 @@ router.get('/api/building/id/:buildingID', async (req, res) => {
 router.get("/api/building/my", whoami, async (req, res) => {
   try {
     if (!req.user || !req.user._id) {
-      return res.status(401).send({ Success: false, Message: "User not authenticated" });
+      return res.send({ Success: false, Message: "User not authenticated" });
     }
 
     // Fetch all buildings owned by the logged-in user
@@ -294,7 +294,7 @@ router.get("/api/building/my", whoami, async (req, res) => {
     return res.send({ Success: true, Message: buildings });
   } catch (err) {
     console.error(err);
-    return res.status(500).send({ Success: false, Message: "Server error" });
+    return res.send({ Success: false, Message: "Server error" });
   }
 });
 

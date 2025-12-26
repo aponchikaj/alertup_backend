@@ -23,7 +23,11 @@ router.post('/api/contact',async(req,res)=>{
             createdAt:date
         })
         newContact.save()
-        await sendMail(process.env.GMAIL_USER,'New Message - Alertup',`Author: ${email}, Reason: ${reason}, Message: ${message}. ${date}`)
+        try {
+            await sendMail(process.env.GMAIL_USER,'New Message - Alertup',`Author: ${email}, Reason: ${reason}, Message: ${message}. ${date}`)
+        } catch (err) {
+            console.error("MAIL ERROR:", err);
+        }
         return res.send({Success:true,Message:"Sent."})
     }catch{
         return res.send({Success:false,Message:"Server error."})
