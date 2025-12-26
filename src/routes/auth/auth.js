@@ -76,12 +76,21 @@ router.post('/api/auth/register', async (req, res) => {
       expiresIn: '7d',
     });
 
-    res.cookie('userToken', userToken, {
+    // Determine whether the current request is secure (HTTPS).
+    // `trust proxy` is enabled in server.js so `req.secure` and
+    // `x-forwarded-proto` are reliable behind proxies (Vercel/Render).
+    const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
+
+    const cookieOptions = {
       httpOnly: true,
-      secure: isProd,
-      sameSite: 'None',
+      secure: reqIsSecure,
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-    });
+    };
+
+    // Use SameSite=None only when cookie is Secure (required by browsers for cross-site cookies)
+    cookieOptions.sameSite = reqIsSecure ? 'None' : 'Lax';
+
+    res.cookie('userToken', userToken, cookieOptions);
 
 
     res.send({ Success: true, Message: "Registered successfully." });
@@ -130,12 +139,16 @@ router.post('/api/auth/login',async(req,res)=>{
       expiresIn:'7d'
     })
 
-    res.cookie('userToken', userToken, {
+    const reqIsSecure2 = req.secure || req.headers['x-forwarded-proto'] === 'https';
+
+    const cookieOptions2 = {
       httpOnly: true,
-      secure: isProd,
-      sameSite: 'None',
+      secure: reqIsSecure2,
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-    });
+    };
+    cookieOptions2.sameSite = reqIsSecure2 ? 'None' : 'Lax';
+
+    res.cookie('userToken', userToken, cookieOptions2);
 
 
     res.send({Success:true,Message:"Logged in."})

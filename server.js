@@ -24,23 +24,30 @@ app.use(cparser())
 
 app.set("trust proxy", 1);
 
-const allowedOrigins = [
-  "https://alertup.world",
-  "https://www.alertup.world",
-  "https://alertup.vercel.app",
-  "https://alertup-q512tp3my-aponchikajs-projects.vercel.app"
-  
-];
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || "").split(",").filter(Boolean);
+
+const isAllowAll = process.env.ALLOW_ALL_ORIGINS === 'true';
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin) return callback(null, true); // allow non-browser requests
-    // allow explicit whitelist, vercel previews, and onrender deployments
-    if (
-      allowedOrigins.includes(origin) ||
-      origin.endsWith('.vercel.app') ||
-      origin.endsWith('.onrender.com')
-    ) return callback(null, true);
+    if (!origin) return callback(null, true); // allow non-browser requests (curl, etc.)
+    if (isAllowAll) return callback(null, true);
+
+    // env-configured whitelist
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+
+    // allow common preview hosts
+    if (origin.endsWith('.vercel.app') || origin.endsWith('.onrender.com')) return callback(null, true);
+
+    // allow localhost and local network (helpful for testing from phone)
+    try {
+      const u = new URL(origin);
+      if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') return callback(null, true);
+      if (/^192\.168\./.test(u.hostname) || /^10\./.test(u.hostname) || /^172\.(1[6-9]|2\d|3[0-1])\./.test(u.hostname)) return callback(null, true);
+    } catch (e) {
+      // ignore parse errors
+    }
+
     return callback(new Error(`CORS error: ${origin} not allowed`));
   },
   credentials: true // important for cookies
