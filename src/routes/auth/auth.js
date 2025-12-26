@@ -78,8 +78,9 @@ router.post('/api/auth/register', async (req, res) => {
       httpOnly: true,
       secure: true,
       sameSite: 'None',
-      maxAge: 7 * 24 * 60 * 60 * 1000,
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });
+
 
     res.send({ Success: true, Message: "Registered successfully." });
     try {
@@ -128,11 +129,12 @@ router.post('/api/auth/login',async(req,res)=>{
     })
 
     res.cookie('userToken', userToken, {
-      httpOnly: true,          // JS cannot read it
-      secure: true,            // MUST be true on HTTPS
-      sameSite: 'None',        // allow cross-site requests
-      maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+      httpOnly: true,
+      secure: true,
+      sameSite: 'None',
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });
+
 
     res.send({Success:true,Message:"Logged in."})
     try {

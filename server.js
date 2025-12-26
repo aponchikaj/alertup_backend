@@ -21,26 +21,25 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cparser())
+import cors from "cors";
+
+app.set("trust proxy", 1);
+
 const allowedOrigins = [
-  'https://alertup.world',
-  'https://www.alertup.world',
-  'https://alertup.vercel.app'
+  "https://alertup.world",
+  "https://www.alertup.world",
+  "https://alertup.vercel.app"
 ];
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow non-browser requests like Postman
-    if (!origin) return callback(null, true);
-
-    // Check if the origin is in allowedOrigins
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error(`CORS error: ${origin} not allowed`));
-    }
+    if (!origin) return callback(null, true); // allow non-browser requests
+    if (allowedOrigins.includes(origin) || origin.endsWith(".vercel.app")) return callback(null, true); // allow previews
+    return callback(new Error(`CORS error: ${origin} not allowed`));
   },
-  credentials: true
-}));
+  credentials: true // important for cookies
+}))
+
 
 app.use(bparser.json())
 
