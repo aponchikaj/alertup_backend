@@ -53,142 +53,100 @@ const checkPremiumSettings = (premium) => {
 // -------------------------------------
 // POST /api/building/new
 // -------------------------------------
-router.post(
-  '/api/building/new',
-  whoami,
-  upload.array('maps'),
-  async (req, res) => {
-    try {
-      /* ───────────────────────── USER CHECK ───────────────────────── */
-      const USER = await USERS.findById(req.user._id);
-      if (!USER) {
-        return res.send({
-          Success: false,
-          Message: 'User not found.'
-        });
-      }
+router.post("/api/building/new", whoami, upload.array("maps"), async (req, res) => {
+  try {
+    /* ───────────────────────── USER CHECK ───────────────────────── */
+    const USER = await USERS.findById(req.user._id);
+    if (!USER) return res.send({ Success: false, Message: "User not found." });
+    if (!USER.verified) return res.send({ Success: false, Message: "Verify account first." });
 
-      if (!USER.verified) {
-        return res.send({
-          Success: false,
-          Message: 'Verify account first.'
-        });
-      }
+    /* ───────────────────────── BODY VALIDATION ───────────────────────── */
+    const { buildingName, floorNames } = req.body;
 
-      /* ───────────────────────── BODY VALIDATION ───────────────────────── */
-      const { buildingName, floorNames } = req.body;
+    if (!buildingName || typeof buildingName !== "string") {
+      return res.send({ Success: false, Message: "Invalid building name." });
+    }
 
-      if (!buildingName || typeof buildingName !== 'string') {
-        return res.send({
-          Success: false,
-          Message: 'Invalid building name.'
-        });
-      }
+    if (!Array.isArray(floorNames) || floorNames.length === 0) {
+      return res.send({ Success: false, Message: "Invalid floor names." });
+    }
 
-      if (!Array.isArray(floorNames) || floorNames.length === 0) {
-        return res.send({
-          Success: false,
-          Message: 'Invalid floor names.'
-        });
-      }
+    /* ───────────────────────── DUPLICATE FLOOR CHECK ───────────────────────── */
+    const normalizedFloors = floorNames.map(name => name.trim().toLowerCase());
+    const uniqueFloors = new Set(normalizedFloors);
+    if (uniqueFloors.size !== normalizedFloors.length) {
+      return res.send({ Success: false, Message: "Floor names must be unique." });
+    }
 
-      /* ───────────────────────── DUPLICATE FLOOR CHECK ───────────────────────── */
-      const normalizedFloors = floorNames.map(name =>
-        name.trim().toLowerCase()
+    /* ───────────────────────── PLAN LIMITS ───────────────────────── */
+    const premiumCheck = checkPremiumSettings(USER.premium);
+    const maxFloors = premiumCheck.Message.floors;
+    const maxBuildings = premiumCheck.Message.buildings;
+
+    if (floorNames.length > maxFloors) {
+      return res.send({ Success: false, Message: `Your plan allows up to ${maxFloors} floors.` });
+    }
+
+    if (USER.Buildings.length >= maxBuildings) {
+      return res.send({ Success: false, Message: `Your plan allows up to ${maxBuildings} buildings.` });
+    }
+
+    /* ───────────────────────── FILE VALIDATION ───────────────────────── */
+    const files = req.files || [];
+    if (files.length > floorNames.length) {
+      return res.send({ Success: false, Message: "Too many map files uploaded." });
+    }
+
+    /* ───────────────────────── GENERATE BUILDING ID ───────────────────────── */
+    const buildingId = new mongoose.Types.ObjectId();
+
+    /* ───────────────────────── MAP + QR GENERATION ───────────────────────── */
+    const MAPS = [];
+
+    for (let i = 0; i < floorNames.length; i++) {
+      const floorName = floorNames[i].trim();
+      const file = files[i]?.path || null;
+
+      const qrCode = await QRCode.toDataURL(
+        `https://www.alertup.world/building/${buildingId}/${encodeURIComponent(floorName)}`
       );
 
-      const uniqueFloors = new Set(normalizedFloors);
-      if (uniqueFloors.size !== normalizedFloors.length) {
-        return res.send({
-          Success: false,
-          Message: 'Floor names must be unique.'
-        });
-      }
-
-      /* ───────────────────────── PLAN LIMITS ───────────────────────── */
-      const premiumCheck = checkPremiumSettings(USER.premium);
-      const maxFloors = premiumCheck.Message.floors;
-      const maxBuildings = premiumCheck.Message.buildings;
-
-      if (floorNames.length > maxFloors) {
-        return res.send({
-          Success: false,
-          Message: `Your plan allows up to ${maxFloors} floors.`
-        });
-      }
-
-      if (USER.Buildings.length >= maxBuildings) {
-        return res.send({
-          Success: false,
-          Message: `Your plan allows up to ${maxBuildings} buildings.`
-        });
-      }
-
-      /* ───────────────────────── FILE VALIDATION ───────────────────────── */
-      const files = req.files || [];
-
-      if (files.length > floorNames.length) {
-        return res.send({
-          Success: false,
-          Message: 'Too many map files uploaded.'
-        });
-      }
-
-      /* ───────────────────────── MAP + QR GENERATION ───────────────────────── */
-      const MAPS = [];
-
-      for (let i = 0; i < floorNames.length; i++) {
-        const floorName = floorNames[i];
-        const file = files[i]?.path || null;
-
-        const qrCode = await QRCode.toDataURL(
-          `https://www.alertup.world/building/${encodeURIComponent(
-            buildingName
-          )}/${encodeURIComponent(floorName)}`
-        );
-
-        MAPS.push({
-          floor: floorName,
-          map: file,
-          qrCode,
-          scanned: [],
-          createdAt: Date.now()
-        });
-      }
-
-      /* ───────────────────────── CREATE BUILDING ───────────────────────── */
-      const NEW_BUILDING = new BUILDINGS({
-        buildingName: buildingName.trim(),
-        owner: USER._id,
-        floors: floorNames.length,
-        maps: MAPS,
-        globalScans: [],
-        isDeactivated: false,
-        updatedAt: Date.now()
-      });
-
-      await NEW_BUILDING.save();
-
-      /* ───────────────────────── UPDATE USER ───────────────────────── */
-      await USERS.findByIdAndUpdate(USER._id, {
-        $push: { Buildings: NEW_BUILDING._id }
-      });
-
-      return res.send({
-        Success: true,
-        Message: 'Building created successfully.',
-        buildingID: NEW_BUILDING._id
-      });
-
-    } catch (error) {
-      console.error(error);
-      return res.send({
-        Success: false,
-        Message: 'Server error.'
+      MAPS.push({
+        floor: floorName,
+        map: file,
+        qrCode,
+        scanned: [],
+        createdAt: Date.now()
       });
     }
+
+    /* ───────────────────────── CREATE BUILDING ───────────────────────── */
+    const NEW_BUILDING = new BUILDINGS({
+      _id: buildingId,
+      buildingName: buildingName.trim(),
+      owner: USER._id,
+      floors: floorNames.length,
+      maps: MAPS,
+      globalScans: [],
+      isDeactivated: false,
+      updatedAt: Date.now()
+    });
+
+    await NEW_BUILDING.save();
+
+    /* ───────────────────────── UPDATE USER ───────────────────────── */
+    await USERS.findByIdAndUpdate(USER._id, { $push: { Buildings: NEW_BUILDING._id } });
+
+    return res.send({
+      Success: true,
+      Message: "Building created successfully.",
+      buildingID: NEW_BUILDING._id
+    });
+  } catch (error) {
+    console.error(error);
+    return res.send({ Success: false, Message: "Server error." });
   }
-);
+});
 
 
 
