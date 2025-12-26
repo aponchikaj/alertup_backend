@@ -3,10 +3,10 @@ const router = express.Router()
 
 router.get('/api/connect',(req,res)=>{
     try{
-        return {Success:true,Message:"Connected!"}
+        return res.send({Success:true,Message:'Connected.'})
     }catch{
-        return {Success:false,Message:"Something went wrong."}
+        return res.send({Success:false,Message:"Something went wrong."})
     }
 })
 
-module.exports = router
+export default router;

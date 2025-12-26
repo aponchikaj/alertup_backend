@@ -15,16 +15,14 @@ import dashboardRoutes from './src/routes/dashboard/dashboard.js'
 import premiumRoutes from './src/routes/premium/premium.js'
 import settingsRoutes from './src/routes/settings/settings.js'
 import userRoutes from './src/routes/user/user.js'
+import connectRouter from './src/routes/connect/connect.js'
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cparser())
-const allowedOrigins = [
-  'http://localhost:5173',            // Localhost        // Your LAN IP
-];
-
 app.use(cors({
+  origin:'http://localhost:5173',
   credentials: true
 }));
 app.use(bparser.json())
@@ -39,6 +37,7 @@ app.use(dashboardRoutes)
 app.use(premiumRoutes)
 app.use(settingsRoutes)
 app.use(userRoutes)
+app.use(connectRouter)
 
 mongoose.connect(process.env.MONGO_STRING).then(()=>{
     app.listen(PORT,()=>console.log("Server is Running."))
