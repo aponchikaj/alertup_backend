@@ -81,6 +81,11 @@ router.post('/api/auth/register', async (req, res) => {
     // `x-forwarded-proto` are reliable behind proxies (Vercel/Render).
     const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
 
+    // Detect Safari/iOS for special handling
+    const userAgent = req.headers['user-agent'] || '';
+    const isSafari = /Safari/i.test(userAgent) && !/Chrome/i.test(userAgent);
+    const isIOS = /iPhone|iPad|iPod/i.test(userAgent);
+
     const cookieOptions = {
       httpOnly: true,
       secure: reqIsSecure,
@@ -88,13 +93,23 @@ router.post('/api/auth/register', async (req, res) => {
       path: '/', // Ensure cookie is available across all paths
     };
 
-    // Use SameSite=None only when cookie is Secure (required by browsers for cross-site cookies)
-    cookieOptions.sameSite = reqIsSecure ? 'None' : 'Lax';
+    // Safari/iOS requires SameSite=None with Secure for cross-site cookies
+    // For same-site, we can use Lax which works better with Safari
+    if (reqIsSecure) {
+      cookieOptions.sameSite = 'None';
+    } else {
+      cookieOptions.sameSite = 'Lax';
+    }
 
     res.cookie('userToken', userToken, cookieOptions);
 
-
-    res.send({ Success: true, Message: "Registered successfully." });
+    // For Safari/iOS compatibility, also return token in response
+    // Frontend can store in localStorage as fallback
+    res.send({ 
+      Success: true, 
+      Message: "Registered successfully.",
+      token: (isSafari || isIOS) ? userToken : undefined // Only send token for Safari/iOS as fallback
+    });
     try {
       await sendMail(
         email,
@@ -142,13 +157,24 @@ router.post('/api/auth/login',async(req,res)=>{
 
     const reqIsSecure2 = req.secure || req.headers['x-forwarded-proto'] === 'https';
 
+    // Detect Safari/iOS for special handling
+    const userAgent = req.headers['user-agent'] || '';
+    const isSafari = /Safari/i.test(userAgent) && !/Chrome/i.test(userAgent);
+    const isIOS = /iPhone|iPad|iPod/i.test(userAgent);
+
     const cookieOptions2 = {
       httpOnly: true,
       secure: reqIsSecure2,
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
       path: '/', // Ensure cookie is available across all paths
     };
-    cookieOptions2.sameSite = reqIsSecure2 ? 'None' : 'Lax';
+    
+    // Safari/iOS requires SameSite=None with Secure for cross-site cookies
+    if (reqIsSecure2) {
+      cookieOptions2.sameSite = 'None';
+    } else {
+      cookieOptions2.sameSite = 'Lax';
+    }
 
     res.cookie('userToken', userToken, cookieOptions2);
 
@@ -158,7 +184,13 @@ router.post('/api/auth/login',async(req,res)=>{
       console.error("MAIL ERROR:", err);
     }
 
-    return res.send({Success:true,Message:"Logged in."})
+    // For Safari/iOS compatibility, also return token in response
+    // Frontend can store in localStorage as fallback
+    return res.send({
+      Success: true,
+      Message: "Logged in.",
+      token: (isSafari || isIOS) ? userToken : undefined // Only send token for Safari/iOS as fallback
+    })
   }catch{
     return res.send({Success:false,Message:"Server error."})
   }

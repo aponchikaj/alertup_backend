@@ -2,7 +2,16 @@ import jwt from 'jsonwebtoken'
 import USERS from '../models/user.model.js'
 
 const whoami = async(req,res,next)=>{
-    const userToken = req.cookies['userToken']
+    // Try to get token from cookie first, then from Authorization header (Safari/iOS fallback)
+    let userToken = req.cookies['userToken']
+    
+    // If no cookie, check Authorization header (for Safari/iOS localStorage fallback)
+    if(!userToken){
+        const authHeader = req.headers['authorization'];
+        if(authHeader && authHeader.startsWith('Bearer ')){
+            userToken = authHeader.substring(7); // Remove 'Bearer ' prefix
+        }
+    }
 
     if(!userToken){
         return res.send({Success:false,Message:"no user token."})
