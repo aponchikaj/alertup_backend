@@ -1,24 +1,39 @@
 import sgMail from "@sendgrid/mail";
 import 'dotenv/config';
 
-sgMail.setApiKey(process.env.SENDGRID_API_KEY); // Make sure your API key is in .env
+// Set SendGrid API key
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
-const sendMail = async (to, subject, text,) => {
-  if (!to || !subject ||!text) {
-    throw new Error("Missing required email fields");
+/**
+ * sendMail - sends an email using SendGrid API
+ * 
+ * @param {string} to - recipient email
+ * @param {string} subject - email subject
+ * @param {string} text - plain text body
+ * @param {string} html - HTML body (optional)
+ * @param {string} replyTo - reply-to email (optional)
+ * @returns {Promise<{Success: boolean, Message: string}>}
+ */
+const sendMail = async (to, subject, text, replyTo = "lazaremirziashvili8@gmail.com") => {
+  if (!to || !subject || !text) {
+    return { Success: false, Message: "Missing required email fields" };
   }
 
   try {
-    await sgMail.send({
+    const msg = {
       to,
-      from: "your-email@example.com", // Verified sender in SendGrid
+      from: "lazaremirziashvili@alertup.world", // VERIFIED sender
       subject,
       text,
-    });
+    };
+
+    if (replyTo) msg.replyTo = replyTo;
+
+    await sgMail.send(msg);
     return { Success: true, Message: "Email sent successfully" };
   } catch (err) {
-    console.error("SendGrid error:", err);
-    return { Success: false, Message: err.message || "Failed to send email" };
+    console.error("SendGrid error:", err.response?.body || err.message);
+    return { Success: false, Message: err.response?.body?.errors?.[0]?.message || err.message };
   }
 };
 
