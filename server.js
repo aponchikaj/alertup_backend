@@ -30,6 +30,7 @@ const allowedOrigins = [
   "https://www.alertup.world",
   "https://alertup.vercel.app",
   "https://alertup-q512tp3my-aponchikajs-projects.vercel.app"
+  
 ];
 
 app.use(cors({
