@@ -72,74 +72,57 @@ const checkPassword = async(password)=>{
 
 router.post('/api/auth/register', async (req, res) => {
   try {
-    const {
-      username,
-      email,
-      password,
-      country,
-      countryCode,
-      phone
-    } = req.body;
+    const { username, email, password, country, countryCode, phone } = req.body;
 
     if (!username || !email || !password || !country || !countryCode) {
-      return res.send({
-        Success: false,
-        Message: "Missing required fields."
-      });
+      return res.status(400).json({ Success: false, Message: "Missing required fields." });
     }
 
     const usernameError = await checkUsername(username);
-    if (usernameError !== null) {
-      return res.send({ Success: false, Message: usernameError });
-    }
+    if (usernameError) return res.status(400).json({ Success: false, Message: usernameError });
 
-    const emailError = await checkEmail(email)
-    if(emailError !== null){
-      return res.send({ Success:false, Message:emailError })
-    }
+    const emailError = await checkEmail(email);
+    if (emailError) return res.status(400).json({ Success: false, Message: emailError });
 
-    const passwordError = await checkPassword(password)
-    if(passwordError !== null){
-      return res.send({ Success:false, Message:passwordError })
-    }
+    const passwordError = await checkPassword(password);
+    if (passwordError) return res.status(400).json({ Success: false, Message: passwordError });
 
-    const HashedPassword = await bcrypt.hash(password,10)
+    const hashedPassword = await bcrypt.hash(password, 10);
 
-    const userConfig = {
+    const newUser = await USERS.create({
       username,
-      password:HashedPassword,
+      password: hashedPassword,
       email,
-      phones:phone,
+      phones: phone,
       country,
       countryCode,
-      updatedAt:`${new Date().toISOString()}`
+      updatedAt: new Date().toISOString()
+    });
+
+    // send email safely
+    try {
+      await sendMail(email, "Welcome - AlertUp", `Hello ${username}, welcome!`);
+    } catch (mailErr) {
+      console.error("MAIL ERROR:", mailErr);
     }
 
-    const NewUser = await USERS(userConfig);
-    await NewUser.save()
-
-    await sendMail(email,"Welcome - AlertUp",`Hello ${username} it's good to see you. please verify your email to create and modify your new building's map. Thank you !`)
-
-    const userToken = await jwt.sign({userID:NewUser._id},process.env.JWT_SECRET,{
-      expiresIn:'7d'
-    })
+    const userToken = jwt.sign({ userID: newUser._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
     res.cookie('userToken', userToken, {
-      httpOnly: true,          // JS cannot read it
-      secure: true,            // MUST be true on HTTPS
-      sameSite: 'None',        // allow cross-site requests
-      maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+      httpOnly: true,
+      secure: true,
+      sameSite: 'None',
+      maxAge: 7 * 24 * 60 * 60 * 1000
     });
 
-    return res.send({Success:true,Message:"Registered."})
+    return res.json({ Success: true, Message: "Registered successfully." });
 
   } catch (err) {
-    return res.status(500).send({
-      Success: false,
-      Message: "Server error."
-    });
+    console.error("REGISTER ERROR:", err);
+    return res.status(500).json({ Success: false, Message: "Server error." });
   }
 });
+
 
 router.post('/api/auth/login',async(req,res)=>{
   const {user,password}=req.body
