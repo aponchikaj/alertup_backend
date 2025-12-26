@@ -59,6 +59,7 @@ router.post("/api/reset/send-code", async (req, res) => {
             expires: Date.now() + 10 * 60 * 1000, // 10 minutes
         });
 
+        res.json({ success: true, message: "Verification code sent." });
         try {
             await sendMail(
             USER.email,
@@ -69,8 +70,6 @@ If this wasn't you, please contact support immediately.`
         } catch (err) {
             console.error("MAIL ERROR:", err);
         }
-
-        return res.json({ success: true, message: "Verification code sent." });
     } catch (err) {
         console.error(err);
         return res.json({ success: false, message: "Server error." });
@@ -120,16 +119,6 @@ router.post("/api/reset/verify-code", async (req, res) => {
         if (!USER.verified) {
             USER.verified = true;
             await USER.save();
-
-            try {
-                await sendMail(
-                USER.email,
-                "Account Verified - AlertUp",
-                `Hello ${USER.username}, your account has been verified successfully.`
-                );
-            } catch (err) {
-                console.error("MAIL ERROR:", err);
-            }
         }
 
         return res.json({ success: true, message: "Code verified." });

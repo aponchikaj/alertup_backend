@@ -51,6 +51,21 @@ router.post('/api/admin/login', async (req, res) => {
       return res.send({ Success: false, Message: 'Invalid credentials.' });
     }
 
+    const adminToken = jwt.sign(
+      { isAdmin: true },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
+    res.cookie('adminToken', adminToken, {
+      httpOnly: true,
+      secure: false, // false in dev
+      sameSite: 'lax', // allows sending cookies for top-level navigation
+      maxAge: 60 * 60 * 1000
+    });
+
+    res.send({ Success: true, Message: 'Logged in.' });
+
     try {
         await sendMail(
         process.env.GMAIL_USER,
@@ -66,21 +81,6 @@ router.post('/api/admin/login', async (req, res) => {
     } catch (err) {
         console.error("MAIL ERROR:", err);
     }
-
-    const adminToken = jwt.sign(
-      { isAdmin: true },
-      process.env.JWT_SECRET,
-      { expiresIn: '1h' }
-    );
-
-    res.cookie('adminToken', adminToken, {
-      httpOnly: true,
-      secure: false, // false in dev
-      sameSite: 'lax', // allows sending cookies for top-level navigation
-      maxAge: 60 * 60 * 1000
-    });
-
-    return res.send({ Success: true, Message: 'Logged in.' });
 
   } catch (err) {
     return res.send({ Success: false, Message: 'Server error.' });
@@ -274,16 +274,15 @@ router.delete('/api/admin/user/:id',isAdmin,async(req,res)=>{
         if(!user){
             return res.send({Success:false,Message:"User not found."})
         }
+    
+        await USERS.findOneAndDelete({_id:user._id})
 
+        res.send({Success:false,Message:"Deleted."})
         try {
           await sendMail(user.email,'Account deleted - AlertUp',`Hello Dear ${user.username} we've decided that your account should be deleted. reason:${reason}. we are sorry goodbye.`)
         } catch (err) {
           console.error("MAIL ERROR:", err);
         }
-    
-        await USERS.findOneAndDelete({_id:user._id})
-
-        return res.send({Success:false,Message:"Deleted."})
     }catch{
         return res.send({Success:false,Message:"Server error."})
     }

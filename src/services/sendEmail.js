@@ -6,7 +6,8 @@ const transport = nodemailer.createTransport({
     auth:{
         user:process.env.GMAIL_USER,
         pass:process.env.GMAIL_PASS
-    }
+    },
+    connectionTimeout: 10000, 
 })
 
 const sendMail = async(to,subject,text)=>{

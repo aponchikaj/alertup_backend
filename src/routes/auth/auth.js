@@ -70,17 +70,6 @@ router.post('/api/auth/register', async (req, res) => {
 
     await newUser.save();
 
-    // Send welcome email but don't fail registration if email fails
-    try {
-      await sendMail(
-        email,
-        "Welcome - AlertUp",
-        `Hello ${username}, welcome! Please verify your email to use AlertUp features.`
-      );
-    } catch (err) {
-      console.error("MAIL ERROR:", err);
-    }
-
     const userToken = jwt.sign({ userID: newUser._id }, process.env.JWT_SECRET, {
       expiresIn: '7d',
     });
@@ -92,7 +81,16 @@ router.post('/api/auth/register', async (req, res) => {
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
-    return res.send({ Success: true, Message: "Registered successfully." });
+    res.send({ Success: true, Message: "Registered successfully." });
+    try {
+      await sendMail(
+        email,
+        "Welcome - AlertUp",
+        `Hello ${username}, welcome! Please verify your email to use AlertUp features.`
+      );
+    } catch (err) {
+      console.error("MAIL ERROR:", err);
+    }
   } catch (err) {
     console.error("REGISTER ERROR:", err);
     return res.send({ Success: false, Message: "Server error." });
@@ -125,12 +123,6 @@ router.post('/api/auth/login',async(req,res)=>{
       return res.send({Success:false,Message:"Invalid credentials."})
     }
 
-    try {
-      await sendMail(USER.email,"New Login - AlertUp",`Hey someone has logged into your account. was that you? contact us if it wasn't you.`)
-    } catch (err) {
-      console.error("MAIL ERROR:", err);
-    }
-
     const userToken = await jwt.sign({userID:USER._id},process.env.JWT_SECRET,{
       expiresIn:'7d'
     })
@@ -142,7 +134,12 @@ router.post('/api/auth/login',async(req,res)=>{
       maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
     });
 
-    return res.send({Success:true,Message:"Logged in."})
+    res.send({Success:true,Message:"Logged in."})
+    try {
+      await sendMail(USER.email,"New Login - AlertUp",`Hey someone has logged into your account. was that you? contact us if it wasn't you.`)
+    } catch (err) {
+      console.error("MAIL ERROR:", err);
+    }
   }catch{
     return res.send({Success:false,Message:"Server error."})
   }

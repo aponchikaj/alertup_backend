@@ -82,13 +82,12 @@ router.put('/api/settings/changePassword', whoami, async (req, res) => {
     const hashed = await bcrypt.hash(newPassword, 10);
     await USERS.findByIdAndUpdate(user._id, { password: hashed });
 
+    res.send({ Success: true, Message: "Password updated successfully." });
     try {
         await sendMail(user.email, 'Password Changed - AlertUp', `Hello ${user.username}, your password has been changed successfully.`);
     } catch (err) {
         console.error("MAIL ERROR:", err);
     }
-
-    return res.send({ Success: true, Message: "Password updated successfully." });
   } catch {
     return res.send({ Success: false, Message: "Server error." });
   }
@@ -117,13 +116,13 @@ router.post('/api/settings/email', whoami, async (req, res) => {
     });
 
     await verification.save();
+
+    res.send({ Success: true, Message: "Verification code sent." });
     try {
         await sendMail(newEmail, "Verify new email - AlertUp", `Your verification code is: ${code}`);
     } catch (err) {
         console.error("MAIL ERROR:", err);
     }
-
-    return res.send({ Success: true, Message: "Verification code sent." });
   } catch {
     return res.send({ Success: false, Message: "Server error." });
   }
@@ -151,13 +150,13 @@ router.put('/api/settings/email', whoami, async (req, res) => {
     await USERS.findByIdAndUpdate(user._id, { email: newEmail });
     await VERIFICATIONS.findByIdAndDelete(verification._id);
 
+
+    res.send({ Success: true, Message: "Email updated successfully." });
     try {
         await sendMail(newEmail, 'Email Updated - AlertUp', `Your email has been updated successfully.`);
     } catch (err) {
         console.error("MAIL ERROR:", err);
     }
-
-    return res.send({ Success: true, Message: "Email updated successfully." });
   } catch {
     return res.send({ Success: false, Message: "Server error." });
   }
@@ -179,13 +178,13 @@ router.post('/api/settings/verify', whoami, async (req, res) => {
     });
 
     await verification.save();
+
+    res.send({ Success: true, Message: "Verification code sent." });
     try {
         await sendMail(user.email, 'Verify Account - AlertUp', `Your account verification code is: ${code}`);
     } catch (err) {
         console.error("MAIL ERROR:", err);
     }
-
-    return res.send({ Success: true, Message: "Verification code sent." });
   } catch {
     return res.send({ Success: false, Message: "Server error." });
   }
@@ -213,13 +212,12 @@ router.put('/api/settings/verify', whoami, async (req, res) => {
     await USERS.findByIdAndUpdate(user._id, { verified: true });
     await VERIFICATIONS.findByIdAndDelete(verification._id);
 
+    res.send({ Success: true, Message: "Account verified." });
     try {
       await sendMail(user.email, "Account Verified - AlertUp", "Your account has been successfully verified.");
     } catch (err) {
       console.error("MAIL ERROR:", err);
     }
-
-    return res.send({ Success: true, Message: "Account verified." });
   } catch {
     return res.send({ Success: false, Message: "Server error." });
   }
@@ -239,13 +237,12 @@ router.post('/api/settings/account', whoami, async (req, res) => {
     await VERIFICATIONS.deleteMany({ verificationBy: user._id });
     res.clearCookie('userToken');
 
+    res.send({ Success: true, Message: "Account deleted." });
     try {
         await sendMail(user.email, 'Goodbye - AlertUp', `Goodbye ${user.username}, your account has been deleted.`);
     } catch (err) {
         console.error("MAIL ERROR:", err);
     }
-
-    return res.send({ Success: true, Message: "Account deleted." });
   } catch {
     return res.send({ Success: false, Message: "Server error." });
   }
