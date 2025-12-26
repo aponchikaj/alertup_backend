@@ -1,30 +1,25 @@
-import nodemailer from 'nodemailer';
+import sgMail from "@sendgrid/mail";
 import 'dotenv/config';
 
-const transport = nodemailer.createTransport({
-  host: "smtp.sendgrid.net",
-  port: 465,
-  secure: true,
-  auth: {
-    user: "apikey", // must literally be "apikey"
-    pass: process.env.SENDGRID_API_KEY
-  },
-  tls: {
-    rejectUnauthorized: false // sometimes required on cloud hosts
-  },
-  connectionTimeout: 10000 // 10 seconds
-});
+sgMail.setApiKey(process.env.SENDGRID_API_KEY); // Make sure your API key is in .env
 
-const sendMail = async (to, subject, text) => {
+const sendMail = async (to, subject, text,) => {
+  if (!to || !subject ||!text) {
+    throw new Error("Missing required email fields");
+  }
 
-  await transport.sendMail({
-    from: "lazaremirziashvili@alertup.world", // use your verified sender
-    to,
-    subject,
-    text,
-  });
-
-  return true;
+  try {
+    await sgMail.send({
+      to,
+      from: "your-email@example.com", // Verified sender in SendGrid
+      subject,
+      text,
+    });
+    return { Success: true, Message: "Email sent successfully" };
+  } catch (err) {
+    console.error("SendGrid error:", err);
+    return { Success: false, Message: err.message || "Failed to send email" };
+  }
 };
 
 export default sendMail;
