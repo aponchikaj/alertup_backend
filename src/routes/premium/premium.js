@@ -63,23 +63,25 @@ router.post("/api/premium/checkout", whoami, async (req, res) => {
     const { option } = req.body;
     if (!isValidPlan(option)) return res.send({ Success: false, Message: "Invalid plan" });
 
-    const price = PREMIUM_PLANS[option].price;
     const request = new paypal.orders.OrdersCreateRequest();
     request.prefer("return=representation");
     request.requestBody({
       intent: "CAPTURE",
-      purchase_units: [{ description: `Premium-${option}`, amount: { currency_code: "USD", value: price.toFixed(2) } }],
+      purchase_units: [{
+        description: `Premium-${option}`,
+        amount: { currency_code: "USD", value: PREMIUM_PLANS[option].price.toFixed(2) }
+      }]
     });
 
     const order = await paypalClient.execute(request);
     res.send({ Success: true, Message: { orderID: order.result.id } });
   } catch (err) {
-    console.error(err);
+    console.error("Checkout error:", err);
     res.send({ Success: false, Message: "Checkout failed" });
   }
 });
 
-// 4️⃣ Capture payment
+// 3️⃣ Capture payment
 router.post("/api/premium/capture", whoami, async (req, res) => {
   try {
     const { orderID, option } = req.body;
@@ -89,10 +91,12 @@ router.post("/api/premium/capture", whoami, async (req, res) => {
     captureRequest.requestBody({});
     const capture = await paypalClient.execute(captureRequest);
 
-    if (capture.result.status !== "COMPLETED") return res.send({ Success: false, Message: "Payment not completed" });
+    if (capture.result.status !== "COMPLETED")
+      return res.send({ Success: false, Message: "Payment not completed" });
 
     const amount = Number(capture.result.purchase_units[0].payments.captures[0].amount.value);
-    if (amount !== PREMIUM_PLANS[option].price) return res.send({ Success: false, Message: "Price mismatch" });
+    if (amount !== PREMIUM_PLANS[option].price)
+      return res.send({ Success: false, Message: "Price mismatch" });
 
     const user = await USERS.findById(req.user._id);
     if (!user) return res.send({ Success: false, Message: "User not found" });
@@ -103,7 +107,7 @@ router.post("/api/premium/capture", whoami, async (req, res) => {
 
     res.send({ Success: true, Message: "Premium activated" });
   } catch (err) {
-    console.error(err);
+    console.error("Capture error:", err);
     res.send({ Success: false, Message: "Capture failed" });
   }
 });
