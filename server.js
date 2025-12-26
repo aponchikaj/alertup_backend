@@ -28,7 +28,8 @@ app.set("trust proxy", 1);
 const allowedOrigins = [
   "https://alertup.world",
   "https://www.alertup.world",
-  "https://alertup.vercel.app"
+  "https://alertup.vercel.app",
+  "https://alertup-q512tp3my-aponchikajs-projects.vercel.app"
 ];
 
 app.use(cors({
