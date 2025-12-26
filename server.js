@@ -16,6 +16,7 @@ import premiumRoutes from './src/routes/premium/premium.js'
 import settingsRoutes from './src/routes/settings/settings.js'
 import userRoutes from './src/routes/user/user.js'
 import connectRouter from './src/routes/connect/connect.js'
+import debugRouter from './src/routes/debug.js'
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -24,7 +25,15 @@ app.use(cparser())
 
 app.set("trust proxy", 1);
 
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || "").split(",").filter(Boolean);
+const envAllowed = (process.env.ALLOWED_ORIGINS || "").split(",").filter(Boolean);
+const defaultAllowed = [
+  "https://alertup.world",
+  "https://www.alertup.world",
+  "https://alertup.vercel.app",
+];
+
+// Merge env list with defaults (env can override/append)
+const allowedOrigins = Array.from(new Set([...defaultAllowed, ...envAllowed]));
 
 const isAllowAll = process.env.ALLOW_ALL_ORIGINS === 'true';
 
@@ -67,6 +76,7 @@ app.use(premiumRoutes)
 app.use(settingsRoutes)
 app.use(userRoutes)
 app.use(connectRouter)
+app.use(debugRouter)
 
 mongoose.connect(process.env.MONGO_STRING).then(()=>{
     app.listen(PORT,()=>console.log("Server is Running."))
