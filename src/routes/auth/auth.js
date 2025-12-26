@@ -124,9 +124,12 @@ router.post('/api/auth/register', async (req, res) => {
       expiresIn:'7d'
     })
 
-    res.cookie('userToken',userToken,{
-      maxAge:7 * 24 * 60 * 60 * 1000 
-    })
+    res.cookie('userToken', userToken, {
+      httpOnly: true,           // safe: JS cannot read
+      secure: false,            // true in production HTTPS, false for local dev / LAN IP
+      sameSite: 'lax',          // 'none' if using cross-origin HTTPS, 'lax' works for SPA LAN
+      maxAge: 7 * 24 * 60 * 60 * 1000
+    }); 
 
     return res.send({Success:true,Message:"Registered."})
 
@@ -169,9 +172,12 @@ router.post('/api/auth/login',async(req,res)=>{
       expiresIn:'7d'
     })
 
-    res.cookie('userToken',userToken,{
-      maxAge:7 * 24 * 60 * 60 * 1000 
-    })
+    res.cookie('userToken', userToken, {
+      httpOnly: true,           // safe: JS cannot read
+      secure: false,            // true in production HTTPS, false for local dev / LAN IP
+      sameSite: 'lax',          // 'none' if using cross-origin HTTPS, 'lax' works for SPA LAN
+      maxAge: 7 * 24 * 60 * 60 * 1000
+    });
 
     return res.send({Success:true,Message:"Logged in."})
   }catch{
