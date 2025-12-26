@@ -8,6 +8,8 @@ import { Filter } from 'bad-words';
 import USERS from '../../models/user.model.js';
 import sendMail from '../../services/sendEmail.js';
 
+const isProd = process.env.NODE_ENV === 'production';
+
 const checkUsername = async (username) => {
   if (!username) return "Invalid username.";
   if (username.length < 4 || username.length > 24) return "Username must be from 4 to 24 characters.";
@@ -76,7 +78,7 @@ router.post('/api/auth/register', async (req, res) => {
 
     res.cookie('userToken', userToken, {
       httpOnly: true,
-      secure: true,
+      secure: isProd,
       sameSite: 'None',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });
@@ -130,7 +132,7 @@ router.post('/api/auth/login',async(req,res)=>{
 
     res.cookie('userToken', userToken, {
       httpOnly: true,
-      secure: true,
+      secure: isProd,
       sameSite: 'None',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });

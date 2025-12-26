@@ -75,11 +75,13 @@ router.get("/api/premium/plans", (_, res) => {
 /* ---------------------------------- */
 /* CREATE PayPal Order */
 /* ---------------------------------- */
+const requireVerified = process.env.NODE_ENV === 'production';
+
 router.post("/api/premium/checkout", whoami, async (req, res) => {
   try {
     const { option } = req.body;
 
-    if (!req.user.verified)
+    if (requireVerified && !req.user.verified)
       return res.send({ Success: false, Message: "Account not verified" });
 
     if (!isValidPlan(option))
@@ -232,3 +234,27 @@ router.post(
 );
 
 export default router;
+
+/* ---------------------------------- */
+/* Test-only: activate premium for current user (non-production only) */
+/* ---------------------------------- */
+router.post('/api/premium/test-activate', whoami, async (req, res) => {
+  if (process.env.NODE_ENV === 'production') return res.sendStatus(404);
+
+  try {
+    const { option } = req.body;
+    if (!isValidPlan(option)) return res.send({ Success: false, Message: 'Invalid plan' });
+
+    const user = await USERS.findById(req.user._id);
+    if (!user) return res.send({ Success: false, Message: 'User not found' });
+
+    user.premium = { hasPremium: true, premiumType: option, to: addDays(30) };
+    user.transactions.push({ orderID: `TEST-${Date.now()}`, plan: option, amount: PREMIUM_PLANS[option].price, date: new Date() });
+    await user.save();
+
+    res.send({ Success: true, Message: 'Test premium activated' });
+  } catch (err) {
+    console.error(err);
+    res.send({ Success: false, Message: 'Test activation failed' });
+  }
+});

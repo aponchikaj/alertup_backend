@@ -35,7 +35,12 @@ const allowedOrigins = [
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin) return callback(null, true); // allow non-browser requests
-    if (allowedOrigins.includes(origin) || origin.endsWith(".vercel.app")) return callback(null, true); // allow previews
+    // allow explicit whitelist, vercel previews, and onrender deployments
+    if (
+      allowedOrigins.includes(origin) ||
+      origin.endsWith('.vercel.app') ||
+      origin.endsWith('.onrender.com')
+    ) return callback(null, true);
     return callback(new Error(`CORS error: ${origin} not allowed`));
   },
   credentials: true // important for cookies
