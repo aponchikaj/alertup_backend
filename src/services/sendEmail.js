@@ -3,8 +3,8 @@ import 'dotenv/config';
 
 const transport = nodemailer.createTransport({
   host: "smtp.sendgrid.net",
-  port: 587,
-  secure: false, // TLS is used automatically with STARTTLS
+  port: 465,
+  secure: true,
   auth: {
     user: "apikey", // must literally be "apikey"
     pass: process.env.SENDGRID_API_KEY
