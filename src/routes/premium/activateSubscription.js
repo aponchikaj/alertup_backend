@@ -1,6 +1,7 @@
 import express from "express";
 import whoami from "../../middlewares/whoami.js";
 import USERS from "../../models/user.model.js";
+import BUILDINGS from "../../models/building.model.js";
 
 const router = express.Router();
 
@@ -22,11 +23,15 @@ router.post("/api/premium/activate-subscription", whoami, async (req, res) => {
     const planName = PREMIUM_PLANS[planId];
     if (!planName) return res.status(400).send({ Success: false, Message: "Invalid plan ID" });
 
+    // Check if user previously had premium
+    const wasPremium = user.premium?.hasPremium || false;
+
     // Save subscription info to user
     user.premium = {
       hasPremium: true,
       premiumType: planName,
       subscriptionId: subscriptionID,
+      from: new Date(),
       to: null // recurring, so no expiration date for now
     };
 
@@ -38,6 +43,15 @@ router.post("/api/premium/activate-subscription", whoami, async (req, res) => {
     });
 
     await user.save();
+
+    // Reactivate all deactivated buildings if user just purchased premium
+    if (!wasPremium) {
+      await BUILDINGS.updateMany(
+        { owner: user._id, isDeactivated: true },
+        { $set: { isDeactivated: false } }
+      );
+    }
+
     res.send({ Success: true, Message: "Subscription activated" });
   } catch (err) {
     console.error("Activate subscription error:", err);

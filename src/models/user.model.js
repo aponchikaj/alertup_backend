@@ -80,6 +80,10 @@ const USER_SCHEMA = new mongoose.Schema({
             type:String,
             default:''
         },
+        subscriptionId:{
+            type:String,
+            default:null
+        },
         from:{
             type:Date,
         },

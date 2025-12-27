@@ -17,6 +17,7 @@ import settingsRoutes from './src/routes/settings/settings.js'
 import userRoutes from './src/routes/user/user.js'
 import connectRouter from './src/routes/connect/connect.js'
 import debugRouter from './src/routes/debug.js'
+import { checkPremiumStatus } from './src/services/premiumCheck.js'
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -117,6 +118,33 @@ const startServer = async () => {
     app.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);
       console.log(`📍 Health check: http://localhost:${PORT}/health`);
+      
+      // Start premium status check job (runs daily at midnight)
+      // Check every 24 hours (86400000 ms)
+      const runPremiumCheck = () => {
+        const now = new Date();
+        const hours = now.getHours();
+        const minutes = now.getMinutes();
+        
+        // Run at midnight (00:00) or immediately if it's close to midnight
+        if (hours === 0 && minutes === 0) {
+          checkPremiumStatus();
+        }
+      };
+      
+      // Run check immediately on startup (for testing/debugging)
+      // In production, you might want to comment this out
+      // checkPremiumStatus();
+      
+      // Schedule daily check (every hour, but only runs at midnight)
+      setInterval(runPremiumCheck, 60 * 60 * 1000); // Check every hour
+      
+      // Also run a check every 24 hours as a fallback
+      setInterval(() => {
+        checkPremiumStatus();
+      }, 24 * 60 * 60 * 1000); // Every 24 hours
+      
+      console.log('✅ Premium status check job scheduled (runs daily)');
     });
   } catch (error) {
     console.error('❌ MongoDB connection error:', error.message);
