@@ -1,7 +1,13 @@
 import jwt from 'jsonwebtoken'
 import USERS from '../models/user.model.js'
+import mongoose from 'mongoose'
 
 const whoami = async(req,res,next)=>{
+    // Check if database is connected
+    if (mongoose.connection.readyState !== 1) {
+        return res.status(503).send({Success:false,Message:"Database connection unavailable. Please try again later."})
+    }
+
     // Try to get token from cookie first, then from Authorization header (Safari/iOS fallback)
     let userToken = req.cookies['userToken']
     
@@ -42,7 +48,8 @@ const whoami = async(req,res,next)=>{
 
         req.user = user;
         next()
-    }catch{
+    }catch(err){
+        console.error('Whoami middleware error:', err);
         return res.send({Success:false,Message:"Server Error."})
     }
 }

@@ -84,8 +84,51 @@ app.use(userRoutes)
 app.use(connectRouter)
 app.use(debugRouter)
 
-mongoose.connect(process.env.MONGO_STRING).then(()=>{
-    app.listen(PORT,()=>console.log("Server is Running."))
-}).catch((e)=>{
-    console.error('Error: ' + e)
-})
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok', 
+    message: 'Server is running',
+    timestamp: new Date().toISOString(),
+    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
+  });
+});
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.status(200).json({ 
+    message: 'AlertUp API Server',
+    status: 'running',
+    version: '1.0.0'
+  });
+});
+
+// Connect to MongoDB and start server
+const startServer = async () => {
+  try {
+    if (!process.env.MONGO_STRING) {
+      console.error('❌ MONGO_STRING environment variable is not set');
+      console.log('⚠️  Starting server without database connection...');
+    } else {
+      await mongoose.connect(process.env.MONGO_STRING);
+      console.log('✅ MongoDB connected successfully');
+    }
+    
+    app.listen(PORT, () => {
+      console.log(`🚀 Server is running on port ${PORT}`);
+      console.log(`📍 Health check: http://localhost:${PORT}/health`);
+    });
+  } catch (error) {
+    console.error('❌ MongoDB connection error:', error.message);
+    console.log('⚠️  Starting server anyway...');
+    
+    // Start server even if MongoDB fails (for debugging)
+    app.listen(PORT, () => {
+      console.log(`🚀 Server is running on port ${PORT} (without database)`);
+      console.log(`📍 Health check: http://localhost:${PORT}/health`);
+      console.log('⚠️  Some features may not work without database connection');
+    });
+  }
+};
+
+startServer();
