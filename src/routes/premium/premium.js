@@ -12,8 +12,16 @@ dotenv.config();
 const router = express.Router();
 
 /* ---------------- PayPal Client ---------------- */
-// Use sandbox environment by default unless PAYPAL_SANDBOX is explicitly set to 'false'
-const useSandboxEnv = process.env.PAYPAL_SANDBOX !== 'false';
+// Determine sandbox vs live. Respect PAYPAL_ENV (live/sandbox) first, then PAYPAL_SANDBOX.
+const useSandboxEnv = (() => {
+  if (process.env.PAYPAL_ENV) {
+    const e = process.env.PAYPAL_ENV.toLowerCase();
+    if (e === 'live') return false;
+    if (e === 'sandbox') return true;
+  }
+  return process.env.PAYPAL_SANDBOX !== 'false';
+})();
+
 const paypalEnv = useSandboxEnv
   ? new paypal.core.SandboxEnvironment(process.env.PAYPAL_CLIENT_ID, process.env.PAYPAL_CLIENT_SECRET)
   : new paypal.core.LiveEnvironment(process.env.PAYPAL_CLIENT_ID, process.env.PAYPAL_CLIENT_SECRET);

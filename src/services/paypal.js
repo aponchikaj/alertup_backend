@@ -3,13 +3,22 @@ import qs from "qs";
 
 export const getPayPalAccessToken = async () => {
   try {
-    // Check if using sandbox or live environment
-    // Default to sandbox if PAYPAL_SANDBOX is not explicitly set to 'false'
-    const useSandbox = process.env.PAYPAL_SANDBOX !== 'false';
-    const apiUrl = useSandbox 
+    // Determine sandbox vs live. Respect PAYPAL_ENV (live/sandbox) first, then PAYPAL_SANDBOX.
+    const useSandbox = (() => {
+      if (process.env.PAYPAL_ENV) {
+        const e = process.env.PAYPAL_ENV.toLowerCase();
+        if (e === 'live') return false;
+        if (e === 'sandbox') return true;
+      }
+      return process.env.PAYPAL_SANDBOX !== 'false';
+    })();
+
+    const apiUrl = useSandbox
       ? "https://api-m.sandbox.paypal.com/v1/oauth2/token"
       : "https://api-m.paypal.com/v1/oauth2/token";
-    
+
+    console.log(`PAYPAL_ENV: ${process.env.PAYPAL_ENV || 'not set'}`);
+    console.log(`PAYPAL_SANDBOX: ${process.env.PAYPAL_SANDBOX || 'not set'}`);
     console.log(`Using PayPal ${useSandbox ? 'SANDBOX' : 'LIVE'} environment`);
     console.log(`API URL: ${apiUrl}`);
 
