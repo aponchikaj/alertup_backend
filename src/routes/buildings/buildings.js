@@ -164,6 +164,7 @@ router.put('/api/building/:id', whoami, upload.array('maps'), async (req, res) =
 
     await BUILDINGS.findByIdAndUpdate(building._id, {
       buildingName,
+      floors: floorNames.length,
       maps: MAPS,
       updatedAt: Date.now()
     });
@@ -242,8 +243,7 @@ router.get('/api/debug/user-buildings', whoami, async (req, res) => {
 });
 /* ---------------- DELETE BUILDING ---------------- */
 router.delete('/api/building/delete/:buildingID', whoami, async (req, res) => {
-  const { buildingID } = req.params;  // From URL param, not body
-  console.log('Delete request for buildingID:', buildingID);
+  const { buildingID } = req.params;
   
   // Validate ObjectId format first
   if (!mongoose.Types.ObjectId.isValid(buildingID)) {
@@ -253,38 +253,29 @@ router.delete('/api/building/delete/:buildingID', whoami, async (req, res) => {
     });
   }
 
-  const buildingObjectId = new mongoose.Types.ObjectId(buildingID);
-
   try {
-    const deletedBuilding = await BUILDINGS.findOneAndDelete({
-      _id: buildingObjectId,
+    // First, find the building to ensure it exists and belongs to the user
+    const building = await BUILDINGS.findOne({
+      _id: buildingID,
       owner: req.user._id
     });
 
-    if (!deletedBuilding) {
+    if (!building) {
       return res.status(404).send({ 
         Success: false, 
         Message: "Building not found or not yours." 
       });
     }
 
-    console.log('✅ Building deleted:', deletedBuilding._id);
+    // Delete the building
+    await BUILDINGS.findByIdAndDelete(building._id);
 
-    // DEBUG: Check user's Buildings BEFORE
-    const userBefore = await USERS.findById(req.user._id).select('Buildings');
-    console.log('🔍 BEFORE - User Buildings count:', userBefore.Buildings.length);
-    console.log('🔍 BEFORE - Contains target?', userBefore.Buildings.some(b => b.equals(buildingObjectId)));
-
-    // Pull from user's Buildings array
-    const updateResult = await USERS.findByIdAndUpdate(
+    // Remove from user's Buildings array using the actual building _id
+    await USERS.findByIdAndUpdate(
       req.user._id,
-      { $pull: { Buildings: buildingObjectId } },
+      { $pull: { Buildings: building._id } },
       { new: true }
     );
-
-    // DEBUG: Check AFTER
-    console.log('🔍 AFTER - User Buildings count:', updateResult.Buildings.length);
-    console.log('✅ Update modified:', updateResult);
 
     return res.send({ Success: true, Message: "Building deleted successfully." });
   } catch (err) {

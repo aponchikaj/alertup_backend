@@ -1,4 +1,5 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import USERS from '../../models/user.model.js';
 import BUILDINGS from '../../models/building.model.js';
 import CONTACTS from '../../models/contact.model.js';
@@ -435,7 +436,7 @@ router.delete('/api/admin/buildings/:id',isAdmin,async(req,res)=>{
     const buildingID = req.params.id;
 
     try{
-        if(!buildingID){
+        if(!buildingID || !mongoose.Types.ObjectId.isValid(buildingID)){
             return res.send({Success:false,Message:"Invalid building id."})
         }
 
@@ -445,10 +446,19 @@ router.delete('/api/admin/buildings/:id',isAdmin,async(req,res)=>{
             return res.send({Success:false,Message:"Building not found."})
         }
 
-        await BUILDINGS.findOneAndDelete({_id:findBuilding._id});
+        // Delete the building
+        await BUILDINGS.findByIdAndDelete(findBuilding._id);
+
+        // Remove from owner's Buildings array
+        await USERS.findByIdAndUpdate(
+            findBuilding.owner,
+            { $pull: { Buildings: findBuilding._id } },
+            { new: true }
+        );
 
         return res.send({Success:true,Message:"Deleted."})
-    }catch{
+    }catch(err){
+        console.error('Admin delete building error:', err);
         return res.send({Success:false,Message:'Server error.'})
     }
 })

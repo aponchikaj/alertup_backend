@@ -28,9 +28,14 @@ app.set("trust proxy", 1);
 const envAllowed = (process.env.ALLOWED_ORIGINS || "").split(",").filter(Boolean);
 const defaultAllowed = [
   "https://alertup.world",
+  "http://alertup.world",
   "https://www.alertup.world",
+  "http://www.alertup.world",
   "https://alertup.vercel.app",
-  "http://localhost:5173"
+  "http://alertup.vercel.app",
+  "http://localhost:5173",
+  "https://localhost:5173",
+  "https://alertup-qs1zp9gbl-aponchikajs-projects.vercel.app"
 ];
 
 // Merge env list with defaults (env can override/append)
