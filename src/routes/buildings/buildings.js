@@ -237,32 +237,40 @@ router.get(
   optionalAuth,
   async (req, res) => {
     try {
-      const building = await BUILDINGS.findById(req.params.id);
-      if (!building || building.isDeactivated)
+      const { id, floor } = req.params;
+
+      const building = await BUILDINGS.findById(id);
+      if (!building || building.isDeactivated) {
         return res.send({ Success: false, Message: 'Building not found.' });
+      }
+
+      // ✅ decode floor from URL (IMPORTANT)
+      const decodedFloor = decodeURIComponent(floor).trim().toLowerCase();
 
       const floorData = building.maps.find(
-        f => String(f.floor) === String(req.params.floor)
+        f => f.floor.trim().toLowerCase() === decodedFloor
       );
-      if (!floorData)
-        return res.send({ Success: false, Message: 'Floor not found.' });
 
-      // ✅ Always increase building scan
+      if (!floorData) {
+        return res.send({ Success: false, Message: 'Floor not found.' });
+      }
+
+      // ✅ increase floor scan (WORKS LIKE BEFORE)
       floorData.scanned = (floorData.scanned || 0) + 1;
       await building.save();
 
-      // 🔥 ONLY if user is logged in
-      if (req.user?._id) {
+      // ✅ OPTIONAL: add to user scan history IF logged in
+      if (req.user && req.user._id) {
         const user = await USERS.findById(req.user._id);
 
         if (user) {
-          const scannedIndex = user.scanned.findIndex(
+          const index = user.scanned.findIndex(
             s => String(s.buildingID) === String(building._id)
           );
 
-          if (scannedIndex !== -1) {
-            user.scanned[scannedIndex].scannedCount += 1;
-            user.scanned[scannedIndex].scannedAt = new Date();
+          if (index !== -1) {
+            user.scanned[index].scannedCount += 1;
+            user.scanned[index].scannedAt = new Date();
           } else {
             user.scanned.push({
               buildingName: building.buildingName,
@@ -276,7 +284,8 @@ router.get(
         }
       }
 
-      res.send({
+      // ✅ SAME RESPONSE STYLE AS BEFORE
+      return res.send({
         Success: true,
         Message: {
           buildingName: building.buildingName,
@@ -286,12 +295,10 @@ router.get(
       });
     } catch (error) {
       console.error(error);
-      res.send({ Success: false, Message: 'Error.' });
+      return res.send({ Success: false, Message: 'Error.' });
     }
   }
 );
-
-
 
 router.get('/api/debug/user-buildings', whoami, async (req, res) => {
   const user = await USERS.findById(req.user._id).select('Buildings');
