@@ -18,10 +18,10 @@ const paypalClient = new paypal.core.PayPalHttpClient(paypalEnv);
 
 /* ---------------- Premium Plans ---------------- */
 const PREMIUM_PLANS = {
-  Basic: { price: 0.01, limits: { maxBuildings: 3, maxFloors: 5 } },
-  Platinum: { price: 9.99, limits: { maxBuildings: 6, maxFloors: 10 } },
-  Elite: { price: 19.99, limits: { maxBuildings: 10, maxFloors: 20 } },
-  Professional: { price: 29.99, limits: { maxBuildings: 25, maxFloors: 50 } },
+  Basic: { price: 4.99, limits: { maxBuildings: 3, maxFloors: 5 } },
+  Platinum: { price: 8.99, limits: { maxBuildings: 6, maxFloors: 10 } },
+  Elite: { price: 12.99, limits: { maxBuildings: 10, maxFloors: 20 } },
+  Professional: { price: 24.99, limits: { maxBuildings: 25, maxFloors: 50 } },
 };
 
 /* ---------------- Helpers ---------------- */
