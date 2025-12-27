@@ -9,6 +9,28 @@ import { Filter } from 'bad-words';
 
 const router = express.Router();
 
+import jwt from 'jsonwebtoken';
+
+const optionalAuth = (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1];
+
+  if (!token) {
+    req.user = null;
+    return next();
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+  } catch (err) {
+    req.user = null;
+  }
+
+  next();
+};
+
+
+
 /* ---------------- HELPERS ---------------- */
 
 // Check building name validity
@@ -157,7 +179,7 @@ router.put('/api/building/:id', whoami, upload.array('maps'), async (req, res) =
         qrCode: await QRCode.toDataURL(
           `${process.env.CLIENT_SCAN_QR_URL}?building=${encodeURIComponent(buildingName)}&floor=${encodeURIComponent(floor)}`
         ),
-        scanned: [],
+        scanned: 0,
         createdAt: Date.now()
       }))
     );
@@ -210,37 +232,64 @@ router.get("/api/building/my", whoami, async (req, res) => {
 });
 
 /* ---------------- SCAN FLOOR ---------------- */
-router.get('/api/building/scan/:id/:floor', async (req, res) => {
-  try {
-    const building = await BUILDINGS.findById(req.params.id);
-    if (!building || building.isDeactivated)
-      return res.send({ Success: false, Message: 'Building not found.' });
+router.get(
+  '/api/building/scan/:id/:floor',
+  optionalAuth,
+  async (req, res) => {
+    try {
+      const building = await BUILDINGS.findById(req.params.id);
+      if (!building || building.isDeactivated)
+        return res.send({ Success: false, Message: 'Building not found.' });
 
-    const floorData = building.maps.find(
-      f => String(f.floor) === String(req.params.floor)
-    );
-    if (!floorData)
-      return res.send({ Success: false, Message: 'Floor not found.' });
+      const floorData = building.maps.find(
+        f => String(f.floor) === String(req.params.floor)
+      );
+      if (!floorData)
+        return res.send({ Success: false, Message: 'Floor not found.' });
 
-    // ✅ increase scans
-    floorData.scanned = (floorData.scanned || 0) + 1;
+      // ✅ Always increase building scan
+      floorData.scanned = (floorData.scanned || 0) + 1;
+      await building.save();
 
-    // ✅ save parent document
-    await building.save();
+      // 🔥 ONLY if user is logged in
+      if (req.user?._id) {
+        const user = await USERS.findById(req.user._id);
 
-    res.send({
-      Success: true,
-      Message: {
-        buildingName: building.buildingName,
-        floorData,
-        scannedCount: floorData.scanned
+        if (user) {
+          const scannedIndex = user.scanned.findIndex(
+            s => String(s.buildingID) === String(building._id)
+          );
+
+          if (scannedIndex !== -1) {
+            user.scanned[scannedIndex].scannedCount += 1;
+            user.scanned[scannedIndex].scannedAt = new Date();
+          } else {
+            user.scanned.push({
+              buildingName: building.buildingName,
+              buildingID: building._id,
+              scannedAt: new Date(),
+              scannedCount: 1
+            });
+          }
+
+          await user.save();
+        }
       }
-    });
-  } catch (error) {
-    console.error(error);
-    res.send({ Success: false, Message: 'Error.' });
+
+      res.send({
+        Success: true,
+        Message: {
+          buildingName: building.buildingName,
+          floor: floorData.floor,
+          scannedCount: floorData.scanned
+        }
+      });
+    } catch (error) {
+      console.error(error);
+      res.send({ Success: false, Message: 'Error.' });
+    }
   }
-});
+);
 
 
 
