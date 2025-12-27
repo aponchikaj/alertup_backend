@@ -32,12 +32,27 @@ const PAYMENT_LINKS = {
   }
 };
 
-export const getPaymentLink = (planName) => {
-  return PAYMENT_LINKS[planName] || null;
+// Preferred stablecoins to offer to users
+const PREFERRED_CURRENCIES = ["USDT", "USDC"];
+
+export const getPaymentLink = (planName, preferredCurrency) => {
+  const base = PAYMENT_LINKS[planName];
+  if (!base) return null;
+  // If preferredCurrency provided and supported, append coin param
+  if (preferredCurrency && PREFERRED_CURRENCIES.includes(preferredCurrency)) {
+    // Many NowPayments payment pages accept `&coin=`; append `coin` param.
+    return `${base.link}&coin=${encodeURIComponent(preferredCurrency)}`;
+  }
+  // Otherwise return the base link and frontend will let user choose
+  return base.link;
 };
 
 export const getAllPaymentLinks = () => {
   return PAYMENT_LINKS;
+};
+
+export const getPreferredCurrencies = () => {
+  return PREFERRED_CURRENCIES;
 };
 
 export const validatePlanPrice = (planName, price) => {
