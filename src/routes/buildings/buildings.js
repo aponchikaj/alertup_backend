@@ -182,17 +182,44 @@ router.get('/api/building/id/:buildingID', async (req, res) => {
   const { buildingID } = req.params;
 
   try {
-    if (!buildingID) return res.send({ Success: false, Message: "Invalid building ID." });
+    // Validate ObjectId
+    if (!buildingID || !mongoose.Types.ObjectId.isValid(buildingID)) {
+      return res.status(400).send({ Success: false, Message: "Invalid building ID." });
+    }
 
-    const BUILDING = await BUILDINGS.findById(buildingID)
-      .populate("owner", "_id username email");
+    // Load building and owner info
+    const BUILDING = await BUILDINGS.findById(buildingID).populate('owner', '_id username email premium');
+    if (!BUILDING) return res.status(404).send({ Success: false, Message: 'Building not found.' });
 
-    if (!BUILDING) return res.send({ Success: false, Message: "Building not found." });
+    const owner = BUILDING.owner;
+    if (!owner) return res.status(500).send({ Success: false, Message: 'Owner data missing.' });
+
+    // Check premium expiry and automatically deactivate building if owner's premium expired
+    const now = new Date();
+    const hasPremium = owner.premium && owner.premium.hasPremium;
+    const premiumExpires = owner.premium && owner.premium.to ? new Date(owner.premium.to) : null;
+
+    if (!hasPremium || (premiumExpires && premiumExpires < now)) {
+      if (!BUILDING.isDeactivated) {
+        BUILDING.isDeactivated = true;
+        await BUILDING.save();
+        // Send notification email to owner about deactivation and renewal
+        try {
+          const sendMail = (await import('../../services/sendEmail.js')).default;
+          const subject = `Your AlertUp premium expired — ${BUILDING.buildingName} deactivated`;
+          const text = `Hello ${owner.username || ''},\n\nYour premium subscription has expired and your building \"${BUILDING.buildingName}\" was deactivated.\n\nTo reactivate premium and restore access to your building, please visit https://www.alertup.world/premium and complete a purchase.\n\nIf you have any questions, reply to this email.`;
+          await sendMail(owner.email, subject, text);
+        } catch (emailErr) {
+          console.error('Failed to send deactivation email:', emailErr);
+        }
+      }
+      return res.send({ Success: false, Message: 'Owner does not have active premium. Building is deactivated.' });
+    }
 
     return res.send({ Success: true, Message: BUILDING });
   } catch (error) {
-    console.error(error);
-    return res.send({ Success: false, Message: "Something went wrong." });
+    console.error('GET /api/building/id/:buildingID error:', error);
+    return res.status(500).send({ Success: false, Message: 'Server error.' });
   }
 });
 
@@ -212,27 +239,54 @@ router.get("/api/building/my", whoami, async (req, res) => {
 
 /* ---------------- SCAN FLOOR ---------------- */
 router.get('/api/building/scan/:id/:floor', async (req, res) => {
+  const { id, floor } = req.params;
   try {
-    const building = await BUILDINGS.findById(req.params.id);
-    if (!building) return res.send({ Success: false, Message: 'Building not found.' });
-    if(building.isDeactivated == true) return res.send({Success:false,Message:"Building was deactivated."})
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) return res.status(400).send({ Success: false, Message: 'Invalid building id.' });
 
-    const floorData = building.maps.find(f => f.floor === req.params.floor);
-    if (!floorData) return res.send({ Success: false, Message: 'Floor not found.' });
-    floorData.scanned +=1
-    await building.save()
+    // Load building with owner to verify premium status before allowing scan
+    const building = await BUILDINGS.findById(id).populate('owner', '_id username email premium');
+    if (!building) return res.status(404).send({ Success: false, Message: 'Building not found.' });
 
-    res.send({
-      Success: true,
-      Message: {
-        buildingName: building.buildingName,
-        floorData,
-        scannedCount: floorData.scanned
+    const owner = building.owner;
+    if (!owner) return res.status(500).send({ Success: false, Message: 'Owner data missing.' });
+
+    const now = new Date();
+    const hasPremium = owner.premium && owner.premium.hasPremium;
+    const premiumExpires = owner.premium && owner.premium.to ? new Date(owner.premium.to) : null;
+
+    if (!hasPremium || (premiumExpires && premiumExpires < now)) {
+      if (!building.isDeactivated) {
+        building.isDeactivated = true;
+        await building.save();
+        // Send deactivation email to owner
+        try {
+          const sendMail = (await import('../../services/sendEmail.js')).default;
+          const subject = `Your AlertUp premium expired — ${building.buildingName} deactivated`;
+          const text = `Hello ${owner.username || ''},\n\nYour premium subscription has expired and your building \"${building.buildingName}\" was deactivated.\n\nTo reactivate premium and restore access to your building, please visit https://www.alertup.world/premium and complete a purchase.\n\nIf you have any questions, reply to this email.`;
+          await sendMail(owner.email, subject, text);
+        } catch (emailErr) {
+          console.error('Failed to send deactivation email on scan:', emailErr);
+        }
       }
-    });
+      return res.status(403).send({ Success: false, Message: 'Building is deactivated due to expired premium.' });
+    }
+
+    if (building.isDeactivated) return res.status(403).send({ Success: false, Message: 'Building is deactivated.' });
+
+    // Atomic increment of the scanned counter for the matching floor
+    const updated = await BUILDINGS.findOneAndUpdate(
+      { _id: id, 'maps.floor': floor },
+      { $inc: { 'maps.$[m].scanned': 1 } },
+      { arrayFilters: [{ 'm.floor': floor }], new: true }
+    );
+
+    if (!updated) return res.status(404).send({ Success: false, Message: 'Floor not found.' });
+
+    const floorData = updated.maps.find(f => f.floor === floor);
+    return res.send({ Success: true, Message: { buildingName: updated.buildingName, floorData, scannedCount: floorData.scanned } });
   } catch (error) {
-    console.error(error);
-    res.send({ Success: false, Message: 'Error.' });
+    console.error('GET /api/building/scan/:id/:floor error:', error);
+    return res.status(500).send({ Success: false, Message: 'Server error.' });
   }
 });
 
