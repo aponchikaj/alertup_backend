@@ -12,19 +12,27 @@ dotenv.config();
 const router = express.Router();
 
 /* ---------------- PayPal Client ---------------- */
+// Helper to sanitize env values (strip surrounding quotes and trim)
+const getEnv = (key) => {
+  const v = process.env[key];
+  if (!v && v !== "") return undefined;
+  return String(v).replace(/^\s*"(.*)"\s*$/s, "$1").trim();
+};
+
 // Determine sandbox vs live. Respect PAYPAL_ENV (live/sandbox) first, then PAYPAL_SANDBOX.
+const envSetting = (getEnv('PAYPAL_ENV') || '').toLowerCase();
+const sandboxFlag = getEnv('PAYPAL_SANDBOX');
 const useSandboxEnv = (() => {
-  if (process.env.PAYPAL_ENV) {
-    const e = process.env.PAYPAL_ENV.toLowerCase();
-    if (e === 'live') return false;
-    if (e === 'sandbox') return true;
-  }
-  return process.env.PAYPAL_SANDBOX !== 'false';
+  if (envSetting === 'live') return false;
+  if (envSetting === 'sandbox') return true;
+  return sandboxFlag !== 'false' && sandboxFlag !== '0';
 })();
 
+const paypalClientId = getEnv('PAYPAL_CLIENT_ID') || process.env.PAYPAL_CLIENT_ID || '';
+const paypalClientSecret = getEnv('PAYPAL_CLIENT_SECRET') || process.env.PAYPAL_CLIENT_SECRET || '';
 const paypalEnv = useSandboxEnv
-  ? new paypal.core.SandboxEnvironment(process.env.PAYPAL_CLIENT_ID, process.env.PAYPAL_CLIENT_SECRET)
-  : new paypal.core.LiveEnvironment(process.env.PAYPAL_CLIENT_ID, process.env.PAYPAL_CLIENT_SECRET);
+  ? new paypal.core.SandboxEnvironment(paypalClientId, paypalClientSecret)
+  : new paypal.core.LiveEnvironment(paypalClientId, paypalClientSecret);
 const paypalClient = new paypal.core.PayPalHttpClient(paypalEnv);
 
 /* ---------------- Premium Plans ---------------- */
@@ -146,8 +154,7 @@ router.post("/api/premium/purchase", whoami, async (req, res) => {
     };
     
     // Determine PayPal API URL (sandbox or live)
-    // Determine PayPal API URL (sandbox or live)
-    const useSandbox = process.env.PAYPAL_SANDBOX !== 'false';
+    const useSandbox = useSandboxEnv;
     const paypalApiUrl = useSandbox
       ? "https://api-m.sandbox.paypal.com/v2/checkout/orders"
       : "https://api-m.paypal.com/v2/checkout/orders";
@@ -252,7 +259,7 @@ router.post("/api/premium/confirm", whoami, async (req, res) => {
 
     // Get order details from PayPal and capture payment
     const accessToken = await getPayPalAccessToken();
-    const useSandbox = process.env.PAYPAL_SANDBOX !== 'false';
+    const useSandbox = useSandboxEnv;
     const apiBase = useSandbox ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
     const orderResponse = await axios.get(
       `${apiBase}/v2/checkout/orders/${orderID}`,

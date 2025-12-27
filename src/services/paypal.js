@@ -3,32 +3,37 @@ import qs from "qs";
 
 export const getPayPalAccessToken = async () => {
   try {
-    // Determine sandbox vs live. Respect PAYPAL_ENV (live/sandbox) first, then PAYPAL_SANDBOX.
+    // Helper to sanitize env values (strip surrounding quotes and trim)
+    const getEnv = (key) => {
+      const v = process.env[key];
+      if (!v && v !== "") return undefined;
+      return String(v).replace(/^\s*"(.*)"\s*$/s, "$1").trim();
+    };
+  
+    // Determine environment from sanitized env vars
+    const envSetting = (getEnv('PAYPAL_ENV') || '').toLowerCase();
+    const sandboxFlag = getEnv('PAYPAL_SANDBOX');
     const useSandbox = (() => {
-      if (process.env.PAYPAL_ENV) {
-        const e = process.env.PAYPAL_ENV.toLowerCase();
-        if (e === 'live') return false;
-        if (e === 'sandbox') return true;
-      }
-      return process.env.PAYPAL_SANDBOX !== 'false';
+      if (envSetting === 'live') return false;
+      if (envSetting === 'sandbox') return true;
+      return sandboxFlag !== 'false' && sandboxFlag !== '0';
     })();
 
     const apiUrl = useSandbox
       ? "https://api-m.sandbox.paypal.com/v1/oauth2/token"
       : "https://api-m.paypal.com/v1/oauth2/token";
 
-    console.log(`PAYPAL_ENV: ${process.env.PAYPAL_ENV || 'not set'}`);
-    console.log(`PAYPAL_SANDBOX: ${process.env.PAYPAL_SANDBOX || 'not set'}`);
+    console.log(`PAYPAL_ENV: ${getEnv('PAYPAL_ENV') || 'not set'}`);
+    console.log(`PAYPAL_SANDBOX: ${getEnv('PAYPAL_SANDBOX') || 'not set'}`);
     console.log(`Using PayPal ${useSandbox ? 'SANDBOX' : 'LIVE'} environment`);
     console.log(`API URL: ${apiUrl}`);
 
-    // Log presence of credentials (do NOT log the secret itself)
-    console.log('PAYPAL_CLIENT_ID present:', !!process.env.PAYPAL_CLIENT_ID);
-    console.log('PAYPAL_CLIENT_SECRET present:', !!process.env.PAYPAL_CLIENT_SECRET);
-
-    const auth = Buffer.from(
-      `${process.env.PAYPAL_CLIENT_ID || ''}:${process.env.PAYPAL_CLIENT_SECRET || ''}`
-    ).toString("base64");
+    const clientId = getEnv('PAYPAL_CLIENT_ID') || '';
+    const clientSecret = getEnv('PAYPAL_CLIENT_SECRET') || '';
+    console.log('PAYPAL_CLIENT_ID present:', !!clientId);
+    console.log('PAYPAL_CLIENT_SECRET present:', !!clientSecret);
+  
+    const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
 
     const res = await axios.post(
       apiUrl,
