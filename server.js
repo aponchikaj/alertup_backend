@@ -13,6 +13,7 @@ import contactRoutes from './src/routes/contact/contact.js'
 import reportRoutes from './src/routes/contact/report.js'
 import dashboardRoutes from './src/routes/dashboard/dashboard.js'
 import premiumRoutes from './src/routes/premium/premium.js'
+import paymentsRoutes from './src/routes/payments/payments.js'
 import settingsRoutes from './src/routes/settings/settings.js'
 import userRoutes from './src/routes/user/user.js'
 import connectRouter from './src/routes/connect/connect.js'
@@ -80,6 +81,7 @@ app.use(contactRoutes)
 app.use(reportRoutes)
 app.use(dashboardRoutes)
 app.use(premiumRoutes)
+app.use(paymentsRoutes)
 app.use(settingsRoutes)
 app.use(userRoutes)
 app.use(connectRouter)
