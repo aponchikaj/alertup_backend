@@ -12,9 +12,13 @@ export const getPayPalAccessToken = async () => {
     
     console.log(`Using PayPal ${useSandbox ? 'SANDBOX' : 'LIVE'} environment`);
     console.log(`API URL: ${apiUrl}`);
-    
+
+    // Log presence of credentials (do NOT log the secret itself)
+    console.log('PAYPAL_CLIENT_ID present:', !!process.env.PAYPAL_CLIENT_ID);
+    console.log('PAYPAL_CLIENT_SECRET present:', !!process.env.PAYPAL_CLIENT_SECRET);
+
     const auth = Buffer.from(
-      `${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`
+      `${process.env.PAYPAL_CLIENT_ID || ''}:${process.env.PAYPAL_CLIENT_SECRET || ''}`
     ).toString("base64");
 
     const res = await axios.post(
@@ -32,6 +36,13 @@ export const getPayPalAccessToken = async () => {
   } catch (err) {
     console.error("PayPal access token error:", err.response?.data || err.message);
     console.error("PayPal access token error status:", err.response?.status);
-    throw new Error("Failed to get PayPal access token");
+
+    // Attach more context to the thrown error so caller can return details
+    const details = err.response?.data || { message: err.message };
+    const status = err.response?.status;
+    const e = new Error("Failed to get PayPal access token");
+    e.details = details;
+    e.status = status;
+    throw e;
   }
 };

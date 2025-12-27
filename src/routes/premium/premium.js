@@ -12,10 +12,11 @@ dotenv.config();
 const router = express.Router();
 
 /* ---------------- PayPal Client ---------------- */
-const paypalEnv = new paypal.core.LiveEnvironment(
-  process.env.PAYPAL_CLIENT_ID,
-  process.env.PAYPAL_CLIENT_SECRET
-);
+// Use sandbox environment by default unless PAYPAL_SANDBOX is explicitly set to 'false'
+const useSandboxEnv = process.env.PAYPAL_SANDBOX !== 'false';
+const paypalEnv = useSandboxEnv
+  ? new paypal.core.SandboxEnvironment(process.env.PAYPAL_CLIENT_ID, process.env.PAYPAL_CLIENT_SECRET)
+  : new paypal.core.LiveEnvironment(process.env.PAYPAL_CLIENT_ID, process.env.PAYPAL_CLIENT_SECRET);
 const paypalClient = new paypal.core.PayPalHttpClient(paypalEnv);
 
 /* ---------------- Premium Plans ---------------- */
@@ -137,9 +138,9 @@ router.post("/api/premium/purchase", whoami, async (req, res) => {
     };
     
     // Determine PayPal API URL (sandbox or live)
-    // Default to sandbox if PAYPAL_SANDBOX is not explicitly set to 'false'
+    // Determine PayPal API URL (sandbox or live)
     const useSandbox = process.env.PAYPAL_SANDBOX !== 'false';
-    const paypalApiUrl = useSandbox 
+    const paypalApiUrl = useSandbox
       ? "https://api-m.sandbox.paypal.com/v2/checkout/orders"
       : "https://api-m.paypal.com/v2/checkout/orders";
     
@@ -189,6 +190,7 @@ router.post("/api/premium/purchase", whoami, async (req, res) => {
       }
       
       return res.send({ 
+      return res.send({ 
         Success: false, 
         Message: paypalErrorMessage || paypalError.message || "Payment failed",
         error: errorData,
@@ -225,8 +227,9 @@ router.post("/api/premium/purchase", whoami, async (req, res) => {
     res.send({ 
       Success: false, 
       Message: errorMessage, 
-      error: err.response?.data,
-      details: err.message
+      Message: errorMessage, 
+      error: err.response?.data || err.details,
+      details: err.message || err.details
     });
   }
 });
@@ -243,8 +246,10 @@ router.post("/api/premium/confirm", whoami, async (req, res) => {
 
     // Get order details from PayPal and capture payment
     const accessToken = await getPayPalAccessToken();
+    const useSandbox = process.env.PAYPAL_SANDBOX !== 'false';
+    const apiBase = useSandbox ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
     const orderResponse = await axios.get(
-      `https://api-m.paypal.com/v2/checkout/orders/${orderID}`,
+      `${apiBase}/v2/checkout/orders/${orderID}`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
 
@@ -259,7 +264,8 @@ router.post("/api/premium/confirm", whoami, async (req, res) => {
     // Capture the payment if not already captured
     if (order.status === "APPROVED") {
       const captureResponse = await axios.post(
-        `https://api-m.paypal.com/v2/checkout/orders/${orderID}/capture`,
+      const captureResponse = await axios.post(
+        `${apiBase}/v2/checkout/orders/${orderID}/capture`,
         {},
         { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
       );
