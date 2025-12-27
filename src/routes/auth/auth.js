@@ -111,10 +111,28 @@ router.post('/api/auth/register', async (req, res) => {
       token: (isSafari || isIOS) ? userToken : undefined // Only send token for Safari/iOS as fallback
     });
     try {
+      const welcomeHTML = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+          <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h1 style="color: #FF7B22; margin-top: 0;">Welcome to AlertUp!</h1>
+            <p style="color: #333; font-size: 16px;">Hello <strong>${username}</strong>,</p>
+            <p style="color: #666;">Thank you for joining AlertUp! We're excited to have you on board.</p>
+            <p style="color: #666;">To get started and access all features, please verify your email address.</p>
+            <div style="background-color: #e3f2fd; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #2196f3;">
+              <p style="margin: 0; color: #1976d2; font-weight: bold;">📧 Next Step: Verify Your Email</p>
+              <p style="margin: 5px 0 0 0; color: #666; font-size: 14px;">Go to your account settings to verify your email and unlock all features.</p>
+            </div>
+            <p style="color: #666; font-size: 14px; margin-top: 30px;">If you have any questions, feel free to contact our support team.</p>
+            <p style="color: #666; font-size: 14px; margin-top: 20px;">Best regards,<br><strong style="color: #FF7B22;">AlertUp Team</strong></p>
+          </div>
+        </div>
+      `;
       await sendMail(
         email,
         "Welcome - AlertUp",
-        `Hello ${username}, welcome! Please verify your email to use AlertUp features.`
+        `Hello ${username}, welcome! Please verify your email to use AlertUp features.`,
+        undefined,
+        welcomeHTML
       );
     } catch (err) {
       console.error("MAIL ERROR:", err);
@@ -179,7 +197,28 @@ router.post('/api/auth/login',async(req,res)=>{
     res.cookie('userToken', userToken, cookieOptions2);
 
     try {
-      await sendMail(USER.email,"New Login - AlertUp",`Hey someone has logged into your account. was that you? contact us if it wasn't you.`)
+      const loginHTML = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+          <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h1 style="color: #FF7B22; margin-top: 0;">🔐 New Login Detected</h1>
+            <p style="color: #333; font-size: 16px;">Hello <strong>${USER.username}</strong>,</p>
+            <p style="color: #666;">We detected a new login to your AlertUp account.</p>
+            <div style="background-color: #fff3cd; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107;">
+              <p style="margin: 0; color: #856404; font-weight: bold;">⚠️ Security Alert</p>
+              <p style="margin: 5px 0 0 0; color: #666; font-size: 14px;">If this wasn't you, please contact us immediately to secure your account.</p>
+            </div>
+            <p style="color: #666; font-size: 14px; margin-top: 30px;">If you recognize this login, you can safely ignore this email.</p>
+            <p style="color: #666; font-size: 14px; margin-top: 20px;">Best regards,<br><strong style="color: #FF7B22;">AlertUp Security Team</strong></p>
+          </div>
+        </div>
+      `;
+      await sendMail(
+        USER.email,
+        "New Login - AlertUp",
+        `Hey someone has logged into your account. was that you? contact us if it wasn't you.`,
+        undefined,
+        loginHTML
+      );
     } catch (err) {
       console.error("MAIL ERROR:", err);
     }

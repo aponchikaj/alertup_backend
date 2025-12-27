@@ -10,11 +10,11 @@ sgMail.setApiKey(process.env.SENDGRID_API_KEY);
  * @param {string} to - recipient email
  * @param {string} subject - email subject
  * @param {string} text - plain text body
- * @param {string} html - HTML body (optional)
  * @param {string} replyTo - reply-to email (optional)
+ * @param {string} html - HTML body (optional)
  * @returns {Promise<{Success: boolean, Message: string}>}
  */
-const sendMail = async (to, subject, text, replyTo = "lazaremirziashvili8@gmail.com") => {
+const sendMail = async (to, subject, text, replyTo = "lazaremirziashvili8@gmail.com", html = null) => {
   if (!to || !subject || !text) {
     return { Success: false, Message: "Missing required email fields" };
   }
@@ -27,6 +27,7 @@ const sendMail = async (to, subject, text, replyTo = "lazaremirziashvili8@gmail.
       text,
     };
 
+    if (html) msg.html = html;
     if (replyTo) msg.replyTo = replyTo;
 
     await sgMail.send(msg);

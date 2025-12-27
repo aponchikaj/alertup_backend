@@ -61,11 +61,30 @@ router.post("/api/reset/send-code", async (req, res) => {
 
         res.json({ success: true, message: "Verification code sent." });
         try {
+            const resetHTML = `
+              <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+                <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                  <h1 style="color: #FF7B22; margin-top: 0;">🔑 Password Reset Request</h1>
+                  <p style="color: #333; font-size: 16px;">Hello <strong>${USER.username}</strong>,</p>
+                  <p style="color: #666;">You requested to reset your password. Use the code below to complete the process:</p>
+                  <div style="background-color: #f9f9f9; padding: 20px; border-radius: 5px; margin: 20px 0; text-align: center; border: 2px dashed #FF7B22;">
+                    <p style="margin: 0; font-size: 32px; font-weight: bold; color: #FF7B22; letter-spacing: 5px;">${code}</p>
+                  </div>
+                  <p style="color: #666; font-size: 14px;">This code will expire in 10 minutes.</p>
+                  <div style="background-color: #ffebee; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #f44336;">
+                    <p style="margin: 0; color: #c62828; font-weight: bold;">⚠️ Security Notice</p>
+                    <p style="margin: 5px 0 0 0; color: #666; font-size: 14px;">If you didn't request this reset, please contact support immediately.</p>
+                  </div>
+                  <p style="color: #666; font-size: 14px; margin-top: 20px;">Best regards,<br><strong style="color: #FF7B22;">AlertUp Team</strong></p>
+                </div>
+              </div>
+            `;
             await sendMail(
             USER.email,
             "Reset password - AlertUp",
-            `Hello ${USER.username}, your password reset code is ${code}. 
-If this wasn't you, please contact support immediately.`
+            `Hello ${USER.username}, your password reset code is ${code}. If this wasn't you, please contact support immediately.`,
+            undefined,
+            resetHTML
         );
         } catch (err) {
             console.error("MAIL ERROR:", err);

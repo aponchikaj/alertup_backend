@@ -72,16 +72,28 @@ router.post('/api/admin/login', async (req, res) => {
     res.send({ Success: true, Message: 'Logged in.' });
 
     try {
+        const adminLoginHTML = `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+            <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+              <h1 style="color: #d32f2f; margin-top: 0;">🔐 Admin Login Alert</h1>
+              <p style="color: #333; font-size: 16px;">Security Notification</p>
+              <p style="color: #666;">Someone logged in as <strong>admin</strong> on AlertUp.</p>
+              <div style="background-color: #ffebee; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #f44336;">
+                <p style="margin: 0; color: #c62828; font-weight: bold;">⚠️ Login Details</p>
+                <p style="margin: 5px 0; color: #666; font-size: 14px;"><strong>IP Address:</strong> ${req.ip}</p>
+                <p style="margin: 5px 0 0 0; color: #666; font-size: 14px;"><strong>Device:</strong> ${req.headers['user-agent']}</p>
+              </div>
+              <p style="color: #666; font-size: 14px;">If this wasn't you, secure your account immediately.</p>
+              <p style="color: #666; font-size: 14px; margin-top: 20px;">Best regards,<br><strong style="color: #FF7B22;">AlertUp Security Team</strong></p>
+            </div>
+          </div>
+        `;
         await sendMail(
         process.env.GMAIL_USER,
         'New admin login – AlertUp',
-        `
-          <h2>Admin Login Alert</h2>
-          <p>Someone logged in as <b>admin</b> on AlertUp.</p>
-          <p><b>IP:</b> ${req.ip}</p>
-          <p><b>Device:</b> ${req.headers['user-agent']}</p>
-          <p>If this wasn’t you, secure your account immediately.</p>
-        `
+        `Admin Login Alert: Someone logged in as admin on AlertUp. IP: ${req.ip}, Device: ${req.headers['user-agent']}. If this wasn't you, secure your account immediately.`,
+        undefined,
+        adminLoginHTML
       );
     } catch (err) {
         console.error("MAIL ERROR:", err);
@@ -286,7 +298,23 @@ router.delete('/api/admin/user/:id',isAdmin,async(req,res)=>{
 
         res.send({Success:false,Message:"Deleted."})
         try {
-          await sendMail(user.email,'Account deleted - AlertUp',`Hello Dear ${user.username} we've decided that your account should be deleted. reason:${reason}. we are sorry goodbye.`)
+          const adminDeleteHTML = `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+              <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                <h1 style="color: #d32f2f; margin-top: 0;">⚠️ Account Deletion Notice</h1>
+                <p style="color: #333; font-size: 16px;">Hello Dear <strong>${user.username}</strong>,</p>
+                <p style="color: #666;">We've decided that your account should be deleted.</p>
+                <div style="background-color: #ffebee; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #f44336;">
+                  <p style="margin: 0; color: #c62828; font-weight: bold;">Reason for Deletion</p>
+                  <p style="margin: 5px 0 0 0; color: #666; font-size: 14px;">${reason}</p>
+                </div>
+                <p style="color: #666; font-size: 14px;">All your data has been permanently removed from our system.</p>
+                <p style="color: #666; font-size: 14px; margin-top: 20px;">We are sorry to see you go. If you have any questions, please contact our support team.</p>
+                <p style="color: #666; font-size: 14px; margin-top: 20px;">Best regards,<br><strong style="color: #FF7B22;">AlertUp Team</strong></p>
+              </div>
+            </div>
+          `;
+          await sendMail(user.email,'Account deleted - AlertUp',`Hello Dear ${user.username} we've decided that your account should be deleted. reason:${reason}. we are sorry goodbye.`, undefined, adminDeleteHTML)
         } catch (err) {
           console.error("MAIL ERROR:", err);
         }
