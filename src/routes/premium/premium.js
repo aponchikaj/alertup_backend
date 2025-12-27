@@ -1,46 +1,20 @@
 import express from "express";
 import dotenv from "dotenv";
-import paypal from "@paypal/checkout-server-sdk";
 import USERS from "../../models/user.model.js";
 import BUILDINGS from "../../models/building.model.js";
 import whoami from "../../middlewares/whoami.js";
 import sendMail from "../../services/sendEmail.js";
-import axios from "axios";
-import { getPayPalAccessToken } from "../../services/paypal.js";
+import { getPaymentLink, getAllPaymentLinks } from "../../services/nowpayments.js";
 
 dotenv.config();
 const router = express.Router();
 
-/* ---------------- PayPal Client ---------------- */
-// Helper to sanitize env values (strip surrounding quotes and trim)
-const getEnv = (key) => {
-  const v = process.env[key];
-  if (!v && v !== "") return undefined;
-  return String(v).replace(/^\s*"(.*)"\s*$/s, "$1").trim();
-};
-
-// Determine sandbox vs live. Respect PAYPAL_ENV (live/sandbox) first, then PAYPAL_SANDBOX.
-const envSetting = (getEnv('PAYPAL_ENV') || '').toLowerCase();
-const sandboxFlag = getEnv('PAYPAL_SANDBOX');
-const useSandboxEnv = (() => {
-  if (envSetting === 'live') return false;
-  if (envSetting === 'sandbox') return true;
-  return sandboxFlag !== 'false' && sandboxFlag !== '0';
-})();
-
-const paypalClientId = getEnv('PAYPAL_CLIENT_ID') || process.env.PAYPAL_CLIENT_ID || '';
-const paypalClientSecret = getEnv('PAYPAL_CLIENT_SECRET') || process.env.PAYPAL_CLIENT_SECRET || '';
-const paypalEnv = useSandboxEnv
-  ? new paypal.core.SandboxEnvironment(paypalClientId, paypalClientSecret)
-  : new paypal.core.LiveEnvironment(paypalClientId, paypalClientSecret);
-const paypalClient = new paypal.core.PayPalHttpClient(paypalEnv);
-
-/* ---------------- Premium Plans ---------------- */
+/* ---------------- Premium Plans (NowPayments) ---------------- */
 const PREMIUM_PLANS = {
-  Basic: { price: 4.99, name: "Basic Premium", planId: process.env.PAYPAL_BASIC_PLAN_ID,limits: { maxBuildings: 3, maxFloors: 5 } },
-  Platinum: { price: 8.99, name: "Platinum Premium", planId: process.env.PAYPAL_PLATINUM_PLAN_ID,limits: { maxBuildings: 6, maxFloors: 10 } },
-  Elite: { price: 12.99, name: "Elite Premium", planId: process.env.PAYPAL_ELITE_PLAN_ID,limits: { maxBuildings: 10, maxFloors: 20 } },
-  Professional: { price: 24.99, name: "Professional Premium", planId: process.env.PAYPAL_PRO_PLAN_ID,limits: { maxBuildings: 25, maxFloors: 50 } },
+  Basic: { price: 4.99, name: "Basic Premium", invoiceId: "6349197134", link: "https://nowpayments.io/payment/?iid=6349197134", limits: { maxBuildings: 3, maxFloors: 5 } },
+  Platinum: { price: 8.99, name: "Platinum Premium", invoiceId: "5899684860", link: "https://nowpayments.io/payment/?iid=5899684860", limits: { maxBuildings: 6, maxFloors: 10 } },
+  Elite: { price: 12.99, name: "Elite Premium", invoiceId: "5973950086", link: "https://nowpayments.io/payment/?iid=5973950086", limits: { maxBuildings: 10, maxFloors: 20 } },
+  Professional: { price: 24.99, name: "Professional Premium", invoiceId: "6194298377", link: "https://nowpayments.io/payment/?iid=6194298377", limits: { maxBuildings: 25, maxFloors: 50 } },
 };
 
 const addDays = (days) => {
@@ -81,7 +55,7 @@ router.get("/api/premium/plans", (_, res) => {
   res.send({ Success: true, Message: PREMIUM_PLANS });
 });
 
-// ✅ Create order for one-time payment
+// ✅ Create payment - return NowPayments link
 router.post("/api/premium/purchase", whoami, async (req, res) => {
   try {
     console.log("Purchase request received:", req.body);
@@ -105,199 +79,47 @@ router.post("/api/premium/purchase", whoami, async (req, res) => {
       return res.send({ Success: false, Message: "Plan configuration error" });
     }
 
-    // Check if PayPal credentials are configured
-    if (!process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET) {
-      console.error("PayPal credentials not configured");
-      return res.send({ 
-        Success: false, 
-        Message: "PayPal payment system not configured. Please contact support." 
-      });
-    }
-
-    console.log("Getting PayPal access token...");
-    let accessToken;
-    try {
-      accessToken = await getPayPalAccessToken();
-      console.log("PayPal access token obtained");
-    } catch (tokenError) {
-      console.error("Failed to get PayPal access token:", tokenError);
-      return res.send({ 
-        Success: false, 
-        Message: "Failed to authenticate with PayPal. Please check PayPal credentials.", 
-        error: tokenError.message 
-      });
-    }
-
-    // Create PayPal order for one-time payment
-    // Ensure price is formatted correctly (2 decimal places, string format)
-    const priceValue = parseFloat(plan.price).toFixed(2);
-    
-    // Simplified order structure - minimal required fields
-    const orderData = {
-      intent: "CAPTURE",
-      purchase_units: [
-        {
-          amount: {
-            currency_code: "USD",
-            value: priceValue
-          },
-          description: `${plan.name} - 1 Month Premium Access`
-        }
-      ],
-      application_context: {
-        brand_name: "AlertUp",
-        landing_page: "NO_PREFERENCE",
-        user_action: "PAY_NOW",
-        return_url: `${process.env.FRONTEND_URL || "http://localhost:5173"}/premium/success`,
-        cancel_url: `${process.env.FRONTEND_URL || "http://localhost:5173"}/premium`
-      }
-    };
-    
-    // Determine PayPal API URL (sandbox or live)
-    const useSandbox = useSandboxEnv;
-    const paypalApiUrl = useSandbox
-      ? "https://api-m.sandbox.paypal.com/v2/checkout/orders"
-      : "https://api-m.paypal.com/v2/checkout/orders";
-    
-    console.log(`Creating PayPal order with ${useSandbox ? 'SANDBOX' : 'LIVE'} API`);
-    console.log(`PayPal API URL: ${paypalApiUrl}`);
-    console.log("Order data:", JSON.stringify(orderData, null, 2));
-    
-    let response;
-    try {
-      response = await axios.post(
-        paypalApiUrl,
-        orderData,
-        {
-          headers: { 
-            Authorization: `Bearer ${accessToken}`, 
-            "Content-Type": "application/json",
-            "Prefer": "return=representation"
-          },
-        }
-      );
-    } catch (paypalError) {
-      console.error("=== PayPal API Error Details ===");
-      console.error("Status:", paypalError.response?.status);
-      console.error("Full Error Response:", JSON.stringify(paypalError.response?.data, null, 2));
-      console.error("Error Message:", paypalError.message);
-      
-      // Extract detailed error information
-      const errorData = paypalError.response?.data;
-      let paypalErrorMessage = "PayPal API error";
-      let errorDetails = [];
-      
-      if (errorData) {
-        // PayPal v2 API error format
-        if (errorData.name) {
-          paypalErrorMessage = errorData.name;
-        }
-        if (errorData.message) {
-          paypalErrorMessage = errorData.message;
-        }
-        if (errorData.details) {
-          errorDetails = errorData.details.map(d => `${d.field}: ${d.issue}`).join(", ");
-          paypalErrorMessage += ` - ${errorDetails}`;
-        }
-        if (errorData.debug_id) {
-          console.error("PayPal Debug ID:", errorData.debug_id);
-        }
-      }
-      
-      return res.send({ 
-        Success: false, 
-        Message: paypalErrorMessage || paypalError.message || "Payment failed",
-        error: errorData,
-        details: `Status: ${paypalError.response?.status}`,
-        debug_id: errorData?.debug_id
-      });
-    }
-
-    console.log("PayPal order created:", response.data);
-
-    const approveURL = response.data.links?.find((l) => l.rel === "approve")?.href;
-    if (!approveURL) {
-      console.error("No approval URL in PayPal response");
-      return res.send({ Success: false, Message: "PayPal approval link missing", paypalResponse: response.data });
-    }
-
-    console.log("Order created successfully, orderID:", response.data.id);
+    // Return payment link for NowPayments
     res.send({ 
       Success: true, 
       Message: { 
-        orderID: response.data.id, 
-        approveURL,
+        paymentLink: plan.link,
+        invoiceId: plan.invoiceId,
         plan: option,
-        price: plan.price
+        price: plan.price,
+        currency: "USD"
       } 
     });
   } catch (err) {
-    console.error("Order creation error - Full error:", err);
-    console.error("Error response data:", err.response?.data);
-    console.error("Error status:", err.response?.status);
-    console.error("Error message:", err.message);
-    
-    const errorMessage = err.response?.data?.message || err.response?.data?.error_description || err.message || "Payment failed";
+    console.error("Order creation error:", err);
     res.send({ 
       Success: false, 
-      Message: errorMessage, 
-      error: err.response?.data || err.details,
-      details: err.message || err.details
+      Message: "Payment initialization failed",
+      error: err.message
     });
   }
 });
 
-// ✅ Confirm/Activate premium purchase from checkout
+// ✅ Manually confirm/activate premium (for webhook or manual verification)
 router.post("/api/premium/confirm", whoami, async (req, res) => {
   try {
-    const { orderID, plan } = req.body;
-    if (!orderID) return res.send({ Success: false, Message: "Missing order ID" });
+    const { invoiceId, plan } = req.body;
+    if (!invoiceId) return res.send({ Success: false, Message: "Missing invoice ID" });
     if (!plan || !isValidPlan(plan)) return res.send({ Success: false, Message: "Invalid plan" });
 
     const user = await USERS.findById(req.user._id);
     if (!user) return res.send({ Success: false, Message: "User not found" });
 
-    // Get order details from PayPal and capture payment
-    const accessToken = await getPayPalAccessToken();
-    const useSandbox = useSandboxEnv;
-    const apiBase = useSandbox ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
-    const orderResponse = await axios.get(
-      `${apiBase}/v2/checkout/orders/${orderID}`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-
-    const order = orderResponse.data;
-    
-    // Check if order is already captured
-    if (order.status === "COMPLETED") {
-      // Payment already captured, just activate premium
-      return activatePremium(user, plan, orderID, res);
-    }
-
-    // Capture the payment if not already captured
-    if (order.status === "APPROVED") {
-      const captureResponse = await axios.post(
-        `${apiBase}/v2/checkout/orders/${orderID}/capture`,
-        {},
-        { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
-      );
-
-      if (captureResponse.data.status !== "COMPLETED") {
-        return res.send({ Success: false, Message: "Payment not completed" });
-      }
-
-      return activatePremium(user, plan, orderID, res);
-    }
-
-    res.send({ Success: false, Message: `Order status: ${order.status}` });
+    // Activate premium for the user
+    return activatePremium(user, plan, invoiceId, res);
   } catch (err) {
-    console.error("Confirm purchase error:", err.response?.data || err.message);
+    console.error("Confirm purchase error:", err);
     res.send({ Success: false, Message: "Purchase confirmation failed" });
   }
 });
 
 // Helper function to activate premium
-const activatePremium = async (user, planOption, orderID, res) => {
+const activatePremium = async (user, planOption, invoiceId, res) => {
   try {
     const wasPremium = user.premium?.hasPremium || false;
     const now = new Date();
@@ -307,7 +129,7 @@ const activatePremium = async (user, planOption, orderID, res) => {
     user.premium = {
       hasPremium: true,
       premiumType: planOption,
-      subscriptionId: orderID, // Store order ID for reference
+      invoiceId: invoiceId, // Store invoice ID for reference
       from: now,
       to: expirationDate, // Set expiration to 1 month from purchase
     };
@@ -315,7 +137,7 @@ const activatePremium = async (user, planOption, orderID, res) => {
     // Save transaction
     if (!user.transactions) user.transactions = [];
     user.transactions.push({
-      orderId: orderID,
+      invoiceId: invoiceId,
       plan: planOption,
       amount: PREMIUM_PLANS[planOption].price,
       date: now,
@@ -338,52 +160,6 @@ const activatePremium = async (user, planOption, orderID, res) => {
   }
 };
 
-// Note: One-time purchases cannot be cancelled, but premium will expire after 1 month
-
-// ✅ Webhook for payment events
-router.post("/api/premium/webhook", express.json({ type: "application/json" }), async (req, res) => {
-  try {
-    const resource = req.body.resource;
-    const eventType = req.body.event_type;
-
-    // Payment completed for one-time purchase
-    if (eventType === "PAYMENT.CAPTURE.COMPLETED") {
-      const orderID = resource.supplementary_data?.related_ids?.order_id;
-      if (orderID) {
-        // Find user by order ID in transactions
-        const user = await USERS.findOne({ "transactions.orderId": orderID });
-        if (user && !user.premium?.hasPremium) {
-          // This is a backup activation in case frontend confirmation fails
-          // The frontend confirmation should handle this, but this ensures it works
-          const transaction = user.transactions.find(t => t.orderId === orderID);
-          if (transaction && transaction.plan) {
-            const now = new Date();
-            const expirationDate = addDays(30);
-            
-            user.premium = {
-              hasPremium: true,
-              premiumType: transaction.plan,
-              subscriptionId: orderID,
-              from: now,
-              to: expirationDate,
-            };
-            await user.save();
-
-            // Reactivate buildings
-            await BUILDINGS.updateMany(
-              { owner: user._id, isDeactivated: true },
-              { $set: { isDeactivated: false } }
-            );
-          }
-        }
-      }
-    }
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error("Webhook error:", err);
-    res.sendStatus(500);
-  }
-});
+// Note: Premium will expire after 1 month from purchase date
 
 export default router;
