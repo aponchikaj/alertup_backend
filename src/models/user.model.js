@@ -1,8 +1,17 @@
 import mongoose from 'mongoose'
 
 const USER_SCHEMA = new mongoose.Schema({
-    username:{
-        type:String
+    name:{
+        type:String,
+        default:""
+    },
+    lastname:{
+        type:String,
+        default:""
+    },
+    company:{
+        type:String,
+        default:""
     },
     password:{
         type:String
@@ -81,7 +90,10 @@ const USER_SCHEMA = new mongoose.Schema({
     transactions:{
         type:Array
     },
-
+    userType:{
+        type:String,
+        enum:['Individual','Company']
+    }
 })
 
 const USERS = mongoose.model('users',USER_SCHEMA);

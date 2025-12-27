@@ -61,6 +61,7 @@ router.post("/api/building/new", whoami, upload.array("maps"), async (req, res) 
     if (!USER.verified) return res.send({ Success: false, Message: "Verify account first." });
 
     const { buildingName, floorNames } = req.body;
+    console.log(buildingName)
 
     if (!buildingName || typeof buildingName !== "string")
       return res.send({ Success: false, Message: "Invalid building name." });
@@ -92,7 +93,7 @@ router.post("/api/building/new", whoami, upload.array("maps"), async (req, res) 
         qrCode: await QRCode.toDataURL(
           `https://www.alertup.world/building/${buildingId}/${encodeURIComponent(floor.trim())}`
         ),
-        scanned: [],
+        scanned: 0,
         createdAt: Date.now()
       }))
     );
@@ -219,14 +220,14 @@ router.get('/api/building/scan/:id/:floor', async (req, res) => {
     const floorData = building.maps.find(f => f.floor === req.params.floor);
     if (!floorData) return res.send({ Success: false, Message: 'Floor not found.' });
     floorData.scanned +=1
-    floorData.save()
+    await building.save()
 
     res.send({
       Success: true,
       Message: {
         buildingName: building.buildingName,
         floorData,
-        scannedCount: floorData.scanned.length
+        scannedCount: floorData.scanned
       }
     });
   } catch (error) {

@@ -30,10 +30,13 @@ router.get('/api/settings', whoami, async (req, res) => {
     if (!user) return res.send({ Success: false, Message: "User not found." });
 
     const settings = {
-      username: user.username,
       country: user.country,
       phone: user.phones,
-      verified:user.verified
+      verified:user.verified,
+      userType:user.userType,
+      name:user.name,
+      lastname:user.lastname,
+      company:user.company
     };
 
     return res.send({ Success: true, Message: settings });

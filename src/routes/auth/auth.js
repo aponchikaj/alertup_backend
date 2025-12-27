@@ -10,17 +10,13 @@ import sendMail from '../../services/sendEmail.js';
 
 const isProd = process.env.NODE_ENV === 'production';
 
-const checkUsername = async (username) => {
-  if (!username) return "Invalid username.";
-  if (username.length < 4 || username.length > 24) return "Username must be from 4 to 24 characters.";
-  if (!/^[a-zA-Z0-9_]+$/.test(username)) return "Username contains invalid symbols.";
-
-  const filter = new Filter();
-  if (filter.isProfane(username)) return "Username contains forbidden words.";
-
-  const findUsername = await USERS.findOne({ username });
-  if (findUsername) return "Username already exists.";
-
+const checkNames = async (userType, company, name, lastname) => {
+  if (userType === "Individual") {
+    if (!name || name.length < 2 || name.length > 24) return "Name must be 2-24 characters.";
+    if (!lastname || lastname.length < 2 || lastname.length > 24) return "Lastname must be 2-24 characters.";
+  } else if (userType === "Company") {
+    if (!company || company.length < 4 || company.length > 50) return "Company name must be 4-50 characters.";
+  }
   return null;
 };
 
@@ -43,14 +39,14 @@ const checkPassword = async (password) => {
 
 router.post('/api/auth/register', async (req, res) => {
   try {
-    const { username, email, password, country, countryCode, phone } = req.body;
+    const {userType, name,lastname,company, email, password, country, countryCode, phone } = req.body;
 
-    if (!username || !email || !password || !country || !countryCode) {
+    if (!userType || !email || !password || !country || !countryCode || !phone) {
       return res.send({ Success: false, Message: "Missing required fields." });
     }
 
-    const usernameError = await checkUsername(username);
-    if (usernameError) return res.send({ Success: false, Message: usernameError });
+    const namesError = await checkNames(userType, company, name, lastname);
+    if (namesError) return res.send({ Success: false, Message: namesError });
 
     const emailError = await checkEmail(email);
     if (emailError) return res.send({ Success: false, Message: emailError });
@@ -61,7 +57,10 @@ router.post('/api/auth/register', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const newUser = new USERS({
-      username,
+      userType,
+      name: userType === "Individual" ? name : "",
+      lastname: userType === "Individual" ? lastname : "",
+      company: userType === "Company" ? company : "",
       password: hashedPassword,
       email,
       phones: phone,
