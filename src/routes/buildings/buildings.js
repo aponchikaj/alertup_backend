@@ -201,7 +201,7 @@ router.get("/api/building/my", whoami, async (req, res) => {
   try {
     if (!req.user || !req.user._id) return res.send({ Success: false, Message: "User not authenticated" });
 
-    const buildings = await BUILDINGS.find({ owner: req.user._id, isDeactivated: false });
+    const buildings = await BUILDINGS.find({ owner: req.user._id});
 
     return res.send({ Success: true, Message: buildings });
   } catch (err) {
@@ -214,8 +214,8 @@ router.get("/api/building/my", whoami, async (req, res) => {
 router.get('/api/building/scan/:id/:floor', async (req, res) => {
   try {
     const building = await BUILDINGS.findById(req.params.id);
-    if (!building || building.isDeactivated)
-      return res.send({ Success: false, Message: 'Building not found.' });
+    if (!building) return res.send({ Success: false, Message: 'Building not found.' });
+    if(building.isDeactivated == true) return res.send({Success:false,Message:"Building was deactivated."})
 
     const floorData = building.maps.find(f => f.floor === req.params.floor);
     if (!floorData) return res.send({ Success: false, Message: 'Floor not found.' });

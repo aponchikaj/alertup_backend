@@ -59,9 +59,9 @@ router.post('/api/auth/register', async (req, res) => {
 
     const newUser = new USERS({
       userType,
-      name: userType === "Individual" ? name : "",
-      lastname: userType === "Individual" ? lastname : "",
-      company: userType === "Company" ? company : "",
+      name: userType === "Individual" ? name : "****",
+      lastname: userType === "Individual" ? lastname : "****",
+      company: userType === "Company" ? company : "****",
       password: hashedPassword,
       email,
       phones: phone,
