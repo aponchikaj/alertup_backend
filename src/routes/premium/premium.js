@@ -190,7 +190,6 @@ router.post("/api/premium/purchase", whoami, async (req, res) => {
       }
       
       return res.send({ 
-      return res.send({ 
         Success: false, 
         Message: paypalErrorMessage || paypalError.message || "Payment failed",
         error: errorData,
@@ -227,7 +226,6 @@ router.post("/api/premium/purchase", whoami, async (req, res) => {
     res.send({ 
       Success: false, 
       Message: errorMessage, 
-      Message: errorMessage, 
       error: err.response?.data || err.details,
       details: err.message || err.details
     });
@@ -263,7 +261,6 @@ router.post("/api/premium/confirm", whoami, async (req, res) => {
 
     // Capture the payment if not already captured
     if (order.status === "APPROVED") {
-      const captureResponse = await axios.post(
       const captureResponse = await axios.post(
         `${apiBase}/v2/checkout/orders/${orderID}/capture`,
         {},
