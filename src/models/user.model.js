@@ -19,14 +19,10 @@ const USER_SCHEMA = new mongoose.Schema({
     phones:{
         type:String,
     },
-    Buildings:[
+    Buildings: [
         {
-            buildingName:{
-                type:String
-            },
-            buildingID:{
-                type:String
-            }
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'buildings'
         }
     ],
     updatedAt:{

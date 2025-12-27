@@ -4,14 +4,14 @@ import whoami from '../../middlewares/whoami.js';
 import QRCode from 'qrcode';
 import USERS from '../../models/user.model.js';
 import BUILDINGS from '../../models/building.model.js';
-import mongoose from 'mongoose'
-import {Filter} from 'bad-words';
+import mongoose from 'mongoose';
+import { Filter } from 'bad-words';
 
 const router = express.Router();
 
-// -------------------------------------
-// Helper: Check building name validity
-// -------------------------------------
+/* ---------------- HELPERS ---------------- */
+
+// Check building name validity
 const checkBuildingName = async (userID, buildingName, buildingId = null) => {
   if (!userID || !buildingName) return "Something went wrong.";
 
@@ -23,7 +23,7 @@ const checkBuildingName = async (userID, buildingName, buildingId = null) => {
   if (filter.isProfane(buildingName)) return "Building name contains bad words.";
 
   const query = { owner: userID, buildingName };
-  if (buildingId) query._id = { $ne: buildingId }; // exclude current building
+  if (buildingId) query._id = { $ne: buildingId };
 
   const exists = await BUILDINGS.findOne(query);
   if (exists) return "Building name already exists in your buildings.";
@@ -31,12 +31,9 @@ const checkBuildingName = async (userID, buildingName, buildingId = null) => {
   return true;
 };
 
-// -------------------------------------
-// Helper: Determine max floors & buildings
-// -------------------------------------
+// Determine max floors & buildings based on plan
 const checkPremiumSettings = (premium) => {
   const freePlan = { floors: 3, buildings: 1 };
-
   if (!premium || !premium.hasPremium) return { Success: true, Message: freePlan };
 
   const plans = {
@@ -50,77 +47,56 @@ const checkPremiumSettings = (premium) => {
   return { Success: true, Message: plans[planKey] || freePlan };
 };
 
-// -------------------------------------
-// POST /api/building/new
-// -------------------------------------
+// Normalize floor names array
+const normalizeFloorNames = (floorNames) => {
+  if (!Array.isArray(floorNames)) return [];
+  return floorNames.map(f => f.trim());
+};
+
+/* ---------------- CREATE BUILDING ---------------- */
 router.post("/api/building/new", whoami, upload.array("maps"), async (req, res) => {
   try {
-    /* ───────────────────────── USER CHECK ───────────────────────── */
     const USER = await USERS.findById(req.user._id);
     if (!USER) return res.send({ Success: false, Message: "User not found." });
     if (!USER.verified) return res.send({ Success: false, Message: "Verify account first." });
 
-    /* ───────────────────────── BODY VALIDATION ───────────────────────── */
     const { buildingName, floorNames } = req.body;
 
-    if (!buildingName || typeof buildingName !== "string") {
+    if (!buildingName || typeof buildingName !== "string")
       return res.send({ Success: false, Message: "Invalid building name." });
-    }
-
-    if (!Array.isArray(floorNames) || floorNames.length === 0) {
+    if (!Array.isArray(floorNames) || floorNames.length === 0)
       return res.send({ Success: false, Message: "Invalid floor names." });
-    }
 
-    /* ───────────────────────── DUPLICATE FLOOR CHECK ───────────────────────── */
-    const normalizedFloors = floorNames.map(name => name.trim().toLowerCase());
-    const uniqueFloors = new Set(normalizedFloors);
-    if (uniqueFloors.size !== normalizedFloors.length) {
+    const normalizedFloors = floorNames.map(f => f.trim().toLowerCase());
+    if (new Set(normalizedFloors).size !== normalizedFloors.length)
       return res.send({ Success: false, Message: "Floor names must be unique." });
-    }
 
-    /* ───────────────────────── PLAN LIMITS ───────────────────────── */
-    const premiumCheck = checkPremiumSettings(USER.premium);
-    const maxFloors = premiumCheck.Message.floors;
-    const maxBuildings = premiumCheck.Message.buildings;
+    const limits = checkPremiumSettings(USER.premium);
+    if (floorNames.length > limits.Message.floors)
+      return res.send({ Success: false, Message: `Max ${limits.Message.floors} floors allowed.` });
+    if (USER.Buildings.length >= limits.Message.buildings)
+      return res.send({ Success: false, Message: `Max ${limits.Message.buildings} buildings allowed.` });
 
-    if (floorNames.length > maxFloors) {
-      return res.send({ Success: false, Message: `Your plan allows up to ${maxFloors} floors.` });
-    }
+    const nameCheck = await checkBuildingName(USER._id, buildingName);
+    if (nameCheck !== true) return res.send({ Success: false, Message: nameCheck });
 
-    if (USER.Buildings.length >= maxBuildings) {
-      return res.send({ Success: false, Message: `Your plan allows up to ${maxBuildings} buildings.` });
-    }
-
-    /* ───────────────────────── FILE VALIDATION ───────────────────────── */
     const files = req.files || [];
-    if (files.length > floorNames.length) {
+    if (files.length > floorNames.length)
       return res.send({ Success: false, Message: "Too many map files uploaded." });
-    }
 
-    /* ───────────────────────── GENERATE BUILDING ID ───────────────────────── */
     const buildingId = new mongoose.Types.ObjectId();
-
-    /* ───────────────────────── MAP + QR GENERATION ───────────────────────── */
-    const MAPS = [];
-
-    for (let i = 0; i < floorNames.length; i++) {
-      const floorName = floorNames[i].trim();
-      const file = files[i]?.path || null;
-
-      const qrCode = await QRCode.toDataURL(
-        `https://www.alertup.world/building/${buildingId}/${encodeURIComponent(floorName)}`
-      );
-
-      MAPS.push({
-        floor: floorName,
-        map: file,
-        qrCode,
+    const MAPS = await Promise.all(
+      floorNames.map(async (floor, i) => ({
+        floor: floor.trim(),
+        map: files[i]?.path || null,
+        qrCode: await QRCode.toDataURL(
+          `https://www.alertup.world/building/${buildingId}/${encodeURIComponent(floor.trim())}`
+        ),
         scanned: [],
         createdAt: Date.now()
-      });
-    }
+      }))
+    );
 
-    /* ───────────────────────── CREATE BUILDING ───────────────────────── */
     const NEW_BUILDING = new BUILDINGS({
       _id: buildingId,
       buildingName: buildingName.trim(),
@@ -134,8 +110,10 @@ router.post("/api/building/new", whoami, upload.array("maps"), async (req, res) 
 
     await NEW_BUILDING.save();
 
-    /* ───────────────────────── UPDATE USER ───────────────────────── */
-    await USERS.findByIdAndUpdate(USER._id, { $push: { Buildings: NEW_BUILDING._id } });
+    // Push ObjectId into user.Buildings
+    await USERS.findByIdAndUpdate(USER._id, {
+      $push: { Buildings: NEW_BUILDING._id }
+    });
 
     return res.send({
       Success: true,
@@ -148,19 +126,15 @@ router.post("/api/building/new", whoami, upload.array("maps"), async (req, res) 
   }
 });
 
-
-
 /* ---------------- UPDATE BUILDING ---------------- */
-
 router.put('/api/building/:id', whoami, upload.array('maps'), async (req, res) => {
   try {
     const user = await USERS.findById(req.user._id);
     const building = await BUILDINGS.findById(req.params.id);
 
     if (!user || !building) return res.send({ Success: false, Message: 'Not found.' });
-    if (building.owner.toString() !== user._id.toString()) {
+    if (building.owner.toString() !== user._id.toString())
       return res.send({ Success: false, Message: 'Unauthorized.' });
-    }
 
     let { buildingName, floorNames } = req.body;
     floorNames = normalizeFloorNames(floorNames);
@@ -169,24 +143,22 @@ router.put('/api/building/:id', whoami, upload.array('maps'), async (req, res) =
     if (nameCheck !== true) return res.send({ Success: false, Message: nameCheck });
 
     const limits = checkPremiumSettings(user.premium);
-    if (floorNames.length > limits.floors) {
-      return res.send({ Success: false, Message: `Max ${limits.floors} floors allowed.` });
-    }
+    if (floorNames.length > limits.Message.floors)
+      return res.send({ Success: false, Message: `Max ${limits.Message.floors} floors allowed.` });
 
     const files = req.files || [];
-    if (files.length !== floorNames.length) {
+    if (files.length !== floorNames.length)
       return res.send({ Success: false, Message: 'Each floor must have one map.' });
-    }
 
     const MAPS = await Promise.all(
       floorNames.map(async (floor, i) => ({
         floor,
-        map: files[i].path,
+        map: files[i]?.path || null,
         qrCode: await QRCode.toDataURL(
           `${process.env.CLIENT_SCAN_QR_URL}?building=${encodeURIComponent(buildingName)}&floor=${encodeURIComponent(floor)}`
         ),
-        createdAt: Date.now(),
-        scanned: []
+        scanned: [],
+        createdAt: Date.now()
       }))
     );
 
@@ -197,56 +169,36 @@ router.put('/api/building/:id', whoami, upload.array('maps'), async (req, res) =
     });
 
     res.send({ Success: true, Message: 'Building updated.' });
-  } catch {
+  } catch (error) {
+    console.error(error);
     res.send({ Success: false, Message: 'Server error.' });
   }
 });
 
+/* ---------------- GET BUILDING BY ID ---------------- */
 router.get('/api/building/id/:buildingID', async (req, res) => {
   const { buildingID } = req.params;
 
   try {
-    if (!buildingID) {
-      return res.send({
-        Success: false,
-        Message: "Invalid building ID."
-      });
-    }
+    if (!buildingID) return res.send({ Success: false, Message: "Invalid building ID." });
 
-    const BUILDING = await BUILDINGS
-      .findById(buildingID)
+    const BUILDING = await BUILDINGS.findById(buildingID)
       .populate("owner", "_id username email");
 
-    if (!BUILDING) {
-      return res.send({
-        Success: false,
-        Message: "Building not found."
-      });
-    }
+    if (!BUILDING) return res.send({ Success: false, Message: "Building not found." });
 
-    return res.send({
-      Success: true,
-      Message: BUILDING
-    });
-
+    return res.send({ Success: true, Message: BUILDING });
   } catch (error) {
-    return res.send({
-      Success: false,
-      Message: "Something went wrong."
-    });
+    console.error(error);
+    return res.send({ Success: false, Message: "Something went wrong." });
   }
 });
 
-
 /* ---------------- GET MY BUILDINGS ---------------- */
-
 router.get("/api/building/my", whoami, async (req, res) => {
   try {
-    if (!req.user || !req.user._id) {
-      return res.send({ Success: false, Message: "User not authenticated" });
-    }
+    if (!req.user || !req.user._id) return res.send({ Success: false, Message: "User not authenticated" });
 
-    // Fetch all buildings owned by the logged-in user
     const buildings = await BUILDINGS.find({ owner: req.user._id, isDeactivated: false });
 
     return res.send({ Success: true, Message: buildings });
@@ -256,20 +208,15 @@ router.get("/api/building/my", whoami, async (req, res) => {
   }
 });
 
-/* ---------------- SCAN ---------------- */
-
+/* ---------------- SCAN FLOOR ---------------- */
 router.get('/api/building/scan/:id/:floor', async (req, res) => {
-  console.log(req.params)
   try {
     const building = await BUILDINGS.findById(req.params.id);
-    if (!building || building.isDeactivated) {
+    if (!building || building.isDeactivated)
       return res.send({ Success: false, Message: 'Building not found.' });
-    }
 
     const floorData = building.maps.find(f => f.floor === req.params.floor);
-    if (!floorData) {
-      return res.send({ Success: false, Message: 'Floor not found.' });
-    }
+    if (!floorData) return res.send({ Success: false, Message: 'Floor not found.' });
 
     res.send({
       Success: true,
@@ -279,49 +226,76 @@ router.get('/api/building/scan/:id/:floor', async (req, res) => {
         scannedCount: floorData.scanned.length
       }
     });
-  } catch {
+  } catch (error) {
+    console.error(error);
     res.send({ Success: false, Message: 'Error.' });
   }
 });
 
-router.delete('/api/building', whoami, async (req, res) => {
-  const { buildingID } = req.body;
+
+router.get('/api/debug/user-buildings', whoami, async (req, res) => {
+  const user = await USERS.findById(req.user._id).select('Buildings');
+  res.json({
+    buildingsCount: user.Buildings.length,
+    buildings: user.Buildings.map(b => b.toString())
+  });
+});
+/* ---------------- DELETE BUILDING ---------------- */
+router.delete('/api/building/delete/:buildingID', whoami, async (req, res) => {
+  const { buildingID } = req.params;  // From URL param, not body
+  console.log('Delete request for buildingID:', buildingID);
+  
+  // Validate ObjectId format first
+  if (!mongoose.Types.ObjectId.isValid(buildingID)) {
+    return res.status(400).send({ 
+      Success: false, 
+      Message: "Invalid building ID format." 
+    });
+  }
+
+  const buildingObjectId = new mongoose.Types.ObjectId(buildingID);
 
   try {
-    // Find building first
-    const findBuilding = await BUILDINGS.findOne({
-      _id: buildingID,
+    const deletedBuilding = await BUILDINGS.findOneAndDelete({
+      _id: buildingObjectId,
       owner: req.user._id
     });
 
-    if (!findBuilding) {
-      return res.send({ Success: false, Message: "Building not found or not yours." });
+    if (!deletedBuilding) {
+      return res.status(404).send({ 
+        Success: false, 
+        Message: "Building not found or not yours." 
+      });
     }
 
-    // Find user
-    const user = await USERS.findById(req.user._id);
-    if (!user) {
-      return res.send({ Success: false, Message: "User not found." });
-    }
+    console.log('✅ Building deleted:', deletedBuilding._id);
 
-    // Remove building from user's array
-    const index = user.Buildings.findIndex(f => f._id.toString() === buildingID);
-    if (index !== -1) {
-      user.Buildings.splice(index, 1);
-      await user.save();
-    }
+    // DEBUG: Check user's Buildings BEFORE
+    const userBefore = await USERS.findById(req.user._id).select('Buildings');
+    console.log('🔍 BEFORE - User Buildings count:', userBefore.Buildings.length);
+    console.log('🔍 BEFORE - Contains target?', userBefore.Buildings.some(b => b.equals(buildingObjectId)));
 
-    // Delete the building
-    await BUILDINGS.findOneAndDelete({ _id: buildingID, owner: req.user._id });
+    // Pull from user's Buildings array
+    const updateResult = await USERS.findByIdAndUpdate(
+      req.user._id,
+      { $pull: { Buildings: buildingObjectId } },
+      { new: true }
+    );
 
-    return res.send({ Success: true, Message: "Deleted." });
+    // DEBUG: Check AFTER
+    console.log('🔍 AFTER - User Buildings count:', updateResult.Buildings.length);
+    console.log('✅ Update modified:', updateResult);
+
+    return res.send({ Success: true, Message: "Building deleted successfully." });
   } catch (err) {
-    console.error(err);
-    return res.send({ Success: false, Message: "Something went wrong." });
+    console.error('❌ Delete Error:', err);
+    return res.status(500).send({ Success: false, Message: "Server error." });
   }
 });
 
 
+
+/* ---------------- DEACTIVATE BUILDING ---------------- */
 router.put('/api/building/deactivate/:id', whoami, async (req, res) => {
   try {
     const building = await BUILDINGS.findOne({ _id: req.params.id, owner: req.user._id });

@@ -30,6 +30,7 @@ const defaultAllowed = [
   "https://alertup.world",
   "https://www.alertup.world",
   "https://alertup.vercel.app",
+  "http://localhost:5173"
 ];
 
 // Merge env list with defaults (env can override/append)
