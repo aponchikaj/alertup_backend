@@ -114,7 +114,7 @@ router.post('/api/auth/register', async (req, res) => {
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
           <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
             <h1 style="color: #FF7B22; margin-top: 0;">Welcome to AlertUp!</h1>
-            <p style="color: #333; font-size: 16px;">Hello <strong>${username}</strong>,</p>
+            <p style="color: #333; font-size: 16px;">Hello <strong>${userType == "Company" ? company : name + ' ' + lastname}</strong>,</p>
             <p style="color: #666;">Thank you for joining AlertUp! We're excited to have you on board.</p>
             <p style="color: #666;">To get started and access all features, please verify your email address.</p>
             <div style="background-color: #e3f2fd; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #2196f3;">
@@ -143,95 +143,60 @@ router.post('/api/auth/register', async (req, res) => {
 });
 
 
-router.post('/api/auth/login',async(req,res)=>{
-  const {user,password}=req.body
+router.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
 
-  if(!user||!password){
-    return res.send({Success:false,Message:"Invalid fields."})
+  if (!email || !password) {
+    return res.send({ Success: false, Message: "Invalid fields." });
   }
 
-  try{
-    let USER;
+  try {
+    const USER = await USERS.findOne({ email });
+    if (!USER) return res.send({ Success: false, Message: "Invalid credentials." });
 
-    if(user.includes('@')){
-      USER = await USERS.findOne({email:user})
-    }else if(!user.includes('@')){
-      USER = await USERS.findOne({username:user});
-    }
+    const isPasswordValid = await bcrypt.compare(password, USER.password);
+    if (!isPasswordValid) return res.send({ Success: false, Message: "Invalid credentials." });
 
-    if(!USER){
-      return res.send({Success:false,Message:'Invalid credentials.'})
-    }
+    const userToken = jwt.sign({ userID: USER._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
-    const checkPassword = await bcrypt.compare(password,USER.password);
-    if(!checkPassword){
-      return res.send({Success:false,Message:"Invalid credentials."})
-    }
-
-    const userToken = await jwt.sign({userID:USER._id},process.env.JWT_SECRET,{
-      expiresIn:'7d'
-    })
-
-    const reqIsSecure2 = req.secure || req.headers['x-forwarded-proto'] === 'https';
-
-    // Detect Safari/iOS for special handling
-    const userAgent = req.headers['user-agent'] || '';
-    const isSafari = /Safari/i.test(userAgent) && !/Chrome/i.test(userAgent);
-    const isIOS = /iPhone|iPad|iPod/i.test(userAgent);
-
-    const cookieOptions2 = {
+    const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
+    const cookieOptions = {
       httpOnly: true,
-      secure: reqIsSecure2,
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-      path: '/', // Ensure cookie is available across all paths
+      secure: reqIsSecure,
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: '/',
+      sameSite: reqIsSecure ? 'None' : 'Lax'
     };
-    
-    // Safari/iOS requires SameSite=None with Secure for cross-site cookies
-    if (reqIsSecure2) {
-      cookieOptions2.sameSite = 'None';
-    } else {
-      cookieOptions2.sameSite = 'Lax';
-    }
 
-    res.cookie('userToken', userToken, cookieOptions2);
+    res.cookie('userToken', userToken, cookieOptions);
 
+    // Send login notification email
     try {
+      const displayName = USER.userType === "Individual" ? USER.name : USER.company;
       const loginHTML = `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
           <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
             <h1 style="color: #FF7B22; margin-top: 0;">🔐 New Login Detected</h1>
-            <p style="color: #333; font-size: 16px;">Hello <strong>${USER.username}</strong>,</p>
+            <p style="color: #333; font-size: 16px;">Hello <strong>${displayName}</strong>,</p>
             <p style="color: #666;">We detected a new login to your AlertUp account.</p>
-            <div style="background-color: #fff3cd; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107;">
-              <p style="margin: 0; color: #856404; font-weight: bold;">⚠️ Security Alert</p>
-              <p style="margin: 5px 0 0 0; color: #666; font-size: 14px;">If this wasn't you, please contact us immediately to secure your account.</p>
-            </div>
-            <p style="color: #666; font-size: 14px; margin-top: 30px;">If you recognize this login, you can safely ignore this email.</p>
-            <p style="color: #666; font-size: 14px; margin-top: 20px;">Best regards,<br><strong style="color: #FF7B22;">AlertUp Security Team</strong></p>
           </div>
         </div>
       `;
-      await sendMail(
-        USER.email,
-        "New Login - AlertUp",
-        `Hey someone has logged into your account. was that you? contact us if it wasn't you.`,
-        undefined,
-        loginHTML
-      );
+      await sendMail(USER.email, "New Login - AlertUp", `Hey ${displayName}, someone logged into your account.`, undefined, loginHTML);
     } catch (err) {
       console.error("MAIL ERROR:", err);
     }
 
-    // For Safari/iOS compatibility, also return token in response
-    // Frontend can store in localStorage as fallback
     return res.send({
       Success: true,
-      Message: "Logged in.",
-      token: (isSafari || isIOS) ? userToken : undefined // Only send token for Safari/iOS as fallback
-    })
-  }catch{
-    return res.send({Success:false,Message:"Server error."})
+      Message: "Logged in successfully.",
+      token: userToken
+    });
+
+  } catch (err) {
+    console.error("LOGIN ERROR:", err);
+    return res.send({ Success: false, Message: "Server error." });
   }
-})
+});
 
 export default router
