@@ -212,42 +212,33 @@ router.get("/api/building/my", whoami, async (req, res) => {
 /* ---------------- SCAN FLOOR ---------------- */
 router.get('/api/building/scan/:id/:floor', async (req, res) => {
   try {
-    const { id, floor } = req.params;
-
-    if (!id || !floor) {
-      return res.send({ Success: false, Message: 'Invalid parameters.' });
-    }
-
-    const building = await BUILDINGS.findById(id);
-    if (!building || building.isDeactivated) {
+    const building = await BUILDINGS.findById(req.params.id);
+    if (!building || building.isDeactivated)
       return res.send({ Success: false, Message: 'Building not found.' });
-    }
 
     const floorData = building.maps.find(
-      f => String(f.floor) === String(floor)
+      f => String(f.floor) === String(req.params.floor)
     );
-
-    if (!floorData) {
+    if (!floorData)
       return res.send({ Success: false, Message: 'Floor not found.' });
-    }
 
-    // Increment scan counter
+    // ✅ increase scans
     floorData.scanned = (floorData.scanned || 0) + 1;
 
+    // ✅ save parent document
     await building.save();
 
-    return res.send({
+    res.send({
       Success: true,
       Message: {
         buildingName: building.buildingName,
-        floor: floorData.floor,
-        scannedCount: floorData.scanned,
-        map: floorData.mapUrl
+        floorData,
+        scannedCount: floorData.scanned
       }
     });
   } catch (error) {
     console.error(error);
-    return res.send({ Success: false, Message: 'Server error.' });
+    res.send({ Success: false, Message: 'Error.' });
   }
 });
 
