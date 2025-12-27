@@ -4,6 +4,7 @@ const router = express.Router();
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { Filter } from 'bad-words';
+import rateLimit from 'express-rate-limit'
 
 import USERS from '../../models/user.model.js';
 import sendMail from '../../services/sendEmail.js';
@@ -142,8 +143,13 @@ router.post('/api/auth/register', async (req, res) => {
   }
 });
 
+const loginLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 15 minutes
+  max: 5, // 5 login attempts per IP
+  message: { Success: false, Message: 'Too many attempts, try again later.' },
+});
 
-router.post('/api/auth/login', async (req, res) => {
+router.post('/api/auth/login', loginLimiter, async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password) {
@@ -190,7 +196,14 @@ router.post('/api/auth/login', async (req, res) => {
     return res.send({
       Success: true,
       Message: "Logged in successfully.",
-      token: userToken
+      token: userToken,
+      token: userToken,
+      user: {
+        name: USER.name,
+        company: USER.company,
+        userType: USER.userType,
+        email: USER.email
+      }
     });
 
   } catch (err) {
