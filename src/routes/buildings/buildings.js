@@ -218,6 +218,8 @@ router.get('/api/building/scan/:id/:floor', async (req, res) => {
 
     const floorData = building.maps.find(f => f.floor === req.params.floor);
     if (!floorData) return res.send({ Success: false, Message: 'Floor not found.' });
+    floorData.scanned +=1
+    floorData.save()
 
     res.send({
       Success: true,

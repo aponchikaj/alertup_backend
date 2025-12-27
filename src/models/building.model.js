@@ -5,7 +5,7 @@ const MAP_SCHEMA = new mongoose.Schema({
   map: String,
   qrCode: String,
   createdAt: { type: Date, default: Date.now },
-  scanned: { type: Array, default: [] }
+  scanned: {type:Number,default:0}
 })
 
 const GLOBAL_SCAN_SCHEMA = new mongoose.Schema({
