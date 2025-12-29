@@ -159,10 +159,10 @@ router.get('/route/:qrId', async (req, res) => {
         if (floorMap.map?.startsWith('http')) {
           return floorMap.map;
         } else if (floorMap.map?.startsWith('/uploads')) {
-          return `${process.env.API_BASE_URL || 'http://localhost:3001'}${floorMap.map}`;
+          return `${process.env.API_BASE_URL || 'https://www.alertup.world'}${floorMap.map}`;
         } else if (floorMap.map?.includes('uploads')) {
           const relativePath = floorMap.map.split('uploads')[1];
-          return `${process.env.API_BASE_URL || 'http://localhost:3001'}/uploads${relativePath}`;
+          return `${process.env.API_BASE_URL || 'https://www.alertup.world'}/uploads${relativePath}`;
         }
         return null;
       })();
@@ -179,11 +179,11 @@ router.get('/route/:qrId', async (req, res) => {
         if (floorMap.map?.startsWith('http')) {
           return floorMap.map; // Already a full URL
         } else if (floorMap.map?.startsWith('/uploads')) {
-          return `${process.env.API_BASE_URL || 'http://localhost:3001'}${floorMap.map}`; // Relative path
+          return `${process.env.API_BASE_URL || 'https://www.alertup.world'}${floorMap.map}`; // Relative path
         } else if (floorMap.map?.includes('uploads')) {
           // Convert local path to URL
           const relativePath = floorMap.map.split('uploads')[1];
-          return `${process.env.API_BASE_URL || 'http://localhost:3001'}/uploads${relativePath}`;
+          return `${process.env.API_BASE_URL || 'https://www.alertup.world'}/uploads${relativePath}`;
         }
         return null;
       })(),
