@@ -45,7 +45,7 @@ export const convertImageToSVG = async (imagePath, options = {}) => {
         height = 900;
       }
     } catch (dimError) {
-      console.log('Could not determine image dimensions, using defaults');
+      // Could not determine image dimensions, using defaults
     }
 
     // Create SVG wrapper with embedded image

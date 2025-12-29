@@ -15,11 +15,8 @@ router.get('/building/:buildingId/floor/:floorNumber', async (req, res) => {
   try {
     const { buildingId, floorNumber } = req.params;
 
-    console.log(`🔍 Floor map request: buildingId=${buildingId}, floorNumber=${floorNumber}`);
-
     // Validate input
     if (!isValidObjectId(buildingId)) {
-      console.log(`❌ Invalid building ID format: ${buildingId}`);
       return res.status(400).json({
         success: false,
         message: 'Invalid building ID format',
@@ -28,7 +25,6 @@ router.get('/building/:buildingId/floor/:floorNumber', async (req, res) => {
 
     const floor = parseInt(floorNumber, 10);
     if (isNaN(floor) || floor < 1) {
-      console.log(`❌ Invalid floor number: ${floorNumber}`);
       return res.status(400).json({
         success: false,
         message: 'Invalid floor number. Must be a positive integer.',
@@ -41,11 +37,8 @@ router.get('/building/:buildingId/floor/:floorNumber', async (req, res) => {
       floorNumber: floor,
     });
 
-    console.log(`📊 Floor data found: ${!!floorData}`);
-
     // If no floor data exists, create a default one
     if (!floorData) {
-      console.log(`⚠️ No floor data found, creating default floor ${floor} for building ${buildingId}`);
       
       const defaultSVG = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" 
@@ -100,19 +93,16 @@ router.get('/building/:buildingId/floor/:floorNumber', async (req, res) => {
       });
       
       await floorData.save();
-      console.log(`✅ Created default floor data for floor ${floor}`);
     }
 
     // Validate SVG content
     if (!floorData.svgContent) {
-      console.log(`❌ No SVG content for floor ${floor}`);
       return res.status(404).json({
         success: false,
         message: 'No SVG content available for this floor',
       });
     }
 
-    console.log(`✅ Returning floor data for floor ${floor}`);
     return res.status(200).json({
       success: true,
       floor: floorData.floorNumber,

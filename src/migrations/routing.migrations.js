@@ -14,27 +14,20 @@ import QRCode from '../models/qrcode.model.js';
  * Run this once after creating models
  */
 export const createIndexes = async () => {
-  console.log('Creating indexes...');
-
   try {
     // Node indexes
     await Node.collection.createIndex({ buildingId: 1, floorNumber: 1 });
     await Node.collection.createIndex({ buildingId: 1, floorNumber: 1, type: 1 });
-    console.log('✓ Node indexes created');
 
     // Floor indexes
     await Floor.collection.createIndex(
       { buildingId: 1, floorNumber: 1 },
       { unique: true }
     );
-    console.log('✓ Floor indexes created');
 
     // QRCode indexes
     await QRCode.collection.createIndex({ code: 1 }, { unique: true });
     await QRCode.collection.createIndex({ code: 1, isActive: 1 });
-    console.log('✓ QRCode indexes created');
-
-    console.log('All indexes created successfully');
   } catch (error) {
     console.error('Error creating indexes:', error);
     throw error;
@@ -46,15 +39,12 @@ export const createIndexes = async () => {
  * Run this to populate database with sample building/floor/nodes
  */
 export const seedExampleData = async () => {
-  console.log('Seeding example data...');
-
   try {
     // Create building
     const building = await Building.create({
       name: 'Emergency Test Building',
       address: '123 Safety Street',
     });
-    console.log('✓ Building created:', building._id);
 
     // Create floor
     const floor = await Floor.create({
@@ -74,7 +64,6 @@ export const seedExampleData = async () => {
         <text x="750" y="160" font-size="12">Office C</text>
       `,
     });
-    console.log('✓ Floor created:', floor._id);
 
     // Create nodes
     const nodeData = [
@@ -98,7 +87,6 @@ export const seedExampleData = async () => {
       });
       nodes.push(node);
     }
-    console.log('✓ Nodes created:', nodes.length);
 
     // Create connections between nodes
     const connections = [
@@ -119,7 +107,6 @@ export const seedExampleData = async () => {
     for (const node of nodes) {
       await node.save();
     }
-    console.log('✓ Node connections created');
 
     // Create QR codes
     const qrCodes = [
@@ -145,13 +132,6 @@ export const seedExampleData = async () => {
         isActive: true,
       });
     }
-    console.log('✓ QR codes created:', qrCodes.length);
-
-    console.log('\n✓ Example data seeded successfully!');
-    console.log('\nTest with these QR codes:');
-    qrCodes.forEach(qr => {
-      console.log(`  - ${qr.code}`);
-    });
 
     return { building, floor, nodes };
   } catch (error) {
@@ -165,15 +145,11 @@ export const seedExampleData = async () => {
  * Use with caution - removes all buildings, floors, nodes, QR codes
  */
 export const clearAllData = async () => {
-  console.log('Clearing all routing data...');
-
   try {
     await QRCode.deleteMany({});
     await Node.deleteMany({});
     await Floor.deleteMany({});
     await Building.deleteMany({});
-
-    console.log('✓ All routing data cleared');
   } catch (error) {
     console.error('Error clearing data:', error);
     throw error;
@@ -185,8 +161,6 @@ export const clearAllData = async () => {
  * Checks for orphaned records and inconsistencies
  */
 export const validateDatabase = async () => {
-  console.log('Validating database integrity...');
-
   const issues = [];
 
   try {
@@ -220,13 +194,6 @@ export const validateDatabase = async () => {
       }
     }
 
-    if (issues.length === 0) {
-      console.log('✓ Database is valid');
-    } else {
-      console.log('✗ Found issues:');
-      issues.forEach(issue => console.log(`  - ${issue}`));
-    }
-
     return { isValid: issues.length === 0, issues };
   } catch (error) {
     console.error('Error validating database:', error);
@@ -239,8 +206,6 @@ export const validateDatabase = async () => {
  * Attempts to fix orphaned node references
  */
 export const repairConnections = async () => {
-  console.log('Repairing broken connections...');
-
   try {
     const nodes = await Node.find();
     let repaired = 0;
@@ -253,7 +218,6 @@ export const repairConnections = async () => {
         if (connNode) {
           validConnections.push(connId);
         } else {
-          console.log(`  Removed broken connection: ${connId}`);
           repaired++;
         }
       }
@@ -263,8 +227,6 @@ export const repairConnections = async () => {
         await node.save();
       }
     }
-
-    console.log(`✓ Repaired ${repaired} broken connections`);
   } catch (error) {
     console.error('Error repairing connections:', error);
     throw error;
@@ -277,13 +239,9 @@ export const repairConnections = async () => {
  */
 export const runMigrations = async () => {
   try {
-    console.log('Starting migrations...\n');
-
     await createIndexes();
     await seedExampleData();
     await validateDatabase();
-
-    console.log('\n✓ All migrations completed successfully');
   } catch (error) {
     console.error('Migration failed:', error);
     process.exit(1);

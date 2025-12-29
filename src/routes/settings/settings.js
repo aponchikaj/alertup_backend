@@ -70,7 +70,6 @@ router.put('/api/settings/save', whoami, async (req, res) => {
 // PUT /api/settings/change-password
 router.put('/api/settings/changePassword', whoami, async (req, res) => {
   const { oldPassword, newPassword } = req.body;
-//   console.log(req.body)
 
   if (!oldPassword || !newPassword) return res.send({ Success: false, Message: "Invalid fields." });
   if (newPassword.length < 6 || newPassword.length > 16) return res.send({ Success: false, Message: "Password must be 6-16 characters." });
@@ -300,7 +299,6 @@ router.put('/api/settings/verify', whoami, async (req, res) => {
 // POST /api/settings/account - delete account
 router.post('/api/settings/account', whoami, async (req, res) => {
   const { password } = req.body;
-    // console.log(req.body)
   if (!password) return res.send({ Success: false, Message: "Password required." });
   try {
     const user = await USERS.findById(req.user._id);

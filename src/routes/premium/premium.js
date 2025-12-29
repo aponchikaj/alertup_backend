@@ -58,7 +58,6 @@ router.get("/api/premium/plans", (_, res) => {
 // ✅ Create payment - return NowPayments link
 router.post("/api/premium/purchase", whoami, async (req, res) => {
   try {
-    console.log("Purchase request received:", req.body);
     const { option } = req.body;
     
     if (!option) {
@@ -72,10 +71,8 @@ router.post("/api/premium/purchase", whoami, async (req, res) => {
     }
 
     const plan = PREMIUM_PLANS[option];
-    console.log("Selected plan:", plan);
     
     if (!plan) {
-      console.error("Plan not found in PREMIUM_PLANS");
       return res.send({ Success: false, Message: "Plan configuration error" });
     }
 

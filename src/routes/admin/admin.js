@@ -37,7 +37,6 @@ router.get('/api/admin/isAdmin',isAdmin,async(req,res)=>{
 // ########################################### LOGIN SECTION ###########################################
 
 router.post('/api/admin/login', async (req, res) => {
-  // console.log(req.body)
   const { user, password } = req.body;
 
   try {

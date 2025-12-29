@@ -13,8 +13,6 @@ const cloudinaryConfig = {
   api_secret: process.env.CLOUDINARY_API_SECRET
 };
 
-console.log('🔧 Cloudinary config:', cloudinaryConfig);
-
 cloudinary.config(cloudinaryConfig);
 
 // Configure Cloudinary storage for multer
@@ -41,11 +39,7 @@ const upload = multer({ storage });
  */
 export const uploadToCloudinary = async (fileBuffer, folder = 'alertup/floor-maps') => {
   try {
-    console.log('🔧 Cloudinary config check:', {
-      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-      api_key: process.env.CLOUDINARY_API_KEY ? 'Present' : 'Missing',
-      api_secret: process.env.CLOUDINARY_API_SECRET ? 'Present' : 'Missing'
-    });
+    // Cloudinary config check:
 
     return new Promise((resolve, reject) => {
       cloudinary.uploader.upload_stream(
@@ -62,7 +56,6 @@ export const uploadToCloudinary = async (fileBuffer, folder = 'alertup/floor-map
             console.error('❌ Cloudinary upload error:', error);
             reject(error);
           } else {
-            console.log('✅ Cloudinary upload success:', result.secure_url);
             resolve(result);
           }
         }

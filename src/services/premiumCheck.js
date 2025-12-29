@@ -8,7 +8,6 @@ import sendMail from "./sendEmail.js";
  */
 export const checkPremiumStatus = async () => {
   try {
-    console.log("🔍 Starting premium status check...");
     const now = new Date();
 
     // Find all users with expired premium (to date has passed)
@@ -162,11 +161,7 @@ export const checkPremiumStatus = async () => {
         undefined,
         premiumInvoiceHtml
       );
-
-      console.log(`✅ Processed user ${user.email}: Deactivated ${buildingsToDeactivate.length} buildings`);
     }
-
-    console.log("✅ Premium status check completed");
   } catch (err) {
     console.error("❌ Error in premium status check:", err);
   }

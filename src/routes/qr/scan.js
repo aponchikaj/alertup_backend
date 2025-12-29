@@ -14,8 +14,6 @@ router.get('/route/:qrId', async (req, res) => {
   try {
     const { qrId } = req.params;
     
-    console.log(`🔍 QR Code scanned: ${qrId}`);
-    
     // Parse QR ID format: qr_${buildingId}_${floorNumber}_${nodeId}
     const qrPattern = /^qr_(.+)_(\d+)_(.+)$/;
     const match = qrId.match(qrPattern);
@@ -29,8 +27,6 @@ router.get('/route/:qrId', async (req, res) => {
     }
     
     const [, buildingId, floorNumber, nodeId] = match;
-    
-    console.log(`🔍 QR Parsed - Building: ${buildingId}, Floor: ${floorNumber}, Node: ${nodeId}`);
     
     // Validate IDs
     if (!isValidObjectId(buildingId) || !isValidObjectId(nodeId)) {
@@ -67,10 +63,6 @@ router.get('/route/:qrId', async (req, res) => {
         qrId
       });
     }
-    
-    console.log(`🏢 Building found: ${building.buildingName}`);
-    console.log(`📍 Node found: ${node.label || node.type} at (${node.x}, ${node.y})`);
-    console.log(`📊 Node floor: ${node.floorNumber}, Looking for floor: ${floor}`);
     
     // Get all nodes for this floor with full connection data
     const floorNodes = await Node.find({
@@ -138,35 +130,18 @@ router.get('/route/:qrId', async (req, res) => {
     // If still not found, try to find the first map (fallback)
     if (!floorMap && building.maps && building.maps.length > 0) {
       floorMap = building.maps[0];
-      console.log(`🔄 Using first available map as fallback`);
-    }
-    
-    console.log(`🗺️ Floor map found: ${!!floorMap}`);
-    console.log(`🏢 Building maps: ${building.maps?.length || 0}`);
-    console.log(`🎯 Looking for floor: ${floor}`);
-    
-    if (building.maps && building.maps.length > 0) {
-      console.log(`📋 Available floors:`, building.maps.map(m => m.floor));
     }
     
     if (floorMap) {
-      console.log(`📄 Map data: ${floorMap.map?.substring(0, 100)}...`);
-      console.log(`📄 Is SVG: ${floorMap.map?.includes('<svg')}`);
-      console.log(`📄 Is URL: ${floorMap.map?.startsWith('http') || floorMap.map?.startsWith('/uploads')}`);
-      
       // Show the converted URL
       const imageUrl = (() => {
         if (floorMap.map?.startsWith('http')) {
           return floorMap.map;
         } else if (floorMap.map?.startsWith('/uploads')) {
-          return `${process.env.API_BASE_URL || 'https://www.alertup.world'}${floorMap.map}`;
-        } else if (floorMap.map?.includes('uploads')) {
-          const relativePath = floorMap.map.split('uploads')[1];
-          return `${process.env.API_BASE_URL || 'https://www.alertup.world'}/uploads${relativePath}`;
+          return process.env.API_BASE_URL ? `${process.env.API_BASE_URL}${floorMap.map}` : `https://www.alertup.world${floorMap.map}`;
         }
         return null;
       })();
-      console.log(`🌐 Converted image URL: ${imageUrl}`);
     }
     
     // Construct floor map data - handle both uploaded images and SVG content
@@ -243,8 +218,6 @@ router.get('/route/:qrId', async (req, res) => {
     await Node.findByIdAndUpdate(nodeId, {
       $inc: { scanCount: 1 }
     });
-    
-    console.log(`✅ QR Code scanned successfully: ${qrId} -> Node ${node._id}`);
     
     res.status(200).json({
       success: true,

@@ -3,9 +3,6 @@ const router = express.Router()
 
 router.get('/api/connect',(req,res)=>{
     try{
-        // Log connection attempt for debugging
-        console.log(`[Connect] Connection check from: ${req.headers.origin || req.headers.referer || 'unknown'}`);
-        
         return res.send({
             Success: true,
             Message: 'Connected.',
