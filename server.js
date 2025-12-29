@@ -12,13 +12,15 @@ import buildingRoutes from './src/routes/buildings/buildings.js'
 import contactRoutes from './src/routes/contact/contact.js'
 import reportRoutes from './src/routes/contact/report.js'
 import dashboardRoutes from './src/routes/dashboard/dashboard.js'
-import premiumRoutes from './src/routes/premium/premium.js'
-import paymentsRoutes from './src/routes/payments/payments.js'
 import settingsRoutes from './src/routes/settings/settings.js'
 import userRoutes from './src/routes/user/user.js'
 import connectRouter from './src/routes/connect/connect.js'
 import debugRouter from './src/routes/debug.js'
-import { checkPremiumStatus } from './src/services/premiumCheck.js'
+import routingRouter from './src/routes/routing/route.js'
+import nodesRouter from './src/routes/nodes/nodes.js'
+import uploadRouter from './src/routes/upload/upload.js'
+import qrRouter from './src/routes/qr/qr.js'
+import qrScanRouter from './src/routes/qr/scan.js'
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -70,8 +72,20 @@ app.use(cors({
   credentials: true // important for cookies
 }))
 
-
 app.use(bparser.json())
+
+// Serve static files from uploads directory
+app.use('/uploads', express.static('uploads', {
+  setHeaders: (res, path) => {
+    if (path.endsWith('.svg')) {
+      res.setHeader('Content-Type', 'image/svg+xml');
+    } else if (path.endsWith('.png') || path.endsWith('.jpg') || path.endsWith('.jpeg')) {
+      res.setHeader('Content-Type', 'image/*');
+    }
+    res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  }
+}))
 
 app.use(adminRoutes)
 app.use(authRoutes)
@@ -80,12 +94,15 @@ app.use(buildingRoutes)
 app.use(contactRoutes)
 app.use(reportRoutes)
 app.use(dashboardRoutes)
-app.use(premiumRoutes)
-app.use(paymentsRoutes)
 app.use(settingsRoutes)
 app.use(userRoutes)
 app.use(connectRouter)
 app.use(debugRouter)
+app.use('/api/route', routingRouter)
+app.use(nodesRouter)
+app.use('/api/upload', uploadRouter)
+app.use(qrRouter)
+app.use('/api/qr/scan', qrScanRouter)
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -120,39 +137,11 @@ const startServer = async () => {
     app.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);
       console.log(`📍 Health check: http://localhost:${PORT}/health`);
-      
-      // Start premium status check job (runs daily at midnight)
-      // Check every 24 hours (86400000 ms)
-      const runPremiumCheck = () => {
-        const now = new Date();
-        const hours = now.getHours();
-        const minutes = now.getMinutes();
-        
-        // Run at midnight (00:00) or immediately if it's close to midnight
-        if (hours === 0 && minutes === 0) {
-          checkPremiumStatus();
-        }
-      };
-      
-      // Run check immediately on startup (for testing/debugging)
-      // In production, you might want to comment this out
-      // checkPremiumStatus();
-      
-      // Schedule daily check (every hour, but only runs at midnight)
-      setInterval(runPremiumCheck, 60 * 60 * 1000); // Check every hour
-      
-      // Also run a check every 24 hours as a fallback
-      setInterval(() => {
-        checkPremiumStatus();
-      }, 24 * 60 * 60 * 1000); // Every 24 hours
-      
-      console.log('✅ Premium status check job scheduled (runs daily)');
     });
   } catch (error) {
     console.error('❌ MongoDB connection error:', error.message);
     console.log('⚠️  Starting server anyway...');
     
-    // Start server even if MongoDB fails (for debugging)
     app.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT} (without database)`);
       console.log(`📍 Health check: http://localhost:${PORT}/health`);

@@ -1,10 +1,15 @@
 import express from 'express';
-import upload from '../../middlewares/upload.js';
-import whoami from '../../middlewares/whoami.js';
+import upload from '../../middlewares/buildingUpload.js';
 import QRCode from 'qrcode';
 import USERS from '../../models/user.model.js';
 import BUILDINGS from '../../models/building.model.js';
+import Floor from '../../models/floor.model.js';
+import Node from '../../models/node.model.js';
+import QRCodeModel from '../../models/qrcode.model.js';
 import mongoose from 'mongoose';
+import { uploadToCloudinary } from '../../services/cloudinaryService.js';
+import whoami from '../../middlewares/whoami.js';
+import fs from 'fs';
 import { Filter } from 'bad-words';
 
 const router = express.Router();
@@ -31,22 +36,6 @@ const checkBuildingName = async (userID, buildingName, buildingId = null) => {
   return true;
 };
 
-// Determine max floors & buildings based on plan
-const checkPremiumSettings = (premium) => {
-  const freePlan = { floors: 3, buildings: 1 };
-  if (!premium || !premium.hasPremium) return { Success: true, Message: freePlan };
-
-  const plans = {
-    basic: { floors: 5, buildings: 3 },
-    platinum: { floors: 8, buildings: 6 },
-    elite: { floors: 12, buildings: 9 },
-    professional: { floors: 30, buildings: 15 },
-  };
-
-  const planKey = (premium.premiumType || "").toLowerCase();
-  return { Success: true, Message: plans[planKey] || freePlan };
-};
-
 // Normalize floor names array
 const normalizeFloorNames = (floorNames) => {
   if (!Array.isArray(floorNames)) return [];
@@ -58,10 +47,9 @@ router.post("/api/building/new", whoami, upload.array("maps"), async (req, res) 
   try {
     const USER = await USERS.findById(req.user._id);
     if (!USER) return res.send({ Success: false, Message: "User not found." });
-    if (!USER.verified) return res.send({ Success: false, Message: "Verify account first." });
+    if (USER.verified == false) return res.send({ Success: false, Message: "Verify account first." });
 
     const { buildingName, floorNames } = req.body;
-    console.log(buildingName)
 
     if (!buildingName || typeof buildingName !== "string")
       return res.send({ Success: false, Message: "Invalid building name." });
@@ -72,12 +60,7 @@ router.post("/api/building/new", whoami, upload.array("maps"), async (req, res) 
     if (new Set(normalizedFloors).size !== normalizedFloors.length)
       return res.send({ Success: false, Message: "Floor names must be unique." });
 
-    const limits = checkPremiumSettings(USER.premium);
-    if (floorNames.length > limits.Message.floors)
-      return res.send({ Success: false, Message: `Max ${limits.Message.floors} floors allowed.` });
-    if (USER.Buildings.length >= limits.Message.buildings)
-      return res.send({ Success: false, Message: `Max ${limits.Message.buildings} buildings allowed.` });
-
+    // No premium limits - allow unlimited floors and buildings
     const nameCheck = await checkBuildingName(USER._id, buildingName);
     if (nameCheck !== true) return res.send({ Success: false, Message: nameCheck });
 
@@ -87,15 +70,42 @@ router.post("/api/building/new", whoami, upload.array("maps"), async (req, res) 
 
     const buildingId = new mongoose.Types.ObjectId();
     const MAPS = await Promise.all(
-      floorNames.map(async (floor, i) => ({
-        floor: floor.trim(),
-        map: files[i]?.path || null,
-        qrCode: await QRCode.toDataURL(
-          `https://www.alertup.world/building/${buildingId}/${encodeURIComponent(floor.trim())}`
-        ),
-        scanned: 0,
-        createdAt: Date.now()
-      }))
+      floorNames.map(async (floor, i) => {
+        let mapUrl = null;
+        
+        // If there's a file, upload it to Cloudinary
+        if (files[i]) {
+          try {
+            const cloudinaryResult = await uploadToCloudinary(
+              fs.readFileSync(files[i].path),
+              `alertup/buildings/${buildingId}/floor-${floor.trim()}`
+            );
+            
+            if (cloudinaryResult && cloudinaryResult.secure_url) {
+              mapUrl = cloudinaryResult.secure_url;
+              
+              // Clean up local file after successful upload
+              if (files[i].path && fs.existsSync(files[i].path)) {
+                fs.unlinkSync(files[i].path);
+              }
+            }
+          } catch (error) {
+            console.error(`❌ Failed to upload floor ${floor} map:`, error);
+            // Keep local file as fallback
+            mapUrl = files[i]?.path || null;
+          }
+        }
+        
+        return {
+          floor: floor.trim(),
+          map: mapUrl,
+          qrCode: await QRCode.toDataURL(
+            `https://www.alertup.world/building/${buildingId}/${encodeURIComponent(floor.trim())}`
+          ),
+          scanned: 0,
+          createdAt: Date.now()
+        };
+      })
     );
 
     const NEW_BUILDING = new BUILDINGS({
@@ -143,24 +153,48 @@ router.put('/api/building/:id', whoami, upload.array('maps'), async (req, res) =
     const nameCheck = await checkBuildingName(user._id, buildingName, building._id);
     if (nameCheck !== true) return res.send({ Success: false, Message: nameCheck });
 
-    const limits = checkPremiumSettings(user.premium);
-    if (floorNames.length > limits.Message.floors)
-      return res.send({ Success: false, Message: `Max ${limits.Message.floors} floors allowed.` });
-
+    // No premium limits - allow unlimited floors
     const files = req.files || [];
     if (files.length !== floorNames.length)
       return res.send({ Success: false, Message: 'Each floor must have one map.' });
 
     const MAPS = await Promise.all(
-      floorNames.map(async (floor, i) => ({
-        floor,
-        map: files[i]?.path || null,
-        qrCode: await QRCode.toDataURL(
-          `${process.env.CLIENT_SCAN_QR_URL}?building=${encodeURIComponent(buildingName)}&floor=${encodeURIComponent(floor)}`
-        ),
-        scanned: 0,
-        createdAt: Date.now()
-      }))
+      floorNames.map(async (floor, i) => {
+        let mapUrl = null;
+        
+        // If there's a file, upload it to Cloudinary
+        if (files[i]) {
+          try {
+            const cloudinaryResult = await uploadToCloudinary(
+              fs.readFileSync(files[i].path),
+              `alertup/buildings/${building._id}/floor-${floor.trim()}`
+            );
+            
+            if (cloudinaryResult && cloudinaryResult.secure_url) {
+              mapUrl = cloudinaryResult.secure_url;
+              
+              // Clean up local file after successful upload
+              if (files[i].path && fs.existsSync(files[i].path)) {
+                fs.unlinkSync(files[i].path);
+              }
+            }
+          } catch (error) {
+            console.error(`❌ Failed to upload floor ${floor} map:`, error);
+            // Keep local file as fallback
+            mapUrl = files[i]?.path || null;
+          }
+        }
+        
+        return {
+          floor: floor.trim(),
+          map: mapUrl,
+          qrCode: await QRCode.toDataURL(
+            `${process.env.CLIENT_SCAN_QR_URL}?building=${encodeURIComponent(buildingName)}&floor=${encodeURIComponent(floor)}`
+          ),
+          scanned: 0,
+          createdAt: Date.now()
+        };
+      })
     );
 
     await BUILDINGS.findByIdAndUpdate(building._id, {
@@ -188,34 +222,13 @@ router.get('/api/building/id/:buildingID', async (req, res) => {
     }
 
     // Load building and owner info
-    const BUILDING = await BUILDINGS.findById(buildingID).populate('owner', '_id username email premium');
+    const BUILDING = await BUILDINGS.findById(buildingID).populate('owner', '_id username email');
     if (!BUILDING) return res.status(404).send({ Success: false, Message: 'Building not found.' });
 
     const owner = BUILDING.owner;
     if (!owner) return res.status(500).send({ Success: false, Message: 'Owner data missing.' });
 
-    // Check premium expiry and automatically deactivate building if owner's premium expired
-    const now = new Date();
-    const hasPremium = owner.premium && owner.premium.hasPremium;
-    const premiumExpires = owner.premium && owner.premium.to ? new Date(owner.premium.to) : null;
-
-    if (!hasPremium || (premiumExpires && premiumExpires < now)) {
-      if (!BUILDING.isDeactivated) {
-        BUILDING.isDeactivated = true;
-        await BUILDING.save();
-        // Send notification email to owner about deactivation and renewal
-        try {
-          const sendMail = (await import('../../services/sendEmail.js')).default;
-          const subject = `Your AlertUp premium expired — ${BUILDING.buildingName} deactivated`;
-          const text = `Hello ${owner.username || ''},\n\nYour premium subscription has expired and your building \"${BUILDING.buildingName}\" was deactivated.\n\nTo reactivate premium and restore access to your building, please visit https://www.alertup.world/premium and complete a purchase.\n\nIf you have any questions, reply to this email.`;
-          await sendMail(owner.email, subject, text);
-        } catch (emailErr) {
-          console.error('Failed to send deactivation email:', emailErr);
-        }
-      }
-      return res.send({ Success: false, Message: 'Owner does not have active premium. Building is deactivated.' });
-    }
-
+    // No premium checks - all buildings are always active
     return res.send({ Success: true, Message: BUILDING });
   } catch (error) {
     console.error('GET /api/building/id/:buildingID error:', error);
@@ -243,35 +256,15 @@ router.get('/api/building/scan/:id/:floor', async (req, res) => {
   try {
     if (!id || !mongoose.Types.ObjectId.isValid(id)) return res.status(400).send({ Success: false, Message: 'Invalid building id.' });
 
-    // Load building with owner to verify premium status before allowing scan
-    const building = await BUILDINGS.findById(id).populate('owner', '_id username email premium');
+    // Load building - no premium checks needed
+    const building = await BUILDINGS.findById(id);
     if (!building) return res.status(404).send({ Success: false, Message: 'Building not found.' });
 
-    const owner = building.owner;
-    if (!owner) return res.status(500).send({ Success: false, Message: 'Owner data missing.' });
-
-    const now = new Date();
-    const hasPremium = owner.premium && owner.premium.hasPremium;
-    const premiumExpires = owner.premium && owner.premium.to ? new Date(owner.premium.to) : null;
-
-    if (!hasPremium || (premiumExpires && premiumExpires < now)) {
-      if (!building.isDeactivated) {
-        building.isDeactivated = true;
-        await building.save();
-        // Send deactivation email to owner
-        try {
-          const sendMail = (await import('../../services/sendEmail.js')).default;
-          const subject = `Your AlertUp premium expired — ${building.buildingName} deactivated`;
-          const text = `Hello ${owner.username || ''},\n\nYour premium subscription has expired and your building \"${building.buildingName}\" was deactivated.\n\nTo reactivate premium and restore access to your building, please visit https://www.alertup.world/premium and complete a purchase.\n\nIf you have any questions, reply to this email.`;
-          await sendMail(owner.email, subject, text);
-        } catch (emailErr) {
-          console.error('Failed to send deactivation email on scan:', emailErr);
-        }
-      }
-      return res.status(403).send({ Success: false, Message: 'Building is deactivated due to expired premium.' });
+    // No deactivation checks - all buildings are always active
+    if (building.isDeactivated) {
+      // Reactivate building automatically
+      await BUILDINGS.findByIdAndUpdate(id, { isDeactivated: false });
     }
-
-    if (building.isDeactivated) return res.status(403).send({ Success: false, Message: 'Building is deactivated.' });
 
     // Atomic increment of the scanned counter for the matching floor
     const updated = await BUILDINGS.findOneAndUpdate(
@@ -324,24 +317,209 @@ router.delete('/api/building/delete/:buildingID', whoami, async (req, res) => {
       });
     }
 
-    // Delete the building
+    // 1. Delete all nodes for this building
+    const nodeDeleteResult = await Node.deleteMany({ buildingId: buildingID });
+
+    // 2. Delete all QR codes for this building
+    const qrDeleteResult = await QRCodeModel.deleteMany({ buildingId: buildingID });
+
+    // 3. Delete all floor maps for this building
+    const floorDeleteResult = await Floor.deleteMany({ buildingId: buildingID });
+
+    // 4. Update all other nodes that had connections to deleted nodes
+    // (This is handled by the node connections cleanup in the node deletion route)
+    // But we should also clean up any orphaned connections
+    await Node.updateMany(
+      { connections: { $exists: true, $ne: [] } },
+      { $pull: { connections: { $in: await Node.find({ buildingId: buildingID }).distinct('_id') } } }
+    );
+
+    // 5. Delete the building itself
     await BUILDINGS.findByIdAndDelete(building._id);
 
-    // Remove from user's Buildings array using the actual building _id
+    // 6. Remove from user's Buildings array using the actual building _id
     await USERS.findByIdAndUpdate(
       req.user._id,
       { $pull: { Buildings: building._id } },
       { new: true }
     );
 
-    return res.send({ Success: true, Message: "Building deleted successfully." });
+    return res.send({ 
+      Success: true, 
+      Message: "Building and all related data deleted successfully.",
+      DeletedCounts: {
+        nodes: nodeDeleteResult.deletedCount,
+        qrCodes: qrDeleteResult.deletedCount,
+        floors: floorDeleteResult.deletedCount
+      }
+    });
   } catch (err) {
     console.error('❌ Delete Error:', err);
     return res.status(500).send({ Success: false, Message: "Server error." });
   }
 });
 
+/* ---------------- DELETE FLOOR ---------------- */
+router.delete('/api/building/:buildingId/floor/:floorNumber', whoami, async (req, res) => {
+  const { buildingId, floorNumber } = req.params;
+  
+  // Validate ObjectId format
+  if (!mongoose.Types.ObjectId.isValid(buildingId)) {
+    return res.status(400).send({ 
+      Success: false, 
+      Message: "Invalid building ID format." 
+    });
+  }
 
+  // Validate floor number
+  const floorNum = parseInt(floorNumber, 10);
+  if (isNaN(floorNum) || floorNum < 1) {
+    return res.status(400).send({ 
+      Success: false, 
+      Message: "Invalid floor number." 
+    });
+  }
+
+  try {
+    // Check if building exists and belongs to user
+    const building = await BUILDINGS.findOne({
+      _id: buildingId,
+      owner: req.user._id
+    });
+
+    if (!building) {
+      return res.status(404).send({ 
+        Success: false, 
+        Message: "Building not found or not yours." 
+      });
+    }
+
+    // 1. Find all nodes on this floor
+    const floorNodes = await Node.find({ buildingId, floorNumber: floorNum });
+    const nodeIds = floorNodes.map(node => node._id);
+
+    // 2. Delete all QR codes for nodes on this floor
+    const qrDeleteResult = await QRCodeModel.deleteMany({ nodeId: { $in: nodeIds } });
+
+    // 3. Delete all nodes on this floor
+    const nodeDeleteResult = await Node.deleteMany({ buildingId, floorNumber: floorNum });
+
+    // 4. Clean up connections from other nodes to deleted nodes
+    await Node.updateMany(
+      { buildingId, connections: { $in: nodeIds } },
+      { $pull: { connections: { $in: nodeIds } } }
+    );
+
+    // 5. Delete the floor map
+    const floorDeleteResult = await Floor.deleteOne({ buildingId, floorNumber: floorNum });
+
+    // 6. Remove floor from building's maps array
+    await BUILDINGS.findByIdAndUpdate(
+      buildingId,
+      { $pull: { maps: { floor: floorNum.toString() } } },
+      { new: true }
+    );
+
+    return res.send({ 
+      Success: true, 
+      Message: "Floor and all related data deleted successfully.",
+      DeletedCounts: {
+        nodes: nodeDeleteResult.deletedCount,
+        qrCodes: qrDeleteResult.deletedCount,
+        floorMap: floorDeleteResult.deletedCount
+      }
+    });
+  } catch (err) {
+    console.error('❌ Floor Delete Error:', err);
+    return res.status(500).send({ Success: false, Message: "Server error." });
+  }
+});
+
+
+/* ---------------- UPDATE FLOOR MAP ---------------- */
+router.put('/api/building/:buildingId/floor/:floorNumber/map', whoami, async (req, res) => {
+  try {
+    const { buildingId, floorNumber } = req.params;
+    const { svgContent, svgMapUrl, width, height } = req.body;
+
+    // Validate building ID
+    if (!buildingId || !mongoose.Types.ObjectId.isValid(buildingId)) {
+      return res.status(400).json({ Success: false, Message: 'Invalid building ID.' });
+    }
+
+    // Validate floor number
+    const floorNum = parseInt(floorNumber, 10);
+    if (isNaN(floorNum) || floorNum < 1) {
+      return res.status(400).json({ Success: false, Message: 'Invalid floor number.' });
+    }
+
+    // Check if user owns the building
+    const building = await BUILDINGS.findOne({ _id: buildingId, owner: req.user._id });
+    if (!building) {
+      return res.status(404).json({ Success: false, Message: 'Building not found or unauthorized.' });
+    }
+
+    let mapData = svgContent;
+    let mapUrl = svgMapUrl;
+
+    // If SVG content is provided, upload to Cloudinary
+    if (svgContent && typeof svgContent === 'string') {
+      try {
+        const cloudinaryResult = await uploadToCloudinary(
+          Buffer.from(svgContent),
+          `alertup/buildings/${buildingId}/floor-${floorNum}`
+        );
+        
+        if (cloudinaryResult && cloudinaryResult.secure_url) {
+          mapUrl = cloudinaryResult.secure_url;
+        }
+      } catch (cloudinaryError) {
+        console.error('❌ Cloudinary upload failed:', cloudinaryError);
+        return res.status(500).json({
+          Success: false,
+          Message: 'Failed to upload SVG to Cloudinary'
+        });
+      }
+    }
+
+    // Validate dimensions
+    const mapWidth = parseInt(width) || 1000;
+    const mapHeight = parseInt(height) || 800;
+
+    // Update or create floor record
+    const floorData = await Floor.findOneAndUpdate(
+      { buildingId, floorNumber: floorNum },
+      {
+        buildingId,
+        floorNumber: floorNum,
+        svgContent: mapData,
+        map: mapUrl || `/uploads/floor-maps/${buildingId}-${floorNum}.svg`,
+        svgMapUrl: mapUrl,
+        width: mapWidth,
+        height: mapHeight
+      },
+      { upsert: true, new: true }
+    );
+
+    return res.json({
+      Success: true,
+      Message: 'Floor map updated successfully.',
+      Data: {
+        floorNumber: floorNum,
+        mapUrl: mapUrl,
+        width: mapWidth,
+        height: mapHeight
+      }
+    });
+
+  } catch (error) {
+    console.error('Error updating floor map:', error);
+    return res.status(500).json({
+      Success: false,
+      Message: 'Server error while updating floor map.'
+    });
+  }
+});
 
 /* ---------------- DEACTIVATE BUILDING ---------------- */
 router.put('/api/building/deactivate/:id', whoami, async (req, res) => {

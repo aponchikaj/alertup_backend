@@ -16,7 +16,7 @@ const GLOBAL_SCAN_SCHEMA = new mongoose.Schema({
 const BUILDINGS_SCHEMA = new mongoose.Schema({
   buildingName: String,
   owner: { type: mongoose.Schema.Types.ObjectId, ref: 'users' },
-  floors: String,
+  floors: Number,
   maps: [MAP_SCHEMA],
   globalScans: [GLOBAL_SCAN_SCHEMA],
   updatedAt: { type: Date, default: Date.now },
