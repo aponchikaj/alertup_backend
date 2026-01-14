@@ -8,6 +8,7 @@ import rateLimit from 'express-rate-limit'
 
 import USERS from '../../models/user.model.js';
 import sendMail from '../../services/sendEmail.js';
+import VERIFICATIONS from '../../models/verificatios.model.js'
 
 const isProd = process.env.NODE_ENV === 'production';
 
@@ -163,6 +164,56 @@ router.post('/api/auth/login', loginLimiter, async (req, res) => {
     const isPasswordValid = await bcrypt.compare(password, USER.password);
     if (!isPasswordValid) return res.send({ Success: false, Message: "Invalid credentials." });
 
+    if(USER.TwoFactorEnabled) {
+
+      const findVerification = await VERIFICATIONS.findOne({verificationBy:USER._id,verificationType:'2fa'})
+      if(findVerification){
+        await VERIFICATIONS.findOneAndDelete({verificationBy:USER._id,verificationType:'2fa'})
+      }
+
+      const VERIFICATION_CODE = Math.floor(Math.random()*(999999-100000)+100000)
+      const HASHED_CODE = await bcrypt.hash(String(VERIFICATION_CODE),12)
+      const VERIFICATION_CONFIG = {
+        verificationBy:USER._id,
+        verificationType:'2fa',
+        verificationCode:HASHED_CODE
+      }
+      await VERIFICATIONS.create(VERIFICATION_CONFIG)
+      try{
+        const displayName = USER.userType === "Individual" ? USER.name : USER.company;
+  
+        const twoFAText = `Hey ${displayName}, your two-factor authentication code is: ${VERIFICATION_CODE}. This code will expire in 5 minutes.`;
+        
+        const twoFAHTML = `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+            <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+              <h1 style="color: #FF7B22; margin-top: 0;">🔐 Login Verification</h1>
+              <p style="color: #333; font-size: 16px;">Hello <strong>${displayName}</strong>,</p>
+              <p style="color: #666;">Enter this verification code to complete your login:</p>
+              
+              <div style="background-color: #f9f9f9; padding: 20px; border-radius: 6px; margin: 25px 0; text-align: center; border: 2px dashed #FF7B22;">
+                <p style="color: #999; font-size: 14px; margin: 0 0 10px 0;">Your verification code</p>
+                <p style="color: #FF7B22; font-size: 32px; font-weight: bold; letter-spacing: 8px; margin: 0; font-family: 'Courier New', monospace;">${VERIFICATION_CODE}</p>
+              </div>
+
+              <p style="color: #666;">This code will expire in <strong>5 minutes</strong>.</p>
+              <p style="color: #666;">If you did not attempt to log in, please secure your account immediately by changing your password.</p>
+              
+              <p style="color: #999; font-size: 14px; margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee;">
+                This is an automated message from AlertUp. Please do not reply to this email.
+              </p>
+            </div>
+          </div>
+        `;
+        
+        await sendMail(USER.email, "Login Verification - AlertUp", twoFAText, undefined, twoFAHTML);
+        return res.send({Success:false,Message:"2fa"})
+      }catch{
+        console.error("Server error occured.")
+        return res.send({Success:false,Message:"Couldn't sent email."})
+      }
+    }
+
     const userToken = jwt.sign({ userID: USER._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
     const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
@@ -197,7 +248,6 @@ router.post('/api/auth/login', loginLimiter, async (req, res) => {
       Success: true,
       Message: "Logged in successfully.",
       token: userToken,
-      token: userToken,
       user: {
         name: USER.name,
         company: USER.company,
@@ -211,5 +261,68 @@ router.post('/api/auth/login', loginLimiter, async (req, res) => {
     return res.send({ Success: false, Message: "Server error." });
   }
 });
+
+router.post('/api/auth/login/2fa',async(req,res)=>{
+  const {email,verificationCode} = req.body;
+  if(!email || !email.includes('@')) return res.send({Success:false,Message:"Invalid user."})
+  if(!verificationCode || verificationCode.length !== 6) return res.send({Success:false,Message:"Invalid code"});
+  try{
+    const USER = await USERS.findOne({email})
+    if(!USER) return res.send({Success:false,Message:"Invalid user."})
+    const findVerification = await VERIFICATIONS.findOne({verificationBy:USER._id,verificationType:'2fa'})
+    if(!findVerification ) return res.send({Success:false,Message:"Invalid verification."});
+    if(findVerification.expires < Date.now()) return res.send({Success:false,Message:"Expired verification."})
+    
+    const compareCodes = await bcrypt.compare(verificationCode,findVerification.verificationCode)
+    if(!compareCodes) return res.send({Success:false,Message:"Invalid verification code."})
+    
+    await VERIFICATIONS.findOneAndDelete({verificationBy:USER._id,verificationType:'2fa'})
+
+    const userToken = jwt.sign({ userID: USER._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+
+    const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
+    const cookieOptions = {
+      httpOnly: true,
+      secure: reqIsSecure,
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: '/',
+      sameSite: reqIsSecure ? 'None' : 'Lax'
+    };
+
+    res.cookie('userToken', userToken, cookieOptions);
+
+    // Send login notification email
+    try {
+      const displayName = USER.userType === "Individual" ? USER.name : USER.company;
+      const loginHTML = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+          <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h1 style="color: #FF7B22; margin-top: 0;">🔐 New Login Detected</h1>
+            <p style="color: #333; font-size: 16px;">Hello <strong>${displayName}</strong>,</p>
+            <p style="color: #666;">We detected a new login to your AlertUp account.</p>
+          </div>
+        </div>
+      `;
+      await sendMail(USER.email, "New Login - AlertUp", `Hey ${displayName}, someone logged into your account.`, undefined, loginHTML);
+    } catch (err) {
+      console.error("MAIL ERROR:", err);
+    }
+
+    return res.send({
+      Success: true,
+      Message: "Logged in successfully.",
+      token: userToken,
+      user: {
+        name: USER.name,
+        company: USER.company,
+        userType: USER.userType,
+        email: USER.email
+      }
+    });
+  }catch{
+    console.error("Something went wrong 2fa. ERROR !")
+    return res.send({Success:false,Message:"Something went wrong."})
+  }
+})
 
 export default router
