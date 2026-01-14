@@ -1,8 +1,8 @@
 import express from "express";
-import USERS from "../../models/user.model";
-import VERIFICATIONS from '../../models/verificatios.model'
-import sendMail from '../../services/sendEmail';
-import whoami from '../../middlewares/whoami'
+import USERS from "../../models/user.model.js";
+import VERIFICATIONS from '../../models/verificatios.model.js'
+import sendMail from '../../services/sendEmail.js';
+import whoami from '../../middlewares/whoami.js'
 import bcrypt from 'bcrypt'
 
 const router = express.Router()
