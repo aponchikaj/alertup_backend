@@ -13,10 +13,10 @@ import VERIFICATIONS from '../../models/verificatios.model.js'
 const isProd = process.env.NODE_ENV === 'production';
 
 const checkNames = async (userType, company, name, lastname) => {
-  if (userType === "Individual") {
+  if (userType == "Individual") {
     if (!name || name.length < 2 || name.length > 24) return "Name must be 2-24 characters.";
     if (!lastname || lastname.length < 2 || lastname.length > 24) return "Lastname must be 2-24 characters.";
-  } else if (userType === "Company") {
+  } else if (userType == "Company") {
     if (!company || company.length < 4 || company.length > 50) return "Company name must be 4-50 characters.";
   }
   return null;
@@ -41,7 +41,7 @@ const checkPassword = async (password) => {
 
 router.post('/api/auth/register', async (req, res) => {
   try {
-    const {userType, name,lastname,company, email, password, country, countryCode, phone } = req.body;
+    const {userType, name,lastname, company, email, password, country, countryCode, phone } = req.body;
 
     if (!userType || !email || !password || !country || !countryCode || !phone) {
       return res.send({ Success: false, Message: "Missing required fields." });

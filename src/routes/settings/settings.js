@@ -36,7 +36,8 @@ router.get('/api/settings', whoami, async (req, res) => {
       userType:user.userType,
       name:user.name,
       lastname:user.lastname,
-      company:user.company
+      company:user.company,
+      TwoFactorEnabled:user.TwoFactorEnabled
     };
 
     return res.send({ Success: true, Message: settings });
