@@ -22,6 +22,7 @@ import uploadRouter from './src/routes/upload/upload.js'
 import qrRouter from './src/routes/qr/qr.js'
 import qrScanRouter from './src/routes/qr/scan.js'
 import websitereview from './src/routes/reviews/reviews.js'
+import twoFaSystem from './src/routes/auth/2fa.js'
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -105,6 +106,8 @@ app.use('/api/upload', uploadRouter)
 app.use(qrRouter)
 app.use('/api/qr/scan', qrScanRouter)
 app.use(websitereview)
+app.use(twoFaSystem)
+
 
 // Health check endpoint
 app.get('/health', (req, res) => {
