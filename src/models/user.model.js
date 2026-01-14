@@ -97,6 +97,10 @@ const USER_SCHEMA = new mongoose.Schema({
     userType:{
         type:String,
         enum:['Individual','Company']
+    },
+    TwoFactorEnabled:{
+        type:Boolean,
+        default:false
     }
 })
 

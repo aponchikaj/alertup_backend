@@ -17,11 +17,13 @@ const VERIFICATION_SCHEMA = new mongoose.Schema({
         required: true,
         index: true,
     },
-
     verified: {
         type: Boolean,
         default: false,
     },
+},
+{
+    timestamps:true
 })
 
 const VERIFICATIONS = mongoose.model('verifications',VERIFICATION_SCHEMA);
