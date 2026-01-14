@@ -44,7 +44,7 @@ router.get('/api/settings', whoami, async (req, res) => {
   } catch (err) {
     return res.send({ Success: false, Message: "Server error." });
   }
-});
+}); 
 
 // PUT /api/settings/save
 router.put('/api/settings/save', whoami, async (req, res) => {

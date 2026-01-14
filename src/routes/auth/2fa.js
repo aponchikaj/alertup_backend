@@ -125,7 +125,7 @@ router.post('/api/2fa/deactivate',whoami,async(req,res)=>{
 router.post('/api/2fa/verify',whoami,async(req,res)=>{
     const {verificationCode,verificationType} = req.body;
 
-    if(!verificationCode || verificationCode.length !== 6) return res.send({Success:false,Message:"Invalid verification code."});
+    if(!verificationCode) return res.send({Success:false,Message:"Invalid verification code."});
 
     try{
         let VERIFICATION;
