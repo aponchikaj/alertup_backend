@@ -77,12 +77,9 @@ router.post('/api/auth/register', async (req, res) => {
       expiresIn: '7d',
     });
 
-    // Determine whether the current request is secure (HTTPS).
-    // `trust proxy` is enabled in server.js so `req.secure` and
-    // `x-forwarded-proto` are reliable behind proxies (Vercel/Render).
+    
     const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
-
-    // Detect Safari/iOS for special handling
+   
     const userAgent = req.headers['user-agent'] || '';
     const isSafari = /Safari/i.test(userAgent) && !/Chrome/i.test(userAgent);
     const isIOS = /iPhone|iPad|iPod/i.test(userAgent);
@@ -164,7 +161,7 @@ router.post('/api/auth/login', loginLimiter, async (req, res) => {
     const isPasswordValid = await bcrypt.compare(password, USER.password);
     if (!isPasswordValid) return res.send({ Success: false, Message: "Invalid credentials." });
 
-    if(USER.TwoFactorEnabled) {
+    if(USER.TwoFactorEnabled && !USER.trustedIPS.includes(req.ip)) {
 
       const findVerification = await VERIFICATIONS.findOne({verificationBy:USER._id,verificationType:'2fa'})
       if(findVerification){
@@ -213,7 +210,8 @@ router.post('/api/auth/login', loginLimiter, async (req, res) => {
         return res.send({Success:false,Message:"Couldn't sent email."})
       }
     }
-
+    
+    await USERS.findOneAndUpdate({_id:USER._id},{$push:{trustedIPS:req.ip},{new:true})
     const userToken = jwt.sign({ userID: USER._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
     const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
@@ -227,21 +225,25 @@ router.post('/api/auth/login', loginLimiter, async (req, res) => {
 
     res.cookie('userToken', userToken, cookieOptions);
 
-    // Send login notification email
-    try {
-      const displayName = USER.userType === "Individual" ? USER.name : USER.company;
-      const loginHTML = `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
-          <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-            <h1 style="color: #FF7B22; margin-top: 0;">🔐 New Login Detected</h1>
-            <p style="color: #333; font-size: 16px;">Hello <strong>${displayName}</strong>,</p>
-            <p style="color: #666;">We detected a new login to your AlertUp account.</p>
+    // Send login notification email if trustedIPS includes my ip
+    
+    if(!USER.trustedIPS.includes(req.ip)){
+       try {
+        await USERS.findOneAndUpdate({_id:USER._id},{$push:{trustedIPS:req.ip}},{new:true})
+        const displayName = USER.userType === "Individual" ? USER.name : USER.company;
+        const loginHTML = `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+            <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+              <h1 style="color: #FF7B22; margin-top: 0;">🔐 New Login Detected</h1>
+              <p style="color: #333; font-size: 16px;">Hello <strong>${displayName}</strong>,</p>
+              <p style="color: #666;">We detected a new login to your AlertUp account.</p>
+            </div>
           </div>
-        </div>
-      `;
-      await sendMail(USER.email, "New Login - AlertUp", `Hey ${displayName}, someone logged into your account.`, undefined, loginHTML);
-    } catch (err) {
-      console.error("MAIL ERROR:", err);
+        `;
+        await sendMail(USER.email, "New Login - AlertUp", `Hey ${displayName}, someone logged into your account.`, undefined, loginHTML);
+      } catch (err) {
+        console.error("MAIL ERROR:", err);
+      }
     }
 
     return res.send({
@@ -277,9 +279,10 @@ router.post('/api/auth/login/2fa',async(req,res)=>{
     if(!compareCodes) return res.send({Success:false,Message:"Invalid verification code."})
     
     await VERIFICATIONS.findOneAndDelete({verificationBy:USER._id,verificationType:'2fa'})
-
+    
+    await USERS.findOneAndUpdate({_id:USER._id},{$push:{trustedIPS:req.ip}},{new:true})
     const userToken = jwt.sign({ userID: USER._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
-
+      
     const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
     const cookieOptions = {
       httpOnly: true,

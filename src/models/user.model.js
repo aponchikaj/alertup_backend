@@ -101,6 +101,10 @@ const USER_SCHEMA = new mongoose.Schema({
     TwoFactorEnabled:{
         type:Boolean,
         default:false
+    },
+    trustedIPS:{
+      type:[String],
+      default:[]
     }
 })
 
