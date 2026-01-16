@@ -211,7 +211,7 @@ router.post('/api/auth/login', loginLimiter, async (req, res) => {
       }
     }
     
-    await USERS.findOneAndUpdate({_id:USER._id},{$push:{trustedIPS:req.ip},{new:true})
+    await USERS.findOneAndUpdate({_id:USER._id},{$push:{trustedIPS:req.ip}},{new:true})
     const userToken = jwt.sign({ userID: USER._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
     const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
