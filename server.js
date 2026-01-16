@@ -26,6 +26,7 @@ import twoFaSystem from './src/routes/auth/2fa.js'
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+app.set('trust proxy', true);
 
 app.use(cparser())
 

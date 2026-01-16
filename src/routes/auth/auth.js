@@ -211,7 +211,7 @@ router.post('/api/auth/login', loginLimiter, async (req, res) => {
       }
     }
     
-    await USERS.findOneAndUpdate({_id:USER._id},{$push:{trustedIPS:req.ip}},{new:true})
+    if(!USER.trustedIPS.includes((req.headers['x-forwarded-for'] || req.connection.remoteAddress).split(',')[0].trim())) await USERS.findOneAndUpdate({_id:USER._id},{$push:{trustedIPS:(req.headers['x-forwarded-for'] || req.connection.remoteAddress).split(',')[0].trim()}},{new:true}) 
     const userToken = jwt.sign({ userID: USER._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
     const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
@@ -227,9 +227,9 @@ router.post('/api/auth/login', loginLimiter, async (req, res) => {
 
     // Send login notification email if trustedIPS includes my ip
     
-    if(!USER.trustedIPS.includes(req.ip)){
+    if(!USER.trustedIPS.includes((req.headers['x-forwarded-for'] || req.connection.remoteAddress).split(',')[0].trim())){
        try {
-        await USERS.findOneAndUpdate({_id:USER._id},{$push:{trustedIPS:req.ip}},{new:true})
+        await USERS.findOneAndUpdate({_id:USER._id},{$push:{trustedIPS:(req.headers['x-forwarded-for'] || req.connection.remoteAddress).split(',')[0].trim()}},{new:true})
         const displayName = USER.userType === "Individual" ? USER.name : USER.company;
         const loginHTML = `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
@@ -280,7 +280,7 @@ router.post('/api/auth/login/2fa',async(req,res)=>{
     
     await VERIFICATIONS.findOneAndDelete({verificationBy:USER._id,verificationType:'2fa'})
     
-    await USERS.findOneAndUpdate({_id:USER._id},{$push:{trustedIPS:req.ip}},{new:true})
+    if(!USER.trustedIPS.includes((req.headers['x-forwarded-for'] || req.connection.remoteAddress).split(',')[0].trim())) await USERS.findOneAndUpdate({_id:USER._id},{$push:{trustedIPS:(req.headers['x-forwarded-for'] || req.connection.remoteAddress).split(',')[0].trim()}},{new:true})
     const userToken = jwt.sign({ userID: USER._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
       
     const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
