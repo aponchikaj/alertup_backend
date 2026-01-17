@@ -260,13 +260,13 @@ router.get('/api/admin/premiumUsers', isAdmin, async (req, res) => {
 
 router.get('/api/admin/user/:id', isAdmin, async (req, res) => {
   const userID = req.params.id;
-
+  console.log(userID)
   try {
     if (!userID) {
       return res.send({ Success: false, Message: "Invalid user ID" });
     }
 
-    const user = await USERS.findById(userID).select('-password');
+    const user = await USERS.findOne({_id:userID.toString('hex')})
 
     if (!user) {
       return res.send({ Success: false, Message: "User not found." });
@@ -274,8 +274,9 @@ router.get('/api/admin/user/:id', isAdmin, async (req, res) => {
 
     return res.send({ Success: true, Message: user });
 
-  } catch {
-    return res.send({ Success: false, Message: 'Server error.' });
+  } catch (err) {
+    console.error(err)
+    return res.send({ Success: false, Message: 'Server error !!!' });
   }
 });
 
