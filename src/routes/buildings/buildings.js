@@ -215,55 +215,28 @@ router.put('/api/building/:id', whoami, upload.array('maps'), async (req, res) =
 
 /* ---------------- GET BUILDING BY ID ---------------- */
 router.get('/api/building/id/:buildingID', async (req, res) => {
-  const { buildingID } = req.params;
+  const {buildingID} = req.params;
   // console.log(buildingID)
   try {
     // Validate ObjectId
-    if (!buildingID || !mongoose.Types.ObjectId.isValid(buildingID)) {
-      return res.status(400).send({ Success: false, Message: "Invalid building ID." });
+    if (!buildingID) {
+      return res.send({ Success: false, Message: "Invalid building ID." });
     }
 
     // Load building and owner info
-    const BUILDING = await BUILDINGS.findById(buildingID).populate('owner', '_id username email');
-    if (!BUILDING) return res.status(404).send({ Success: false, Message: 'Building not found.' });
+    const BUILDING = await BUILDINGS.findById(buildingID);
+    if (!BUILDING) return res.send({ Success: false, Message: 'Building not found.' });
 
-    const owner = BUILDING.owner;
-    if (!owner) return res.status(500).send({ Success: false, Message: 'Owner data missing.' });
+    const owner = await USERS.findById(BUILDING.owner).select('-password')
+    if (!owner) return res.send({ Success: false, Message: 'Owner data missing.' });
 
-    // await LOGS.create({
-    //   logType:"scan",
-    //   logMessage:"Building QR has been scanned.",
-    //   buildingID:BUILDING._id,
-    // })
+    // console.log(BUILDING)
 
-    // const userToken = req.cookies['userToken']
-    // // console.log(userToken)
-    // let decoded
-    // if(userToken){
-    //   try {
-    //     decoded = jwt.verify(userToken, process.env.JWT_SECRET)
-    //   } catch {
-    //     return res.send({ Success: true, Message: "Route data retrieved successfully.", data:routeData })
-    //   }
-    //   await USERS.findOneAndUpdate(
-    //     { _id: decoded.userID },
-    //     {
-    //       $push: {
-    //         scanned: {
-    //           buildingName: BUILDING.buildingName,
-    //           scannedAt: new Date(),
-    //           buildingID: BUILDING._id
-    //         }
-    //       }
-    //     },
-    //     { new: true }
-    //   )
-    // }
+    return res.send({ Success: true, Message: BUILDING,Owner:owner} );
 
-    return res.send({ Success: true, Message: BUILDING });
   } catch (error) {
     console.error('GET /api/building/id/:buildingID error:', error);
-    return res.status(500).send({ Success: false, Message: 'Server error.' });
+    return res.send({ Success: false, Message: 'Server error.' });
   }
 });
 
@@ -317,11 +290,7 @@ router.get('/api/building/scan/:id/:floor', async (req, res) => {
     // console.log(userToken)
     let decoded
     if(userToken){
-      try {
-        decoded = jwt.verify(userToken, process.env.JWT_SECRET)
-      } catch {
-        return res.send({ Success: true, Message: "Route data retrieved successfully.", data:routeData })
-      }
+      decoded = jwt.verify(userToken, process.env.JWT_SECRET)
       await USERS.findOneAndUpdate({_id:decoded.userID},{$push:{scanned:{buildingName:building.buildingName,scannedAt: Date.now(),buildingID:building._id}}},{new:true})
     }
     

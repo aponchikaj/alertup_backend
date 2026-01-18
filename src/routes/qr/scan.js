@@ -231,11 +231,7 @@ router.get('/route/:qrId', async (req, res) => {
     // console.log(userToken)
     let decoded
     if(userToken){
-        try {
-          decoded = jwt.verify(userToken, process.env.JWT_SECRET)
-        } catch {
-          return res.send({ Success: true, Message: "Route data retrieved successfully.", data:routeData })
-        }
+        decoded = jwt.verify(userToken, process.env.JWT_SECRET)
         await USERS.findOneAndUpdate({_id:decoded.userID},{$push:{scanned:{buildingName:building.buildingName,scannedAt:Date.now(),buildingID:building._id}}},{new:true})
     }
 
