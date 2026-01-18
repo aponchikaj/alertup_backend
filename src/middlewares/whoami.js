@@ -10,6 +10,7 @@ const whoami = async(req,res,next)=>{
 
     // Try to get token from cookie first, then from Authorization header (Safari/iOS fallback)
     let userToken = req.cookies['userToken']
+    // console.log(userToken)
     
     // If no cookie, check Authorization header (for Safari/iOS localStorage fallback)
     if(!userToken){

@@ -1,6 +1,7 @@
 import BUILDINGS from '../models/building.model.js';
 import USERS from '../models/user.model.js';
 import Node from '../models/node.model.js';
+import whoami from './whoami.js';
 
 /**
  * Middleware to check if user is the owner of a building

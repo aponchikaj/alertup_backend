@@ -63,14 +63,14 @@ router.post('/api/nodes', whoami, ownerOnlyAuth, async (req, res) => {
     
     await newNode.save();
     
-    res.status(201).json({
+    res.json({
       success: true,
       message: 'Node created successfully',
       node: newNode
     });
   } catch (error) {
     console.error('Error creating node:', error);
-    res.status(500).json({
+    res.json({
       success: false,
       message: 'Server error',
       error: error.message

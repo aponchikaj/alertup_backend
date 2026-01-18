@@ -565,9 +565,10 @@ router.put('/api/building/deactivate/:id', whoami, async (req, res) => {
 });
 
 router.post('/api/building/evacuated',async(req,res)=>{
-  const {buildingID} =req.body;
+  const {buildingId} =req.body;
+  // console.log(req.body)
   try{
-    const building = await BUILDINGS.findById(buildingID)
+    const building = await BUILDINGS.findById(buildingId)
     if(!building) return res.send({Success:false,Message:"Invalid building"});
 
     await LOGS.create({
@@ -576,7 +577,7 @@ router.post('/api/building/evacuated',async(req,res)=>{
       buildingID:building._id,
       isEmergency:building.emergencyMode
     })
-
+    // console.log('created log.')
     return res.send({Success:true,Message:"Success."})
 
   }catch{
