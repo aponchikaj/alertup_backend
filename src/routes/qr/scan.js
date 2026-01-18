@@ -222,12 +222,12 @@ router.get('/route/:qrId', async (req, res) => {
 
     const N_LOG = await LOGS.create({
       logType:"scan",
-      logMessage:`new Scan on ${node.floorNumber} near ${node.label}`,
+      logMessage:`new Scan on ${node.floorNumber} Floor near ${node.label}`,
       buildingID:node.buildingId,
       isEmergency:building.emergencyMode,
     })
 
-    console.log('Scanned. '+N_LOG)
+    // console.log('Scanned. '+N_LOG)
     
     res.status(200).json({
       success: true,
