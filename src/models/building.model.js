@@ -20,7 +20,12 @@ const BUILDINGS_SCHEMA = new mongoose.Schema({
   maps: [MAP_SCHEMA],
   globalScans: [GLOBAL_SCAN_SCHEMA],
   updatedAt: { type: Date, default: Date.now },
-  isDeactivated: { type: Boolean, default: false }
+  isDeactivated: { type: Boolean, default: false },
+  emergencyMode:{
+    type:Boolean,
+    default:false
+  },
+
 })
 
 BUILDINGS_SCHEMA.index({ owner: 1 })
