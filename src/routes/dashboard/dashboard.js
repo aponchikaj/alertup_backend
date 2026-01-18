@@ -26,13 +26,13 @@ router.get('/api/dashboard', whoami, async (req, res) => {
     ]);
 
     const totalScans = buildingScans[0]?.totalScans || 0;
-    console.log(USER.scanned)
+    // console.log(USER.scanned)
     // Build dashboard object
     const dashboardData = {
       MyBuildings: USER.Buildings.length,
       scanned: USER.scanned.length,
       myBuildingsScanned: totalScans,
-      lastScanned: USER.scanned.length > 0 ? USER.scanned[USER.scanned.length - 1].scannedAt : null,
+      lastScanned: USER.scanned.length > 0 ? USER.scanned[USER.scanned.length - 1].buildingName : null,
       premiumStatus: USER.premium.hasPremium ? USER.premium.premiumType : "Free",
       premiumExpires: USER.premium.to || null,
     };

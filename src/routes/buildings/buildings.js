@@ -237,7 +237,7 @@ router.get('/api/building/id/:buildingID', async (req, res) => {
     })
 
     const userToken = req.cookies['userToken']
-    console.log(userToken)
+    // console.log(userToken)
     let decoded
     if(userToken){
       try {

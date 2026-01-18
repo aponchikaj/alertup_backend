@@ -260,7 +260,7 @@ router.get('/api/admin/premiumUsers', isAdmin, async (req, res) => {
 
 router.get('/api/admin/user/:id', isAdmin, async (req, res) => {
   const userID = req.params.id;
-  console.log(userID)
+  // console.log(userID)
   try {
     if (!userID) {
       return res.send({ Success: false, Message: "Invalid user ID" });
