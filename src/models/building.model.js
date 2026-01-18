@@ -21,10 +21,7 @@ const BUILDINGS_SCHEMA = new mongoose.Schema({
   globalScans: [GLOBAL_SCAN_SCHEMA],
   updatedAt: { type: Date, default: Date.now },
   isDeactivated: { type: Boolean, default: false },
-  emergencyMode:{
-    type:Boolean,
-    default:false
-  },
+  emergencyMode:{type:Boolean,default:false},
 })
 
 BUILDINGS_SCHEMA.index({ owner: 1 })

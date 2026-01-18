@@ -216,7 +216,7 @@ router.put('/api/building/:id', whoami, upload.array('maps'), async (req, res) =
 /* ---------------- GET BUILDING BY ID ---------------- */
 router.get('/api/building/id/:buildingID', async (req, res) => {
   const { buildingID } = req.params;
-
+  // console.log(buildingID)
   try {
     // Validate ObjectId
     if (!buildingID || !mongoose.Types.ObjectId.isValid(buildingID)) {
@@ -230,37 +230,36 @@ router.get('/api/building/id/:buildingID', async (req, res) => {
     const owner = BUILDING.owner;
     if (!owner) return res.status(500).send({ Success: false, Message: 'Owner data missing.' });
 
-    await LOGS.create({
-      logType:"scan",
-      logMessage:"Building QR has been scanned.",
-      buildingID:BUILDING._id,
-    })
+    // await LOGS.create({
+    //   logType:"scan",
+    //   logMessage:"Building QR has been scanned.",
+    //   buildingID:BUILDING._id,
+    // })
 
-    const userToken = req.cookies['userToken']
-    // console.log(userToken)
-    let decoded
-    if(userToken){
-      try {
-        decoded = jwt.verify(userToken, process.env.JWT_SECRET)
-      } catch {
-        return res.send({ Success: true, Message: "Route data retrieved successfully.", data:routeData })
-      }
-      await USERS.findOneAndUpdate(
-        { _id: decoded.userID },
-        {
-          $push: {
-            scanned: {
-              buildingName: BUILDING.buildingName,
-              scannedAt: new Date(),
-              buildingID: BUILDING._id
-            }
-          }
-        },
-        { new: true }
-      )
-    }
+    // const userToken = req.cookies['userToken']
+    // // console.log(userToken)
+    // let decoded
+    // if(userToken){
+    //   try {
+    //     decoded = jwt.verify(userToken, process.env.JWT_SECRET)
+    //   } catch {
+    //     return res.send({ Success: true, Message: "Route data retrieved successfully.", data:routeData })
+    //   }
+    //   await USERS.findOneAndUpdate(
+    //     { _id: decoded.userID },
+    //     {
+    //       $push: {
+    //         scanned: {
+    //           buildingName: BUILDING.buildingName,
+    //           scannedAt: new Date(),
+    //           buildingID: BUILDING._id
+    //         }
+    //       }
+    //     },
+    //     { new: true }
+    //   )
+    // }
 
-    // No premium checks - all buildings are always active
     return res.send({ Success: true, Message: BUILDING });
   } catch (error) {
     console.error('GET /api/building/id/:buildingID error:', error);
@@ -311,6 +310,7 @@ router.get('/api/building/scan/:id/:floor', async (req, res) => {
       logType:"scan",
       logMessage:"Floor QR has been scanned.",
       buildingID:building._id,
+      isEmergency:building.emergencyMode
     })
 
     const userToken = req.cookies['userToken']
@@ -605,7 +605,7 @@ router.post('/api/building/evacuated',async(req,res)=>{
       logType:'evacuated',
       logMessage:"Someone has been evacuated successfully",
       buildingID:building._id,
-      isEmergency:false
+      isEmergency:building.emergencyMode
     })
 
     return res.send({Success:true,Message:"Success."})

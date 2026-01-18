@@ -16,7 +16,7 @@ router.post('/api/administration/emergency',whoami,async(req,res)=>{
         const updated = await BUILDINGS.findOneAndUpdate({_id:buildingID},{emergencyMode:building.emergencyMode == false ? true : false},{new:true})
         await LOGS.create({
             logType:'emergency',
-            logMessage:"Emergency Mode has been activated.",
+            logMessage:updated.emergencyMode == true ? "Emergency Mode has been activated." : "Emergency Mode has been deactivated.",
             buildingID:building._id,
             isEmergency:updated.emergencyMode
         })
