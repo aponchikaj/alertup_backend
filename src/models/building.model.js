@@ -25,7 +25,6 @@ const BUILDINGS_SCHEMA = new mongoose.Schema({
     type:Boolean,
     default:false
   },
-
 })
 
 BUILDINGS_SCHEMA.index({ owner: 1 })

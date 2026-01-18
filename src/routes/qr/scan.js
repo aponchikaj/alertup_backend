@@ -3,6 +3,7 @@ import Node from '../../models/node.model.js';
 import BUILDINGS from '../../models/building.model.js';
 import USERS from '../../models/user.model.js';
 import { isValidObjectId } from 'mongoose';
+import LOGS from '../../models/logs.model.js';
 
 const router = express.Router();
 
@@ -218,6 +219,13 @@ router.get('/route/:qrId', async (req, res) => {
     await Node.findByIdAndUpdate(nodeId, {
       $inc: { scanCount: 1 }
     });
+
+    await LOGS.create({
+      logType:"scan",
+      logMessage:`new Scan on ${node.floorNumber} near ${node.label}`,
+      buildingID:node.buildingId,
+      isEmergency:building.emergencyMode,
+    })
     
     res.status(200).json({
       success: true,

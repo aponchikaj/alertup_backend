@@ -5,7 +5,7 @@ const LOGS_SCHEMA = new mongoose.Schema({
     type:String,
     required:true,
     default:"system",
-    enum:["system","report","error","scan","evacuated"]
+    enum:["system","report","error","scan","evacuated","emergency"]
   },
   logMessage:{
     type:String,
@@ -19,6 +19,11 @@ const LOGS_SCHEMA = new mongoose.Schema({
     type:Boolean,
     default:false,
   },
+  buildingID:{
+    type:mongoose.Schema.Types.ObjectId,
+    ref:'buildings',
+    required:true
+  }
 },{timestamps:true})
 
 const LOGS = mongoose.model('log',LOGS_SCHEMA)
