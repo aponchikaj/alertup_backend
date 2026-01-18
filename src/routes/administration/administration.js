@@ -13,12 +13,12 @@ router.post('/api/administration/emergency',whoami,async(req,res)=>{
         if(!building) return res.send({Success:false,Message:"Invalid building."})
         if(building.owner.toString() !== req.user._id.toString()) return res.send({Success:false,Message:"You can't access this function."})
 
-        await BUILDINGS.findOneAndUpdate({_id:buildingID},{emergencyMode:building.emergencyMode == false ? true : false},{new:true})
+        const updated = await BUILDINGS.findOneAndUpdate({_id:buildingID},{emergencyMode:building.emergencyMode == false ? true : false},{new:true})
         await LOGS.create({
             logType:'emergency',
             logMessage:"Emergency Mode has been activated.",
             buildingID:building._id,
-            isEmergency:true
+            isEmergency:updated.emergencyMode
         })
 
         return res.send({Success:true,Message:"Saved."})
@@ -27,7 +27,8 @@ router.post('/api/administration/emergency',whoami,async(req,res)=>{
     }
 })
 
-router.get('/api/administration/logs',async(req,res)=>{
+router.get('/api/administration/logs/:id',async(req,res)=>{
+    const {buildingID} =req.body;
     
 })
 

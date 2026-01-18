@@ -11,6 +11,7 @@ import { uploadToCloudinary } from '../../services/cloudinaryService.js';
 import whoami from '../../middlewares/whoami.js';
 import fs from 'fs';
 import { Filter } from 'bad-words';
+import LOGS from '../../models/logs.model.js';
 
 const router = express.Router();
 
@@ -530,11 +531,38 @@ router.put('/api/building/deactivate/:id', whoami, async (req, res) => {
     building.isDeactivated = true;
     await building.save();
 
+    await LOGS.create({
+      logType:'system',
+      logMessage:"Building has been deactivated.",
+      buildingID:building._id,
+      isEmergency:true
+    })
+
     res.send({ Success: true, Message: "Building deactivated." });
   } catch (err) {
     console.error("PUT /api/building/deactivate/:id error:", err);
     res.send({ Success: false, Message: "Server error." });
   }
 });
+
+router.post('/api/building/evacuated',async(req,res)=>{
+  const {buildingID} =req.body;
+  try{
+    const building = await BUILDINGS.findById(buildingID)
+    if(!building) return res.send({Success:false,Message:"Invalid building"});
+
+    await LOGS.create({
+      logType:'evacuated',
+      logMessage:"Someone has been evacuated successfully",
+      buildingID:building._id,
+      isEmergency:false
+    })
+
+    return res.send({Success:true,Message:"Success."})
+
+  }catch{
+    return res.send({Success:false,Message:"Server error."})
+  }
+})
 
 export default router;
