@@ -28,7 +28,7 @@ router.post('/api/administration/emergency',whoami,async(req,res)=>{
 })
 
 router.get('/api/administration/logs/:id',async(req,res)=>{
-    const {buildingID} =req.params;
+    const {buildingID} =req.params.id;
     if(!buildingID) return res.send({Success:false,Message:"Invalid building ID."})
     try{
         let findLogs = await LOGS.find({buildingID:buildingID})
