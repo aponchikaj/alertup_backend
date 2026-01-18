@@ -23,6 +23,7 @@ import qrRouter from './src/routes/qr/qr.js'
 import qrScanRouter from './src/routes/qr/scan.js'
 import websitereview from './src/routes/reviews/reviews.js'
 import twoFaSystem from './src/routes/auth/2fa.js'
+import administrationRouter from './src/routes/administration/administration.js'
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -108,6 +109,7 @@ app.use(qrRouter)
 app.use('/api/qr/scan', qrScanRouter)
 app.use(websitereview)
 app.use(twoFaSystem)
+app.use(administrationRouter)
 
 
 // Health check endpoint
