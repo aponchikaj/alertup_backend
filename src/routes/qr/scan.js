@@ -228,6 +228,7 @@ router.get('/route/:qrId', async (req, res) => {
     })
 
     const userToken = req.cookies['userToken']
+    // console.log(userToken)
     let decoded
     if(userToken){
         try {

@@ -240,7 +240,11 @@ router.get('/api/building/id/:buildingID', async (req, res) => {
     console.log(userToken)
     let decoded
     if(userToken){
-      decoded = jwt.verify(userToken,process.env.JWT_SECRET)
+      try {
+        decoded = jwt.verify(userToken, process.env.JWT_SECRET)
+      } catch {
+        return res.send({ Success: true, Message: "Route data retrieved successfully.", data:routeData })
+      }
       await USERS.findOneAndUpdate(
         { _id: decoded.userID },
         {
@@ -310,9 +314,14 @@ router.get('/api/building/scan/:id/:floor', async (req, res) => {
     })
 
     const userToken = req.cookies['userToken']
+    // console.log(userToken)
     let decoded
     if(userToken){
-      decoded = jwt.verify(userToken,process.env.JWT_SECRET)
+      try {
+        decoded = jwt.verify(userToken, process.env.JWT_SECRET)
+      } catch {
+        return res.send({ Success: true, Message: "Route data retrieved successfully.", data:routeData })
+      }
       await USERS.findOneAndUpdate({_id:decoded.userID},{$push:{scanned:{buildingName:building.buildingName,scannedAt: Date.now(),buildingID:building._id}}},{new:true})
     }
     
