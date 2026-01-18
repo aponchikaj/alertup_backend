@@ -60,10 +60,8 @@ const USER_SCHEMA = new mongoose.Schema({
                 type:String
             },
             buildingID:{
-                type:String
-            },
-            scannedCount:{
-                type:Number
+                type:mongoose.Schema.Types.ObjectId,
+                ref:'buildings'
             }
         }
     ],

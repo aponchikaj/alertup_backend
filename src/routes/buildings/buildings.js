@@ -12,6 +12,7 @@ import whoami from '../../middlewares/whoami.js';
 import fs from 'fs';
 import { Filter } from 'bad-words';
 import LOGS from '../../models/logs.model.js';
+import jwt from 'jsonwebtoken'
 
 const router = express.Router();
 
@@ -229,6 +230,32 @@ router.get('/api/building/id/:buildingID', async (req, res) => {
     const owner = BUILDING.owner;
     if (!owner) return res.status(500).send({ Success: false, Message: 'Owner data missing.' });
 
+    await LOGS.create({
+      logType:"scan",
+      logMessage:"Building QR has been scanned.",
+      buildingID:BUILDING._id,
+    })
+
+    const userToken = req.cookies['userToken']
+    console.log(userToken)
+    let decoded
+    if(userToken){
+      decoded = jwt.verify(userToken,process.env.JWT_SECRET)
+      await USERS.findOneAndUpdate(
+        { _id: decoded.userID },
+        {
+          $push: {
+            scanned: {
+              buildingName: BUILDING.buildingName,
+              scannedAt: new Date(),
+              buildingID: BUILDING._id
+            }
+          }
+        },
+        { new: true }
+      )
+    }
+
     // No premium checks - all buildings are always active
     return res.send({ Success: true, Message: BUILDING });
   } catch (error) {
@@ -275,6 +302,20 @@ router.get('/api/building/scan/:id/:floor', async (req, res) => {
     );
 
     if (!updated) return res.status(404).send({ Success: false, Message: 'Floor not found.' });
+
+    await LOGS.create({
+      logType:"scan",
+      logMessage:"Floor QR has been scanned.",
+      buildingID:building._id,
+    })
+
+    const userToken = req.cookies['userToken']
+    let decoded
+    if(userToken){
+      decoded = jwt.verify(userToken,process.env.JWT_SECRET)
+      await USERS.findOneAndUpdate({_id:decoded.userID},{$push:{scanned:{buildingName:building.buildingName,scannedAt: Date.now(),buildingID:building._id}}},{new:true})
+    }
+    
 
     const floorData = updated.maps.find(f => f.floor === floor);
     return res.send({ Success: true, Message: { buildingName: updated.buildingName, floorData, scannedCount: floorData.scanned } });

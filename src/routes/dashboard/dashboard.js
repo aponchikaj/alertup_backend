@@ -26,7 +26,7 @@ router.get('/api/dashboard', whoami, async (req, res) => {
     ]);
 
     const totalScans = buildingScans[0]?.totalScans || 0;
-
+    console.log(USER.scanned)
     // Build dashboard object
     const dashboardData = {
       MyBuildings: USER.Buildings.length,

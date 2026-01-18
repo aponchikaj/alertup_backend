@@ -27,16 +27,18 @@ router.post('/api/administration/emergency',whoami,async(req,res)=>{
     }
 })
 
-router.get('/api/administration/logs/:id',async(req,res)=>{
-    const {buildingID} =req.params.id;
-    if(!buildingID) return res.send({Success:false,Message:"Invalid building ID."})
-    try{
-        let findLogs = await LOGS.find({buildingID:buildingID})
-        findLogs = findLogs.sort((a,b)=>a.createdAt - b.createdAt)
-        return res.send({Success:true,Message:findLogs})
-    }catch{
-        return res.send({Success:false,Message:"Server error."})
-    }
+router.get('/api/administration/logs/:id', async (req, res) => {
+  const buildingID = req.params.id
+  if (!buildingID) return res.send({ Success: false, Message: "Invalid building ID." })
+
+  try {
+    let findLogs = await LOGS.find({ buildingID })
+    findLogs.sort((a, b) => a.createdAt - b.createdAt)
+    return res.send({ Success: true, Message: findLogs })
+  } catch (err) {
+    console.error(err)
+    return res.send({ Success: false, Message: "Server error." })
+  }
 })
 
 export default router;

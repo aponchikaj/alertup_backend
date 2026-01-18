@@ -220,12 +220,23 @@ router.get('/route/:qrId', async (req, res) => {
       $inc: { scanCount: 1 }
     });
 
-    const N_LOG = await LOGS.create({
+    await LOGS.create({
       logType:"scan",
       logMessage:`new Scan on ${node.floorNumber} Floor near ${node.label}`,
       buildingID:node.buildingId,
       isEmergency:building.emergencyMode,
     })
+
+    const userToken = req.cookies['userToken']
+    let decoded
+    if(userToken){
+        try {
+          decoded = jwt.verify(userToken, process.env.JWT_SECRET)
+        } catch {
+          return res.send({ Success: true, Message: "Route data retrieved successfully.", data:routeData })
+        }
+        await USERS.findOneAndUpdate({_id:decoded.userID},{$push:{scanned:{buildingName:building.buildingName,scannedAt:Date.now(),buildingID:building._id}}},{new:true})
+    }
 
     // console.log('Scanned. '+N_LOG)
     
