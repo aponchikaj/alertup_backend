@@ -22,7 +22,7 @@ const BUILDINGS_SCHEMA = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now },
   isDeactivated: { type: Boolean, default: false },
   emergencyMode:{type:Boolean,default:false},
-})
+},{timestamps:true})
 
 BUILDINGS_SCHEMA.index({ owner: 1 })
 BUILDINGS_SCHEMA.index({ buildingName: 1 })

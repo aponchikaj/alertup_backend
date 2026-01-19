@@ -227,6 +227,19 @@ router.get('/route/:qrId', async (req, res) => {
       isEmergency:building.emergencyMode,
     })
 
+    await BUILDINGS.findOneAndUpdate(
+      {
+        _id: node.buildingId,
+        'maps.floor': node.floorNumber,
+        'maps.qrCode': node.label
+      },
+      {
+        updatedAt: Date.now(),
+        $inc: { 'maps.$.scanned': 1 }
+      },
+      { new: true }
+    )
+
     const userToken = req.cookies['userToken']
     // console.log(userToken)
     let decoded
