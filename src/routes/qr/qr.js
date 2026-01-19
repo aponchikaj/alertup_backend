@@ -138,6 +138,12 @@ router.get('/api/qr/file/:filename', async (req, res) => {
 router.get('/api/qr/download/:filename', whoami, ownerAuth, async (req, res) => {
   try {
     const { filename } = req.params;
+    if (!filename || filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid filename'
+      });
+    }
     const filePath = path.join(process.cwd(), 'uploads', 'qr-codes', filename);
     
     // Check if file exists
@@ -148,20 +154,24 @@ router.get('/api/qr/download/:filename', whoami, ownerAuth, async (req, res) => 
       });
     }
 
-    // Set appropriate headers
-    const ext = filename.split('.').pop().toLowerCase();
-    const contentType = ext === 'svg' ? 'image/svg+xml' : 'image/png';
-    
+    const ext = path.extname(filename).toLowerCase();
+    const contentType = ext === '.svg' ? 'image/svg+xml' : 'image/png';
+
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    const fileStream = fs.createReadStream(filePath);
+    fileStream.pipe(res);
     
-    // Send file
-    if (ext === 'svg') {
-      const svgContent = fs.readFileSync(filePath, 'utf8');
-      res.send(svgContent);
-    } else {
-      res.sendFile(filePath);
-    }
+    fileStream.on('error', (error) => {
+      console.error('Error streaming file:', error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          message: 'Error reading file'
+        });
+      }
+    });
 
   } catch (error) {
     console.error('Error downloading QR code:', error);
