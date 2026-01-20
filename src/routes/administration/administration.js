@@ -74,9 +74,9 @@ router.get('/api/administration/logs/:id',whoami, async (req, res) => {
     //   return log.createdAt >= emergency.startedAt
     // })
 
-    if (logs.length === 0) {
-      return res.send({ Success: false, Message: "Logs not found." });
-    }
+    // if (logs.length === 0) {
+    //   return res.send({ Success: false, Message: "Logs not found." });
+    // }
 
     return res.send({ Success: true, Message: logs });
   } catch (err) {
