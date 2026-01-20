@@ -279,12 +279,14 @@ router.get('/api/building/scan/:id/:floor', async (req, res) => {
 
     if (!updated) return res.status(404).send({ Success: false, Message: 'Floor not found.' });
 
-    await LOGS.create({
-      logType:"scan",
-      logMessage:"Floor QR has been scanned.",
-      buildingID:building._id,
-      isEmergency:building.emergencyMode
-    })
+    if(updated.emergencyMode==true){
+      await LOGS.create({
+        logType:"scan",
+        logMessage:"Floor QR has been scanned.",
+        buildingID:building._id,
+        isEmergency:building.emergencyMode
+      })
+    }
 
     const userToken = req.cookies['userToken']
     // console.log(userToken)
@@ -550,12 +552,14 @@ router.put('/api/building/deactivate/:id', whoami, async (req, res) => {
     building.isDeactivated = true;
     await building.save();
 
-    await LOGS.create({
-      logType:'system',
-      logMessage:"Building has been deactivated.",
-      buildingID:building._id,
-      isEmergency:true
-    })
+    if(building.emergencyMode == true){
+      await LOGS.create({
+        logType:'system',
+        logMessage:"Building has been deactivated.",
+        buildingID:building._id,
+        isEmergency:true
+      })
+    }
 
     res.send({ Success: true, Message: "Building deactivated." });
   } catch (err) {
@@ -571,15 +575,16 @@ router.post('/api/building/evacuated',async(req,res)=>{
     const building = await BUILDINGS.findById(buildingId)
     if(!building) return res.send({Success:false,Message:"Invalid building"});
 
-    await LOGS.create({
-      logType:'evacuated',
-      logMessage:"Someone has been evacuated successfully",
-      buildingID:building._id,
-      isEmergency:building.emergencyMode
-    })
-    // console.log('created log.')
+    if(building.emergencyMode == true){
+      await LOGS.create({
+        logType:'evacuated',
+        logMessage:"Someone has been evacuated successfully",
+        buildingID:building._id,
+        isEmergency:building.emergencyMode
+      })
+    }
+    
     return res.send({Success:true,Message:"Success."})
-
   }catch{
     return res.send({Success:false,Message:"Server error."})
   }

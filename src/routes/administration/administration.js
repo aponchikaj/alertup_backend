@@ -18,7 +18,7 @@ router.post('/api/administration/emergency',whoami,async(req,res)=>{
             logType:'emergency',
             logMessage:updated.emergencyMode == true ? "Emergency Mode has been activated." : "Emergency Mode has been deactivated.",
             buildingID:building._id,
-            isEmergency:updated.emergencyMode
+            isEmergency:true
         })
 
         return res.send({Success:true,Message:"Saved."})

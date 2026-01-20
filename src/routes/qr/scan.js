@@ -220,12 +220,14 @@ router.get('/route/:qrId', async (req, res) => {
       $inc: { scanCount: 1 }
     });
 
-    await LOGS.create({
-      logType:"scan",
-      logMessage:`new Scan on ${node.floorNumber} Floor near ${node.label}`,
-      buildingID:node.buildingId,
-      isEmergency:building.emergencyMode,
-    })
+    if(building.emergencyMode == true){
+      await LOGS.create({
+        logType:"scan",
+        logMessage:`new Scan on ${node.floorNumber} Floor near ${node.label}`,
+        buildingID:node.buildingId,
+        isEmergency:building.emergencyMode,
+      })
+    }
 
     await BUILDINGS.findOneAndUpdate(
       {
