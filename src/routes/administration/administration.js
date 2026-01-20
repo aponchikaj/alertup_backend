@@ -61,7 +61,6 @@ router.get('/api/administration/logs/:id',whoami, async (req, res) => {
     const emergency = await EMERGENCIES.findOne({buildingID:building._id,isFinished:false})
 
     let logs = await LOGS
-      .find(query)
       .sort({ createdAt: 1 }); // oldest → newest
     
     logs = logs.filter((log)=>{
