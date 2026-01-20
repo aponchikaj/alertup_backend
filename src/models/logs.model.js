@@ -23,7 +23,7 @@ const LOGS_SCHEMA = new mongoose.Schema({
     type:mongoose.Schema.Types.ObjectId,
     ref:'buildings',
     required:true
-  }
+  },
 },{timestamps:true})
 
 const LOGS = mongoose.model('log',LOGS_SCHEMA)

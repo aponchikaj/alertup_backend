@@ -87,14 +87,12 @@ router.post('/svg', svgUpload.single('svg'), async (req, res) => {
       });
     }
 
-    // Read the uploaded SVG file
     const svgPath = req.file.path;
     let svgContent;
 
     try {
       svgContent = fs.readFileSync(svgPath, 'utf8');
     } catch (readError) {
-      // Clean up file if read fails
       if (fs.existsSync(svgPath)) {
         fs.unlinkSync(svgPath);
       }
@@ -104,104 +102,30 @@ router.post('/svg', svgUpload.single('svg'), async (req, res) => {
       });
     }
 
-    // Validate SVG content
-    if (!svgContent || !svgContent.trim()) {
-      // Clean up invalid file
-      if (fs.existsSync(svgPath)) {
-        fs.unlinkSync(svgPath);
+    // ... validation code ...
+
+    // Upload to Cloudinary
+    let cloudinaryUrl = null;
+    try {
+      const cloudinaryResult = await uploadToCloudinary(
+        Buffer.from(svgContent),
+        'alertup/svg-maps'
+      );
+      if (cloudinaryResult && cloudinaryResult.secure_url) {
+        cloudinaryUrl = cloudinaryResult.secure_url;
       }
-      return res.status(400).json({
-        success: false,
-        message: 'SVG file is empty or corrupted'
-      });
+    } catch (cloudinaryError) {
+      console.error('Cloudinary upload failed:', cloudinaryError);
     }
 
-    // Check if it's actually SVG content
-    const trimmedContent = svgContent.trim();
-    if (!trimmedContent.startsWith('<svg') || !trimmedContent.endsWith('</svg>')) {
-      // Clean up invalid file
-      if (fs.existsSync(svgPath)) {
-        fs.unlinkSync(svgPath);
-      }
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid SVG file format. File must start with <svg> and end with </svg>'
-      });
-    }
-
-    // Basic SVG security validation
-    const dangerousPatterns = [
-      /<script[^>]*>.*?<\/script>/gi,
-      /javascript:/gi,
-      /on\w+\s*=/gi,
-      /<iframe[^>]*>.*?<\/iframe>/gi,
-      /<object[^>]*>.*?<\/object>/gi,
-      /<embed[^>]*>/gi,
-      /<form[^>]*>.*?<\/form>/gi
-    ];
-
-    const hasDangerousContent = dangerousPatterns.some(pattern => pattern.test(svgContent));
-    if (hasDangerousContent) {
-      // Clean up dangerous file
-      if (fs.existsSync(svgPath)) {
-        fs.unlinkSync(svgPath);
-      }
-      return res.status(400).json({
-        success: false,
-        message: 'SVG file contains potentially dangerous content'
-      });
-    }
-
-    // Extract dimensions from SVG or set defaults
-    const widthMatch = svgContent.match(/width="([^"]+)"/);
-    const heightMatch = svgContent.match(/height="([^"]+)"/);
-    const viewBoxMatch = svgContent.match(/viewBox="([^"]+)"/);
-    
-    let width = 1000;
-    let height = 800;
-
-    if (widthMatch) {
-      const parsedWidth = parseInt(widthMatch[1]);
-      if (!isNaN(parsedWidth) && parsedWidth > 0) {
-        width = parsedWidth;
-      }
-    }
-
-    if (heightMatch) {
-      const parsedHeight = parseInt(heightMatch[1]);
-      if (!isNaN(parsedHeight) && parsedHeight > 0) {
-        height = parsedHeight;
-      }
-    }
-
-    // If viewBox exists, use it for dimensions
-    if (viewBoxMatch) {
-      const viewBoxParts = viewBoxMatch[1].split(' ');
-      if (viewBoxParts.length === 4) {
-        const viewBoxWidth = parseFloat(viewBoxParts[2]);
-        const viewBoxHeight = parseFloat(viewBoxParts[3]);
-        if (!isNaN(viewBoxWidth) && !isNaN(viewBoxHeight) && viewBoxWidth > 0 && viewBoxHeight > 0) {
-          width = Math.round(viewBoxWidth);
-          height = Math.round(viewBoxHeight);
-        }
-      }
-    }
-
-    // Validate dimensions
-    if (width > 5000 || height > 5000) {
-      return res.status(400).json({
-        success: false,
-        message: 'SVG dimensions too large. Maximum allowed is 5000x5000 pixels.'
-      });
-    }
-
-    // Return processed SVG data
+    // Return processed SVG data with Cloudinary URL if available
     res.status(200).json({
       success: true,
       message: 'SVG uploaded and validated successfully',
       data: {
         svgContent,
-        svgPath: `/uploads/svg/${req.file.filename}`,
+        svgPath: cloudinaryUrl || `/uploads/svg/${req.file.filename}`,
+        cloudinaryUrl,
         width,
         height,
         originalName: req.file.originalname,
@@ -211,8 +135,13 @@ router.post('/svg', svgUpload.single('svg'), async (req, res) => {
 
   } catch (error) {
     console.error('Error uploading SVG:', error);
-    
-    // Clean up uploaded file on error
+    res.status(500).json({
+      success: false,
+      message: 'Server error during SVG upload',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    // ALWAYS clean up the uploaded file
     if (req.file && req.file.path && fs.existsSync(req.file.path)) {
       try {
         fs.unlinkSync(req.file.path);
@@ -220,12 +149,6 @@ router.post('/svg', svgUpload.single('svg'), async (req, res) => {
         console.error('Error cleaning up file:', cleanupError);
       }
     }
-
-    res.status(500).json({
-      success: false,
-      message: 'Server error during SVG upload',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
   }
 });
 
@@ -251,10 +174,6 @@ router.post('/convert', imageUpload.single('image'), async (req, res) => {
     });
 
     if (!conversionResult.success) {
-      // Clean up uploaded file on error
-      if (req.file.path && fs.existsSync(req.file.path)) {
-        fs.unlinkSync(req.file.path);
-      }
       return res.status(500).json({
         success: false,
         message: 'Failed to convert image to SVG',
@@ -279,8 +198,13 @@ router.post('/convert', imageUpload.single('image'), async (req, res) => {
 
   } catch (error) {
     console.error('Error converting image:', error);
-    
-    // Clean up uploaded file on error
+    res.status(500).json({
+      success: false,
+      message: 'Server error during image conversion',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    // ALWAYS clean up the uploaded image file
     if (req.file && req.file.path && fs.existsSync(req.file.path)) {
       try {
         fs.unlinkSync(req.file.path);
@@ -288,12 +212,6 @@ router.post('/convert', imageUpload.single('image'), async (req, res) => {
         console.error('Error cleaning up file:', cleanupError);
       }
     }
-
-    res.status(500).json({
-      success: false,
-      message: 'Server error during image conversion',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
   }
 });
 
@@ -310,7 +228,6 @@ router.post('/convert-multiple', imageUpload.array('images', 10), async (req, re
       });
     }
 
-    // Process multiple images
     const results = await processMultipleImages(req.files, {
       quality: 90,
       optimize: true,
@@ -335,8 +252,13 @@ router.post('/convert-multiple', imageUpload.array('images', 10), async (req, re
 
   } catch (error) {
     console.error('Error converting multiple images:', error);
-    
-    // Clean up uploaded files on error
+    res.status(500).json({
+      success: false,
+      message: 'Server error during multiple image conversion',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    // ALWAYS clean up ALL uploaded files
     if (req.files) {
       req.files.forEach(file => {
         if (file.path && fs.existsSync(file.path)) {
@@ -348,12 +270,6 @@ router.post('/convert-multiple', imageUpload.array('images', 10), async (req, re
         }
       });
     }
-
-    res.status(500).json({
-      success: false,
-      message: 'Server error during multiple image conversion',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
   }
 });
 

@@ -4,6 +4,7 @@ import BUILDINGS from '../../models/building.model.js';
 import USERS from '../../models/user.model.js';
 import { isValidObjectId } from 'mongoose';
 import LOGS from '../../models/logs.model.js';
+import EMERGENCIES from '../../models/emergencies.model.js';
 
 const router = express.Router();
 
@@ -227,6 +228,7 @@ router.get('/route/:qrId', async (req, res) => {
         buildingID:node.buildingId,
         isEmergency:building.emergencyMode,
       })
+      await EMERGENCIES.findOneAndUpdate({buildingID:building._id,isFinished:false},{$inc:{scanned:1}},{new:true})
     }
 
     await BUILDINGS.findOneAndUpdate(

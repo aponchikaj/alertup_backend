@@ -13,6 +13,7 @@ import fs from 'fs';
 import { Filter } from 'bad-words';
 import LOGS from '../../models/logs.model.js';
 import jwt from 'jsonwebtoken'
+import EMERGENCIES from '../../models/emergencies.model.js';
 
 const router = express.Router();
 
@@ -46,55 +47,52 @@ const normalizeFloorNames = (floorNames) => {
 
 /* ---------------- CREATE BUILDING ---------------- */
 router.post("/api/building/new", whoami, upload.array("maps"), async (req, res) => {
+  const uploadedFiles = []; // Track all uploaded files for cleanup
   try {
     const USER = await USERS.findById(req.user._id);
     if (!USER) return res.send({ Success: false, Message: "User not found." });
     if (USER.verified == false) return res.send({ Success: false, Message: "Verify account first." });
-
+    
     const { buildingName, floorNames } = req.body;
-
     if (!buildingName || typeof buildingName !== "string")
       return res.send({ Success: false, Message: "Invalid building name." });
     if (!Array.isArray(floorNames) || floorNames.length === 0)
       return res.send({ Success: false, Message: "Invalid floor names." });
-
+    
     const normalizedFloors = floorNames.map(f => f.trim().toLowerCase());
     if (new Set(normalizedFloors).size !== normalizedFloors.length)
       return res.send({ Success: false, Message: "Floor names must be unique." });
-
-    // No premium limits - allow unlimited floors and buildings
+    
     const nameCheck = await checkBuildingName(USER._id, buildingName);
     if (nameCheck !== true) return res.send({ Success: false, Message: nameCheck });
-
+    
     const files = req.files || [];
+    
+    // Store file paths for cleanup
+    uploadedFiles.push(...files.map(f => f.path));
+    
     if (files.length > floorNames.length)
       return res.send({ Success: false, Message: "Too many map files uploaded." });
-
+    
     const buildingId = new mongoose.Types.ObjectId();
+    
     const MAPS = await Promise.all(
       floorNames.map(async (floor, i) => {
         let mapUrl = null;
         
-        // If there's a file, upload it to Cloudinary
         if (files[i]) {
           try {
             const cloudinaryResult = await uploadToCloudinary(
               fs.readFileSync(files[i].path),
               `alertup/buildings/${buildingId}/floor-${floor.trim()}`
             );
-            
             if (cloudinaryResult && cloudinaryResult.secure_url) {
               mapUrl = cloudinaryResult.secure_url;
-              
-              // Clean up local file after successful upload
-              if (files[i].path && fs.existsSync(files[i].path)) {
-                fs.unlinkSync(files[i].path);
-              }
             }
           } catch (error) {
             console.error(`❌ Failed to upload floor ${floor} map:`, error);
-            // Keep local file as fallback
-            mapUrl = files[i]?.path || null;
+            // Don't use local path as fallback - just set to null
+            mapUrl = null;
           }
         }
         
@@ -109,7 +107,7 @@ router.post("/api/building/new", whoami, upload.array("maps"), async (req, res) 
         };
       })
     );
-
+    
     const NEW_BUILDING = new BUILDINGS({
       _id: buildingId,
       buildingName: buildingName.trim(),
@@ -120,14 +118,13 @@ router.post("/api/building/new", whoami, upload.array("maps"), async (req, res) 
       isDeactivated: false,
       updatedAt: Date.now()
     });
-
+    
     await NEW_BUILDING.save();
-
-    // Push ObjectId into user.Buildings
+    
     await USERS.findByIdAndUpdate(USER._id, {
       $push: { Buildings: NEW_BUILDING._id }
     });
-
+    
     return res.send({
       Success: true,
       Message: "Building created successfully.",
@@ -136,6 +133,16 @@ router.post("/api/building/new", whoami, upload.array("maps"), async (req, res) 
   } catch (error) {
     console.error(error);
     return res.send({ Success: false, Message: "Server error." });
+  }finally{
+    uploadedFiles.forEach(filePath => {
+      if (filePath && fs.existsSync(filePath)) {
+        try {
+          fs.unlinkSync(filePath);
+        } catch (err) {
+          console.error(`Failed to delete file ${filePath}:`, err);
+        }
+      }
+    });
   }
 });
 
@@ -286,6 +293,7 @@ router.get('/api/building/scan/:id/:floor', async (req, res) => {
         buildingID:building._id,
         isEmergency:building.emergencyMode
       })
+      // await EMERGENCIES.findOneAndUpdate({buildingID:building._id,isFinished:false},{$inc:{scanned:1}},{new:true})
     }
 
     const userToken = req.cookies['userToken']
@@ -582,11 +590,30 @@ router.post('/api/building/evacuated',async(req,res)=>{
         buildingID:building._id,
         isEmergency:building.emergencyMode
       })
+      await EMERGENCIES.findOneAndUpdate({buildingID:building._id,isFinished:false},{$inc:{evacuated:1}},{new:true});
     }
     
     return res.send({Success:true,Message:"Success."})
   }catch{
     return res.send({Success:false,Message:"Server error."})
+  }
+})
+
+router.post('/api/building/emergencyCall',async(req,res)=>{
+  const {buildingID} = req.body;
+  try{
+    const building = await BUILDINGS.findById(buildingID)
+    if(!building) return;
+    await LOGS.create({
+      logType:'system',
+      logMessage:"+1 user called ambulance",
+      buildingID:buildingID,
+      isEmergency:true
+    })
+    await EMERGENCIES.findOneAndUpdate({buildingID:buildingID,isFinished:false},{$inc:{calledEmergency:1}},{new:true})
+    return;
+  }catch{
+    console.error("Error occured while trying to call ambulance.")
   }
 })
 

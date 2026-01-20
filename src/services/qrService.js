@@ -2,18 +2,19 @@ import QRCode from 'qrcode';
 import fs from 'fs';
 import path from 'path';
 import { randomBytes } from 'crypto';
+import { uploadToCloudinary } from './cloudinaryService.js';
 
 /**
- * Generate QR code image file
+ * Generate QR code image file and upload to Cloudinary
  * @param {string} data - QR code data
  * @param {Object} options - QR code generation options
  * @returns {Promise<Object>} - QR code file info
  */
 export const generateQRCodeFile = async (data, options = {}) => {
+  let tempFilePath = null;
+  
   try {
     const {
-      filename = null,
-      directory = 'uploads/qr-codes',
       size = 300,
       margin = 1,
       color = {
@@ -22,17 +23,7 @@ export const generateQRCodeFile = async (data, options = {}) => {
       }
     } = options;
 
-    // Create directory if it doesn't exist
-    const uploadDir = path.join(process.cwd(), directory);
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-
-    // Generate unique filename if not provided
-    const finalFilename = filename || `qr-${randomBytes(16).toString('hex')}-${Date.now()}.png`;
-    const filePath = path.join(uploadDir, finalFilename);
-
-    // Generate QR code as buffer
+    // Generate QR code as buffer (no file creation)
     const qrBuffer = await QRCode.toBuffer(data, {
       errorCorrectionLevel: 'H',
       type: 'png',
@@ -46,15 +37,24 @@ export const generateQRCodeFile = async (data, options = {}) => {
       height: size
     });
 
-    // Save QR code file
-    fs.writeFileSync(filePath, qrBuffer);
+    // Upload directly to Cloudinary
+    let cloudinaryUrl = null;
+    try {
+      const cloudinaryResult = await uploadToCloudinary(
+        qrBuffer,
+        'alertup/qr-codes'
+      );
+      if (cloudinaryResult && cloudinaryResult.secure_url) {
+        cloudinaryUrl = cloudinaryResult.secure_url;
+      }
+    } catch (cloudinaryError) {
+      console.error('❌ Cloudinary upload failed for QR code:', cloudinaryError);
+    }
 
     return {
       success: true,
-      filename: finalFilename,
-      filePath: filePath,
-      url: `/uploads/qr-codes/${finalFilename}`,
-      publicUrl: `${process.env.API_BASE_URL || 'http://localhost:3001'}/uploads/qr-codes/${finalFilename}`,
+      url: cloudinaryUrl,
+      publicUrl: cloudinaryUrl,
       size: qrBuffer.length,
       dimensions: { width: size, height: size }
     };
@@ -68,7 +68,7 @@ export const generateQRCodeFile = async (data, options = {}) => {
 };
 
 /**
- * Generate QR code SVG file
+ * Generate QR code SVG and upload to Cloudinary
  * @param {string} data - QR code data
  * @param {Object} options - QR code generation options
  * @returns {Promise<Object>} - QR code SVG file info
@@ -81,22 +81,10 @@ export const generateQRCodeSVGFile = async (data, options = {}) => {
       color = {
         dark: '#000000',
         light: '#FFFFFF'
-      },
-      filename = null,
-      directory = 'uploads/qr-codes'
+      }
     } = options;
 
-    // Create directory if it doesn't exist
-    const uploadDir = path.join(process.cwd(), directory);
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-
-    // Generate unique filename if not provided
-    const finalFilename = filename || `qr-${randomBytes(16).toString('hex')}-${Date.now()}.svg`;
-    const filePath = path.join(uploadDir, finalFilename);
-
-    // Generate QR code as SVG
+    // Generate QR code as SVG string (no file creation)
     const svgString = await QRCode.toString(data, {
       type: 'svg',
       errorCorrectionLevel: 'H',
@@ -106,16 +94,25 @@ export const generateQRCodeSVGFile = async (data, options = {}) => {
       height: size
     });
 
-    // Save SVG file
-    fs.writeFileSync(filePath, svgString, 'utf8');
+    // Upload SVG to Cloudinary
+    let cloudinaryUrl = null;
+    try {
+      const cloudinaryResult = await uploadToCloudinary(
+        Buffer.from(svgString),
+        'alertup/qr-codes'
+      );
+      if (cloudinaryResult && cloudinaryResult.secure_url) {
+        cloudinaryUrl = cloudinaryResult.secure_url;
+      }
+    } catch (cloudinaryError) {
+      console.error('❌ Cloudinary upload failed for QR SVG:', cloudinaryError);
+    }
 
     return {
       success: true,
-      filename: finalFilename,
-      filePath: filePath,
       svgContent: svgString,
-      url: `/uploads/qr-codes/${finalFilename}`,
-      publicUrl: `${process.env.API_BASE_URL || 'http://localhost:3001'}/uploads/qr-codes/${finalFilename}`,
+      url: cloudinaryUrl,
+      publicUrl: cloudinaryUrl,
       dimensions: { width: size, height: size }
     };
   } catch (error) {
@@ -128,7 +125,7 @@ export const generateQRCodeSVGFile = async (data, options = {}) => {
 };
 
 /**
- * Generate QR code SVG string
+ * Generate QR code SVG string (in-memory only)
  * @param {string} data - QR code data
  * @param {Object} options - QR code generation options
  * @returns {Promise<Object>} - QR code SVG info
@@ -144,7 +141,7 @@ export const generateQRCodeSVG = async (data, options = {}) => {
       }
     } = options;
 
-    // Generate QR code as SVG
+    // Generate QR code as SVG (in-memory only)
     const svgString = await QRCode.toString(data, {
       type: 'svg',
       errorCorrectionLevel: 'H',
@@ -169,22 +166,38 @@ export const generateQRCodeSVG = async (data, options = {}) => {
 };
 
 /**
- * Delete QR code file
- * @param {string} filename - QR code filename
+ * Delete QR code file from Cloudinary
+ * @param {string} cloudinaryUrl - Cloudinary URL or public ID
  * @returns {Promise<Object>} - Deletion result
  */
-export const deleteQRCodeFile = async (filename) => {
+export const deleteQRCodeFile = async (cloudinaryUrl) => {
   try {
-    const filePath = path.join(process.cwd(), 'uploads', 'qr-codes', filename);
-    
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-      return { success: true, message: 'QR code file deleted successfully' };
+    // Extract public_id from Cloudinary URL
+    // URL format: https://res.cloudinary.com/{cloud_name}/image/upload/{public_id}.{format}
+    if (!cloudinaryUrl || !cloudinaryUrl.includes('cloudinary.com')) {
+      return { success: false, message: 'Invalid Cloudinary URL' };
     }
+
+    const urlParts = cloudinaryUrl.split('/');
+    const fileWithExt = urlParts[urlParts.length - 1];
+    const fileName = fileWithExt.split('.')[0];
     
-    return { success: false, message: 'QR code file not found' };
+    // Reconstruct public_id (includes folder path)
+    const uploadIndex = urlParts.indexOf('upload');
+    const pathParts = urlParts.slice(uploadIndex + 1, -1);
+    const publicId = [...pathParts, fileName].join('/');
+
+    // Delete from Cloudinary
+    const { deleteFromCloudinary } = await import('./cloudinaryService.js');
+    const result = await deleteFromCloudinary(publicId);
+    
+    return { 
+      success: true, 
+      message: 'QR code deleted from Cloudinary successfully',
+      result 
+    };
   } catch (error) {
-    console.error('Error deleting QR code file:', error);
+    console.error('Error deleting QR code from Cloudinary:', error);
     return {
       success: false,
       error: error.message
