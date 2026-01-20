@@ -59,9 +59,16 @@ router.get('/api/administration/logs/:id',whoami, async (req, res) => {
     }
 
     const emergency = await EMERGENCIES.findOne({buildingID:building._id,isFinished:false})
+    
+    if (!emergency) {
+      return res.send({ Success: false, Message: "No active emergency found." });
+    }
 
-    let logs = await LOGS
-      .sort({ createdAt: 1 }); // oldest → newest
+    const logs = await LOGS.find({
+      buildingID: building._id,
+      isEmergency: true,
+      createdAt: { $gte: emergency.startedAt }
+    }).sort({ createdAt: 1 });
     
     logs = logs.filter((log)=>{
       return log.createdAt >= emergency.startedAt
