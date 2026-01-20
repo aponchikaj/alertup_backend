@@ -64,15 +64,15 @@ router.get('/api/administration/logs/:id',whoami, async (req, res) => {
       return res.send({ Success: false, Message: "No active emergency found." });
     }
 
-    const logs = await LOGS.find({
+    let logs = await LOGS.find({
       buildingID: building._id,
       isEmergency: true,
       createdAt: { $gte: emergency.startedAt }
     }).sort({ createdAt: 1 });
     
-    logs = logs.filter((log)=>{
-      return log.createdAt >= emergency.startedAt
-    })
+    // logs = logs.filter((log)=>{
+    //   return log.createdAt >= emergency.startedAt
+    // })
 
     if (logs.length === 0) {
       return res.send({ Success: false, Message: "Logs not found." });
