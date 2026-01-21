@@ -130,7 +130,7 @@ router.get('/api/administration/analytics/:buildingID',whoami,async(req,res)=>{
 })
 
 router.get('/api/administration/analytics/:buildingID/:emergencyID',whoami,async(req,res)=>{
-  const {buildingID,emergencyID} = req.params;
+  const {buildingID,emergencyID} = req.params
   if(!buildingID || !emergencyID) return res.send({Success:false,Message:"Invalid parameters."})
   const {logType,dateFrom,dateTo} = req.query;
   try{
@@ -164,7 +164,7 @@ router.get('/api/administration/analytics/:buildingID/:emergencyID',whoami,async
     const logs = await LOGS.find(query);
     
     if (!logs || logs.length === 0) {
-      return res.status(404).send({ Success: false, Message: "Logs not found." });
+      return res.send({ Success: false, Message: "Logs not found." });
     }
 
     return res.send({Success:true,Message:{logs:logs,emergency:emergency}})
