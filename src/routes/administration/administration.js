@@ -138,8 +138,12 @@ router.get('/api/administration/analytics/:buildingID/:emergencyID',whoami,async
     if(!building) return res.send({Success:false,Message:'Invalid building.'});
     if(building.owner.toString() !== req.user._id.toString()) return res.send({Success:false,Message:"You can't access this."})
 
-    const emergency = await EMERGENCIES.find({_id:emergencyID,buildingID:buildingID,isFinished:true}).select('-buildingID');
-    if(!emergency) return res.send({Success:false,Message:"Invalid emergency."});
+    const emergency = await EMERGENCIES.findOne({
+      _id: emergencyID,
+      buildingID,
+      isFinished: true
+    }).select('-buildingID')
+    // if(!emergency) return res.send({Success:false,Message:"Invalid emergency."});
 
     const STARTED_DATE = dateFrom ? new Date(dateFrom) : emergency.startedAt;
     const FINISHED_DATE = dateTo ? new Date(dateTo) : emergency.endedAt;
@@ -149,7 +153,7 @@ router.get('/api/administration/analytics/:buildingID/:emergencyID',whoami,async
     }
     
     const query = {
-      buildingID,
+      buildingID:building._id,
       createdAt: { $gte: STARTED_DATE, $lte: FINISHED_DATE }
     };
 
@@ -164,7 +168,8 @@ router.get('/api/administration/analytics/:buildingID/:emergencyID',whoami,async
     }
 
     return res.send({Success:true,Message:{logs:logs,emergency:emergency}})
-  }catch{
+  }catch(e){
+    console.log(e)
     console.log("Error occured while getting emergency analytics.")
   }
 })
