@@ -215,6 +215,15 @@ app.use((err, req, res, next) => {
     return res.status(400).json({ success: false, message: err.message })
   }
 
+  // body-parser rejects unparseable JSON with an already-classified 4xx.
+  // Without this the client's malformed request was reported as a server fault.
+  if (err?.type === 'entity.parse.failed') {
+    return res.status(400).json({ success: false, message: 'Malformed JSON body.' })
+  }
+  if (err?.type === 'entity.too.large') {
+    return res.status(413).json({ success: false, message: 'Request body too large.' })
+  }
+
   // Prisma known errors reaching the top: unique conflict, missing row, FK.
   if (err?.code === 'P2002') {
     return res.status(409).json({ success: false, message: 'That already exists.' })
