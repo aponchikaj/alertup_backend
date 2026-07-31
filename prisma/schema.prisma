@@ -1,0 +1,343 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Migrated rows keep their Mongo ObjectId 24-hex string as the primary key so
+// QR codes printed in the field (qr_{buildingId}_{floor}_{nodeId}) keep
+// resolving with a plain findUnique. New rows get cuid() — 25 chars starting
+// with "c", no underscores, cannot collide with 24-hex.
+
+enum UserType {
+  INDIVIDUAL
+  COMPANY
+}
+
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+}
+
+enum NodeType {
+  NORMAL
+  ENTRANCE
+  TRANSIT
+  POI
+  EMERGENCY_EXIT
+}
+
+enum TransitType {
+  WALKWAY
+  ELEVATOR
+  ESCALATOR
+  STAIRS
+}
+
+enum EmergencyStatus {
+  ACTIVE
+  RESOLVED
+}
+
+enum EmergencyTrigger {
+  ADMIN
+  SYSTEM
+  MANUAL
+  SENSOR
+}
+
+enum LogType {
+  SYSTEM
+  REPORT
+  ERROR
+  SCAN
+  EVACUATED
+  EMERGENCY
+}
+
+model User {
+  id               String    @id @default(cuid())
+  email            String    @unique
+  password         String?
+  name             String    @default("")
+  lastname         String    @default("")
+  company          String    @default("")
+  tokenVersion     Int       @default(0)
+  country          String?
+  countryCode      String?
+  phone            String?
+  verified         Boolean   @default(false)
+  userType         UserType?
+  twoFactorEnabled Boolean   @default(false)
+  trustedIps       String[]  @default([])
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  ownedBuildings Building[]       @relation("BuildingOwner")
+  memberships    BuildingMember[]
+  invitesSent    BuildingInvite[] @relation("InviteSender")
+  verifications  Verification[]
+  scanEvents     ScanEvent[]
+  emergencies    EmergencyEvent[] @relation("EmergencyTriggeredBy")
+  reviews        Review[]
+}
+
+model Building {
+  id               String   @id @default(cuid())
+  name             String
+  ownerId          String
+  owner            User     @relation("BuildingOwner", fields: [ownerId], references: [id])
+  isDeactivated    Boolean  @default(false)
+  emergencyMode    Boolean  @default(false)
+  emergencyMessage String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  floors     Floor[]
+  nodes      Node[]
+  edges      Edge[]
+  roles      Role[]
+  members    BuildingMember[]
+  invites    BuildingInvite[]
+  emergencies EmergencyEvent[]
+  logs       Log[]
+  scanEvents ScanEvent[]
+
+  @@index([ownerId])
+  @@index([name])
+}
+
+// Custom role builder: each building owns its roles. permissions[] holds keys
+// validated in code against src/auth/permissions.js. isSystem marks the five
+// seeded defaults (non-deletable).
+model Role {
+  id          String   @id @default(cuid())
+  buildingId  String
+  building    Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  name        String
+  permissions String[] @default([])
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  members BuildingMember[]
+  invites BuildingInvite[]
+
+  @@unique([buildingId, name])
+  @@index([buildingId])
+}
+
+model BuildingMember {
+  id          String   @id @default(cuid())
+  buildingId  String
+  building    Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roleId      String
+  role        Role     @relation(fields: [roleId], references: [id])
+  invitedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([buildingId, userId])
+  @@index([userId])
+  @@index([roleId])
+}
+
+model BuildingInvite {
+  id           String       @id @default(cuid())
+  buildingId   String
+  building     Building     @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  email        String
+  roleId       String
+  role         Role         @relation(fields: [roleId], references: [id])
+  tokenHash    String       @unique
+  status       InviteStatus @default(PENDING)
+  expiresAt    DateTime
+  invitedById  String
+  invitedBy    User         @relation("InviteSender", fields: [invitedById], references: [id])
+  acceptedById String?
+  acceptedAt   DateTime?
+  createdAt    DateTime     @default(now())
+
+  @@index([buildingId, status])
+  @@index([email])
+  // partial unique (buildingId, lower(email)) WHERE status='PENDING' — raw SQL migration
+}
+
+model Floor {
+  id                  String   @id @default(cuid())
+  buildingId          String
+  building            Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  floorNumber         Int
+  name                String?
+  mapImageUrl         String?
+  qrCodeUrl           String?
+  svgContent          String?  @db.Text
+  width               Int?
+  height              Int?
+  scalePixelsPerMeter Float?
+  scanCount           Int      @default(0)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  nodes Node[]
+
+  @@unique([buildingId, floorNumber])
+}
+
+model Node {
+  id         String   @id @default(cuid())
+  floorId    String
+  floor      Floor    @relation(fields: [floorId], references: [id], onDelete: Cascade)
+  buildingId String
+  building   Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  x          Float
+  y          Float
+  type       NodeType
+  label      String?
+  qrSlug     String?  @unique
+  scanCount  Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  poi       Poi?
+  edgesFrom Edge[] @relation("EdgeSource")
+  edgesTo   Edge[] @relation("EdgeTarget")
+
+  @@index([floorId])
+  @@index([buildingId])
+  @@index([buildingId, type])
+}
+
+model Poi {
+  id          String   @id @default(cuid())
+  nodeId      String   @unique
+  node        Node     @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  name        String
+  category    String?
+  description String?
+  keywords    String[] @default([])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([keywords], type: Gin)
+  @@index([name])
+}
+
+// Undirected edges stored once with sourceNodeId < targetNodeId (CHECK added
+// via raw SQL migration). The graph loader expands both directions in memory.
+model Edge {
+  id           String      @id @default(cuid())
+  sourceNodeId String
+  targetNodeId String
+  source       Node        @relation("EdgeSource", fields: [sourceNodeId], references: [id], onDelete: Cascade)
+  target       Node        @relation("EdgeTarget", fields: [targetNodeId], references: [id], onDelete: Cascade)
+  buildingId   String
+  building     Building    @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  distance     Float
+  weight       Float
+  accessible   Boolean     @default(true)
+  transitType  TransitType @default(WALKWAY)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  @@unique([sourceNodeId, targetNodeId])
+  @@index([buildingId])
+  @@index([targetNodeId])
+}
+
+model EmergencyEvent {
+  id              String           @id @default(cuid())
+  buildingId      String
+  building        Building         @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  status          EmergencyStatus  @default(ACTIVE)
+  trigger         EmergencyTrigger @default(ADMIN)
+  triggeredById   String?
+  triggeredBy     User?            @relation("EmergencyTriggeredBy", fields: [triggeredById], references: [id])
+  message         String?
+  scanned         Int              @default(0)
+  evacuated       Int              @default(0)
+  calledEmergency Int              @default(0)
+  startedAt       DateTime         @default(now())
+  endedAt         DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([buildingId, status])
+}
+
+model Log {
+  id          String   @id @default(cuid())
+  buildingId  String
+  building    Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  type        LogType  @default(SYSTEM)
+  message     String
+  isEmergency Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([buildingId, createdAt(sort: Desc)])
+}
+
+// Mongo TTL replacement: lookups always filter expiresAt > now(); the sweeper
+// job deletes expired rows every 10 minutes.
+model Verification {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type         String
+  codeHash     String
+  expiresAt    DateTime
+  verified     Boolean  @default(false)
+  pendingEmail String?
+  attempts     Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model ScanEvent {
+  id           String   @id @default(cuid())
+  buildingId   String
+  building     Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  userId       String?
+  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  buildingName String
+  scannedAt    DateTime @default(now())
+
+  @@index([userId, scannedAt(sort: Desc)])
+  @@index([buildingId, scannedAt(sort: Desc)])
+}
+
+model Review {
+  id        String    @id @default(cuid())
+  userId    String?   @unique
+  user      User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userName  String
+  userType  UserType?
+  stars     Int       @default(1)
+  comment   String?
+  createdAt DateTime  @default(now())
+}
+
+model Contact {
+  id          String   @id @default(cuid())
+  email       String?
+  message     String?
+  contactType String?
+  createdAt   DateTime @default(now())
+}
+
+model Report {
+  id        String   @id @default(cuid())
+  email     String?
+  reason    String?
+  message   String?
+  createdAt DateTime @default(now())
+}
