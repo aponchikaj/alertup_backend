@@ -1,6 +1,8 @@
-# 🚨 AlertUp — Backend
+# 🧭 AlertUp — Backend
 
-REST API for AlertUp — a real-time alert and notification platform. Handles user management, alert creation, delivery logic, and push/email notifications.
+REST API for AlertUp — indoor wayfinding with an emergency evacuation layer. Handles building
+maps and their node/edge graph, multi-floor route calculation, POI search, QR scan resolution,
+team roles and invitations, realtime emergency broadcast over SSE, and the Wayfinder AI proxy.
 
 > ✍️ Built at **age 15** (2025-2026)
 

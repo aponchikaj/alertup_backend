@@ -1,7 +1,7 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "description": "alertup is an Emergency platform where users can exit from building fast and better.",
+  "description": "AlertUp API — indoor wayfinding and emergency evacuation. Serves searchable building maps, multi-floor routing, QR scan resolution, realtime emergency broadcast and an AI concierge.",
   "main": "server.js",
   "type": "module",
   "scripts": {
