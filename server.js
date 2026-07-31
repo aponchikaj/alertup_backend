@@ -2,14 +2,20 @@ import cors from 'cors'
 import express from 'express'
 import bparser from 'body-parser'
 import cparser from 'cookie-parser'
-import mongoose from 'mongoose'
 import { pathToFileURL } from 'url'
-import 'dotenv/config';
+
+import config from './src/config/index.js'
+import prisma from './src/db/prisma.js'
+import { closeAll as closeRealtime } from './src/features/realtime/broadcaster.js'
+import { startSweeper } from './src/jobs/sweeper.js'
 
 import adminRoutes from './src/routes/admin/admin.js'
 import authRoutes from './src/routes/auth/auth.js'
 import resetRoutes from './src/routes/auth/reset.js'
 import buildingRoutes from './src/routes/buildings/buildings.js'
+import rolesRoutes from './src/routes/buildings/roles.js'
+import membersRoutes from './src/routes/buildings/members.js'
+import invitesRoutes from './src/routes/buildings/invites.js'
 import contactRoutes from './src/routes/contact/contact.js'
 import reportRoutes from './src/routes/contact/report.js'
 import dashboardRoutes from './src/routes/dashboard/dashboard.js'
@@ -25,10 +31,15 @@ import qrScanRouter from './src/routes/qr/scan.js'
 import websitereview from './src/routes/reviews/reviews.js'
 import twoFaSystem from './src/routes/auth/2fa.js'
 import administrationRouter from './src/routes/administration/administration.js'
+import wayfindingRouter from './src/features/wayfinding/wayfinding.routes.js'
+import mapEditorRouter from './src/features/mapEditor/mapEditor.routes.js'
+import emergencyRouter from './src/features/emergency/emergency.routes.js'
+import realtimeRouter from './src/features/realtime/realtime.routes.js'
+import aiRouter from './src/features/ai/ai.routes.js'
 
 const app = express();
-const PORT = process.env.PORT || 3001;
-const isProduction = process.env.NODE_ENV === 'production';
+const PORT = config.port;
+const isProduction = config.isProduction;
 
 // Single proxy hop (Render / Vercel). Must not be `true`, which would let a
 // client spoof its IP via X-Forwarded-For and defeat the rate limiters.
@@ -36,7 +47,7 @@ app.set('trust proxy', 1);
 
 app.use(cparser())
 
-const envAllowed = (process.env.ALLOWED_ORIGINS || "").split(",").filter(Boolean);
+const envAllowed = config.cors.allowedOrigins;
 const defaultAllowed = [
   "https://alertup.world",
   "http://alertup.world",
@@ -52,7 +63,7 @@ const defaultAllowed = [
 // Merge env list with defaults (env can override/append)
 const allowedOrigins = Array.from(new Set([...defaultAllowed, ...envAllowed]));
 
-const isAllowAll = process.env.ALLOW_ALL_ORIGINS === 'true';
+const isAllowAll = config.cors.allowAll;
 
 app.use(cors({
   origin: (origin, callback) => {
@@ -85,7 +96,22 @@ app.use(cors({
 
 app.use(bparser.json())
 
-// Serve static files from uploads directory
+// Maintenance gate for the migration cutover window: reads keep working,
+// writes are refused so the ETL sees a quiescent database.
+if (config.flags.maintenanceMode) {
+  app.use((req, res, next) => {
+    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
+      return next();
+    }
+    return res.status(503).json({
+      success: false,
+      message: 'AlertUp is undergoing brief maintenance. Please try again in a few minutes.',
+    });
+  });
+}
+
+// Legacy local uploads (pre-S3). Harmless to keep serving until the cleanup
+// phase; new assets live on S3.
 app.use('/uploads', express.static('uploads', {
   setHeaders: (res, path) => {
     if (path.endsWith('.svg')) {
@@ -93,22 +119,15 @@ app.use('/uploads', express.static('uploads', {
     } else if (path.endsWith('.png')) {
       res.setHeader('Content-Type', 'image/png');
     } else if (path.endsWith('.jpg') || path.endsWith('.jpeg')) {
-      // Was `image/*`, which is not a valid Content-Type and left browsers to
-      // sniff the body — exactly what nosniff below is meant to prevent.
       res.setHeader('Content-Type', 'image/jpeg');
     }
-    // These files are uploaded by users. Without nosniff, anything the browser
-    // decides looks like HTML executes on the API origin.
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
   }
 }))
 
-// The API origin (onrender.com, or whatever it is deployed to) must never
-// compete with alertup.world in search results. Duplicate JSON endpoints in the
-// index dilute the site's authority and leak internal route names, so every API
-// response is explicitly excluded from crawling.
+// The API origin must never compete with alertup.world in search results.
 app.use((req, res, next) => {
   res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive')
   next()
@@ -124,6 +143,9 @@ app.use(adminRoutes)
 app.use(authRoutes)
 app.use(resetRoutes)
 app.use(buildingRoutes)
+app.use(rolesRoutes)
+app.use(membersRoutes)
+app.use(invitesRoutes)
 app.use(contactRoutes)
 app.use(reportRoutes)
 app.use(dashboardRoutes)
@@ -139,14 +161,25 @@ app.use('/api/qr/scan', qrScanRouter)
 app.use(websitereview)
 app.use(twoFaSystem)
 app.use(administrationRouter)
+app.use(wayfindingRouter)
+app.use(mapEditorRouter)
+app.use(emergencyRouter)
+app.use(realtimeRouter)
+app.use(aiRouter)
 
 // Health check endpoint
-app.get('/health', (req, res) => {
-  res.status(200).json({ 
-    status: 'ok', 
+app.get('/health', async (req, res) => {
+  let database = 'connected';
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+  } catch {
+    database = 'disconnected';
+  }
+  res.status(200).json({
+    status: 'ok',
     message: 'Server is running',
     timestamp: new Date().toISOString(),
-    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
+    database,
   });
 });
 
@@ -155,69 +188,84 @@ app.get('/', (req, res) => {
   res.status(200).json({
     message: 'AlertUp API Server',
     status: 'running',
-    version: '1.0.0'
+    version: '2.0.0'
   });
 });
 
-// Unmatched routes previously fell through to Express's default handler, which
-// answers with an HTML error page. Clients call res.json() unconditionally, so
-// they saw "Unexpected token '<'" instead of the usual envelope.
+// Unmatched routes fall through to JSON, not Express's HTML error page.
 app.use((req, res) => {
-  res.status(404).json({ Success: false, Message: `Cannot ${req.method} ${req.path}` })
+  res.status(404).json({ success: false, message: `Cannot ${req.method} ${req.path}` })
 })
 
-// Error handler. Without one, a rejected upload (oversize file, blocked
-// mimetype) or a CORS rejection produced an HTML 500 with a stack trace.
+// Error handler. Translates upload and CORS failures, plus the Prisma error
+// codes every ported handler can throw.
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   if (err?.name === 'MulterError') {
     const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400
-    return res.status(status).json({ Success: false, Message: err.message })
+    return res.status(status).json({ success: false, message: err.message })
   }
 
   if (typeof err?.message === 'string' && err.message.startsWith('CORS error:')) {
-    return res.status(403).json({ Success: false, Message: 'Origin not allowed' })
+    return res.status(403).json({ success: false, message: 'Origin not allowed' })
   }
 
   // multer's fileFilter rejects by passing a plain Error through.
   if (typeof err?.message === 'string' && /only .*files are allowed/i.test(err.message)) {
-    return res.status(400).json({ Success: false, Message: err.message })
+    return res.status(400).json({ success: false, message: err.message })
+  }
+
+  // Prisma known errors reaching the top: unique conflict, missing row, FK.
+  if (err?.code === 'P2002') {
+    return res.status(409).json({ success: false, message: 'That already exists.' })
+  }
+  if (err?.code === 'P2025') {
+    return res.status(404).json({ success: false, message: 'Not found.' })
+  }
+  if (err?.code === 'P2003') {
+    return res.status(400).json({ success: false, message: 'Related record missing.' })
   }
 
   console.error('Unhandled error:', err)
   if (res.headersSent) return next(err)
-  res.status(500).json({ Success: false, Message: 'Server error.' })
+  res.status(500).json({ success: false, message: 'Server error.' })
 })
 
-// Connect to MongoDB and start server
 const startServer = async () => {
   try {
-    if (!process.env.MONGO_STRING) {
-      console.error('❌ MONGO_STRING environment variable is not set');
-      console.log('⚠️  Starting server without database connection...');
-    } else {
-      await mongoose.connect(process.env.MONGO_STRING);
-      console.log('✅ MongoDB connected successfully');
-    }
-    
-    app.listen(PORT, () => {
-      console.log(`🚀 Server is running on port ${PORT}`);
-      console.log(`📍 Health check: http://localhost:${PORT}/health`);
-    });
+    await prisma.$queryRaw`SELECT 1`;
+    console.log('✅ PostgreSQL connected successfully');
   } catch (error) {
-    console.error('❌ MongoDB connection error:', error.message);
+    console.error('❌ PostgreSQL connection error:', error.message);
     console.log('⚠️  Starting server anyway...');
-    
-    app.listen(PORT, () => {
-      console.log(`🚀 Server is running on port ${PORT} (without database)`);
-      console.log(`📍 Health check: http://localhost:${PORT}/health`);
-      console.log('⚠️  Some features may not work without database connection');
-    });
   }
+
+  startSweeper();
+
+  const server = app.listen(PORT, () => {
+    console.log(`🚀 Server is running on port ${PORT}`);
+    console.log(`📍 Health check: http://localhost:${PORT}/health`);
+  });
+
+  // Render sends SIGTERM on deploy. Open SSE streams would otherwise stall
+  // the drain until the kill timeout.
+  const shutdown = async () => {
+    console.log('SIGTERM received: closing realtime streams and server.');
+    closeRealtime();
+    server.close(async () => {
+      await prisma.$disconnect().catch(() => {});
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 10_000).unref();
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+
+  return server;
 };
 
 // Only listen when run directly. Importing this module (as the supertest
-// suites do) must not open a port or connect to the production database.
+// suites do) must not open a port or connect to a production database.
 const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isDirectRun) {

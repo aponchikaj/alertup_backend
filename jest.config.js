@@ -10,11 +10,11 @@ export default {
   // Native ESM: no Babel transform. Files are loaded as-is.
   transform: {},
   testMatch: ['**/src/**/*.test.js'],
+  globalSetup: '<rootDir>/src/tests/globalSetup.js',
   setupFilesAfterEnv: ['<rootDir>/src/tests/setup.js'],
-  // Mongo binary download on first run can be slow.
   testTimeout: 30000,
-  // The suites share one in-memory server; running files in parallel against
-  // the same database causes cross-test interference.
+  // The suites share one test database; running files in parallel against it
+  // causes cross-test interference.
   maxWorkers: 1,
   collectCoverageFrom: ['src/**/*.js', '!src/**/*.test.js', '!src/tests/**'],
 };

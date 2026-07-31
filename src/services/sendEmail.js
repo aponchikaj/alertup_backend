@@ -1,8 +1,8 @@
 import sgMail from "@sendgrid/mail";
-import 'dotenv/config';
+import config from '../config/index.js';
 
 // Set SendGrid API key
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+sgMail.setApiKey(config.email.sendgridApiKey || '');
 
 /**
  * sendMail - sends an email using SendGrid API
@@ -21,7 +21,7 @@ sgMail.setApiKey(process.env.SENDGRID_API_KEY);
  * @returns {Promise<{Success: boolean, Message: string}>}
  * @throws {Error} when the message could not be handed to SendGrid
  */
-const sendMail = async (to, subject, text, replyTo = "lazaremirziashvili8@gmail.com", html = null) => {
+const sendMail = async (to, subject, text, replyTo = config.email.replyTo, html = null) => {
   if (!to || !subject || !text) {
     throw new Error("Missing required email fields");
   }
@@ -29,7 +29,7 @@ const sendMail = async (to, subject, text, replyTo = "lazaremirziashvili8@gmail.
   try {
     const msg = {
       to,
-      from: "lazaremirziashvili@alertup.world", // VERIFIED sender
+      from: config.email.from, // VERIFIED sender
       subject,
       text,
     };

@@ -1,4 +1,6 @@
 import jwt from 'jsonwebtoken';
+import config from '../config/index.js';
+import { fail } from '../utils/respond.js';
 
 /**
  * Verify the caller holds a valid admin token.
@@ -13,24 +15,24 @@ const isAdmin = (req, res, next) => {
 
   if (!adminToken) {
     req.isAdmin = false;
-    return res.status(401).send({ Success: false, Message: 'Admin authentication required.' });
+    return fail(res, 401, 'Admin authentication required.');
   }
 
   try {
-    const decoded = jwt.verify(adminToken, process.env.JWT_SECRET);
+    const decoded = jwt.verify(adminToken, config.jwt.secret);
 
     if (!decoded || decoded.isAdmin !== true) {
       req.isAdmin = false;
-      return res.status(403).send({ Success: false, Message: 'Admin privileges required.' });
+      return fail(res, 403, 'Admin privileges required.');
     }
 
     req.isAdmin = true;
     req.admin = decoded;
     return next();
-  } catch (err) {
+  } catch {
     // Covers expired tokens, bad signatures, and malformed input alike.
     req.isAdmin = false;
-    return res.status(401).send({ Success: false, Message: 'Invalid or expired admin session.' });
+    return fail(res, 401, 'Invalid or expired admin session.');
   }
 };
 

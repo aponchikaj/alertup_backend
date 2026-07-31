@@ -1,53 +1,61 @@
-import { MongoMemoryServer } from 'mongodb-memory-server';
-import mongoose from 'mongoose';
+// Per-test-file setup (setupFilesAfterEnv).
+//
+// Repoints DATABASE_URL at the localhost test database and blanks every
+// external-service credential so a stray code path can never hit a real
+// provider from a test run. The old Mongo version enforced the same property
+// against the in-memory server; here the guard is the localhost check.
 
-/**
- * Every test run gets a throwaway in-memory MongoDB.
- *
- * This is a hard safety requirement, not a convenience: the suites call
- * `deleteMany({})` in their setup, and the checked-in .env points MONGO_STRING
- * at the production Atlas cluster. Tests must never be able to reach it.
- */
-let mongoServer;
+import dotenv from 'dotenv';
 
-// Neutralise anything that could point the app at a real database or a real
-// third-party account, before any module reads these.
+dotenv.config();
+
+if (!process.env.TEST_DATABASE_URL) {
+  throw new Error(
+    'TEST_DATABASE_URL is not set. Start the test database (docker compose -f docker-compose.test.yml up -d, or a local instance) first.'
+  );
+}
+const testHost = new URL(process.env.TEST_DATABASE_URL).hostname;
+if (!['localhost', '127.0.0.1', '::1'].includes(testHost)) {
+  throw new Error('Tests only run against a localhost database.');
+}
+
+process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 process.env.NODE_ENV = 'test';
-delete process.env.MONGO_STRING;
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-not-used-in-production';
 process.env.SENDGRID_API_KEY = '';
 process.env.CLOUDINARY_CLOUD_NAME = '';
 process.env.CLOUDINARY_API_KEY = '';
 process.env.CLOUDINARY_API_SECRET = '';
+process.env.AWS_ACCESS_KEY_ID = '';
+process.env.AWS_SECRET_ACCESS_KEY = '';
+process.env.GROQ_API_KEY = '';
+process.env.ADMIN_USER = process.env.ADMIN_USER || 'test-admin';
+process.env.ADMIN_PASS = process.env.ADMIN_PASS || 'test-admin-pass';
 
-beforeAll(async () => {
-  mongoServer = await MongoMemoryServer.create();
-  const uri = mongoServer.getUri();
+const { default: prisma } = await import('../db/prisma.js');
 
-  if (mongoose.connection.readyState !== 0) {
-    await mongoose.disconnect();
+let tableNamesPromise = null;
+function loadTableNames() {
+  if (!tableNamesPromise) {
+    tableNamesPromise = prisma
+      .$queryRawUnsafe(
+        `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'`
+      )
+      .then((rows) => rows.map((r) => `"${r.tablename}"`));
   }
-  await mongoose.connect(uri);
+  return tableNamesPromise;
+}
 
-  // Defence in depth. Importing server.js pulls in `dotenv/config`, which can
-  // re-populate MONGO_STRING from the checked-in .env after the delete above.
-  // If anything ever re-points mongoose at a remote cluster, fail the run
-  // loudly rather than let a `deleteMany({})` reach production data.
-  const { host } = mongoose.connection;
-  if (host && !['127.0.0.1', 'localhost', '::1'].includes(host)) {
-    throw new Error(
-      `Refusing to run tests: mongoose is connected to "${host}", not an in-memory server.`
+// Truncate everything between tests so ordering cannot matter.
+afterEach(async () => {
+  const tables = await loadTableNames();
+  if (tables.length > 0) {
+    await prisma.$executeRawUnsafe(
+      `TRUNCATE TABLE ${tables.join(', ')} RESTART IDENTITY CASCADE`
     );
   }
 });
 
-afterEach(async () => {
-  // Clear every collection between tests so ordering cannot matter.
-  const { collections } = mongoose.connection;
-  await Promise.all(Object.values(collections).map((c) => c.deleteMany({})));
-});
-
 afterAll(async () => {
-  await mongoose.disconnect();
-  if (mongoServer) await mongoServer.stop();
+  await prisma.$disconnect();
 });

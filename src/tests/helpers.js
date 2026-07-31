@@ -1,85 +1,130 @@
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
-import USERS from '../models/user.model.js';
-import BUILDINGS from '../models/building.model.js';
-import Node from '../models/node.model.js';
+import prisma from '../db/prisma.js';
+import { SYSTEM_ROLES } from '../auth/permissions.js';
+import { buildQrSlug } from '../features/qr/qrPayload.js';
 
 /**
- * Shared fixtures for API tests.
- *
- * The suites this replaces each created a user with a plaintext password and
- * then tried to log in to obtain a token — which can never work, because login
- * bcrypt-compares against a hash. Here the password is hashed properly and the
- * session cookie is minted directly, which is both correct and faster.
+ * Shared fixtures for API tests, Prisma edition. Passwords are hashed with a
+ * low cost factor (speed) and session cookies are minted directly rather than
+ * driving the login flow.
  */
 
 export const TEST_PASSWORD = 'password123';
 
-/**
- * Create a verified user and return an auth cookie for them.
- * @param {Object} [overrides] - fields to override on the user document
- */
+let counter = 0;
+const unique = () => `${Date.now().toString(36)}-${(counter++).toString(36)}`;
+
 export const createUser = async (overrides = {}) => {
-  const user = await USERS.create({
-    userType: 'Individual',
-    name: 'Test',
-    lastname: 'Owner',
-    email: `user-${Date.now()}-${Math.random().toString(16).slice(2)}@example.com`,
-    password: await bcrypt.hash(TEST_PASSWORD, 10),
-    country: 'Georgia',
-    countryCode: '+995',
-    phones: '500000000',
-    verified: true,
-    ...overrides,
+  const { password: rawPassword, ...rest } = overrides;
+  const password = rawPassword || TEST_PASSWORD;
+  const user = await prisma.user.create({
+    data: {
+      userType: 'INDIVIDUAL',
+      name: 'Test',
+      lastname: 'Owner',
+      email: `user-${unique()}@example.com`,
+      password: await bcrypt.hash(password, 4),
+      country: 'Georgia',
+      countryCode: '+995',
+      phone: '500000000',
+      verified: true,
+      ...rest,
+    },
   });
 
-  const token = jwt.sign({ userID: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+  const token = jwt.sign(
+    { userID: user.id, tokenVersion: user.tokenVersion },
+    process.env.JWT_SECRET,
+    { expiresIn: '1h' }
+  );
 
-  return { user, token, cookie: [`userToken=${token}`] };
+  return { user, token, cookie: [`userToken=${token}`], plainPassword: password };
 };
 
-/**
- * Create a building owned by the given user.
- */
+export const adminCookie = () => {
+  const token = jwt.sign({ isAdmin: true }, process.env.JWT_SECRET, { expiresIn: '1h' });
+  return [`adminToken=${token}`];
+};
+
+/** Seed the standard system roles for a building; returns them keyed by name. */
+export const seedSystemRoles = async (buildingId) => {
+  const roles = {};
+  for (const spec of SYSTEM_ROLES) {
+    roles[spec.name] = await prisma.role.create({
+      data: {
+        buildingId,
+        name: spec.name,
+        permissions: [...spec.permissions],
+        isSystem: true,
+      },
+    });
+  }
+  return roles;
+};
+
 export const createBuilding = async (ownerId, overrides = {}) => {
-  const building = await BUILDINGS.create({
-    buildingName: 'Test Building',
-    owner: ownerId,
-    floors: 2,
-    maps: [
-      { floor: '1', map: null, qrCode: 'test-qr-1', scanned: 0 },
-      { floor: '2', map: null, qrCode: 'test-qr-2', scanned: 0 },
-    ],
-    ...overrides,
+  const building = await prisma.building.create({
+    data: {
+      name: 'Test Building',
+      ownerId,
+      ...overrides,
+    },
   });
-
-  await USERS.findByIdAndUpdate(ownerId, { $push: { Buildings: building._id } });
-  return building;
+  const roles = await seedSystemRoles(building.id);
+  return { building, roles };
 };
 
-/**
- * Create a node.
- */
-export const createNode = async (buildingId, overrides = {}) => {
-  return Node.create({
-    buildingId,
-    floorNumber: 1,
-    x: 100,
-    y: 100,
-    type: 'path',
-    connections: [],
-    ...overrides,
+export const createFloor = async (buildingId, overrides = {}) =>
+  prisma.floor.create({
+    data: {
+      buildingId,
+      floorNumber: overrides.floorNumber ?? 1,
+      name: overrides.name ?? String(overrides.floorNumber ?? 1),
+      width: overrides.width ?? 1000,
+      height: overrides.height ?? 800,
+      ...overrides,
+    },
+  });
+
+export const createNode = async (buildingId, floorId, overrides = {}) =>
+  prisma.node.create({
+    data: {
+      buildingId,
+      floorId,
+      x: 100,
+      y: 100,
+      type: 'NORMAL',
+      ...overrides,
+    },
+  });
+
+export const connectNodes = async (a, b, overrides = {}) => {
+  const [sourceNodeId, targetNodeId] = a.id < b.id ? [a.id, b.id] : [b.id, a.id];
+  const distance = overrides.distance ?? Math.hypot(a.x - b.x, a.y - b.y);
+  return prisma.edge.create({
+    data: {
+      sourceNodeId,
+      targetNodeId,
+      buildingId: a.buildingId,
+      distance,
+      weight: overrides.weight ?? distance,
+      accessible: overrides.accessible ?? true,
+      transitType: overrides.transitType || 'WALKWAY',
+    },
   });
 };
 
-/**
- * A verified owner with a building, ready for authenticated requests.
- */
+export const addMember = async (buildingId, userId, roleId) =>
+  prisma.buildingMember.create({ data: { buildingId, userId, roleId } });
+
+/** A verified owner with a building (plus seeded system roles). */
 export const createOwnerWithBuilding = async () => {
   const { user, token, cookie } = await createUser();
-  const building = await createBuilding(user._id);
-  return { user, token, cookie, building };
+  const { building, roles } = await createBuilding(user.id);
+  return { user, token, cookie, building, roles };
 };
 
 /** Build the scan id a printed QR encodes. */
-export const qrIdFor = (node) => `qr_${node.buildingId}_${node.floorNumber}_${node._id}`;
+export const qrIdFor = (node, floorNumber) =>
+  buildQrSlug(node.buildingId, floorNumber, node.id);

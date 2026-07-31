@@ -1,81 +1,59 @@
-import jwt from 'jsonwebtoken'
-import USERS from '../models/user.model.js'
-import mongoose from 'mongoose'
+import jwt from 'jsonwebtoken';
+import prisma from '../db/prisma.js';
+import config from '../config/index.js';
+import { fail } from '../utils/respond.js';
 
-const whoami = async(req,res,next)=>{
-    // Check if database is connected
-    if (mongoose.connection.readyState !== 1) {
-        return res.status(503).send({Success:false,Message:"Database connection unavailable. Please try again later."})
+const whoami = async (req, res, next) => {
+  // Cookie first, then Authorization header (Safari/iOS localStorage fallback).
+  let userToken = req.cookies['userToken'];
+  if (!userToken) {
+    const authHeader = req.headers['authorization'];
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      userToken = authHeader.substring(7);
+    }
+  }
+
+  if (!userToken) {
+    return fail(res, 401, 'no user token.');
+  }
+
+  try {
+    const data = jwt.verify(userToken, config.jwt.secret);
+
+    // The admin token minted in routes/admin/admin.js carries only
+    // {isAdmin:true} and is signed with this same secret, so it reaches here
+    // with no userID. Reject explicitly so the guarantee is local.
+    if (!data || !data.userID) {
+      return fail(res, 401, 'Invalid Token');
     }
 
-    // Try to get token from cookie first, then from Authorization header (Safari/iOS fallback)
-    let userToken = req.cookies['userToken']
-    // console.log(userToken)
-    
-    // If no cookie, check Authorization header (for Safari/iOS localStorage fallback)
-    if(!userToken){
-        const authHeader = req.headers['authorization'];
-        if(authHeader && authHeader.startsWith('Bearer ')){
-            userToken = authHeader.substring(7); // Remove 'Bearer ' prefix
-        }
+    const user = await prisma.user.findUnique({ where: { id: data.userID } });
+    if (!user) {
+      return fail(res, 401, 'Invalid User ID.');
     }
 
-    if(!userToken){
-        return res.status(401).send({Success:false,Message:"no user token."})
+    // Password resets bump tokenVersion to cut off sessions issued earlier.
+    if ((user.tokenVersion || 0) !== (data.tokenVersion || 0)) {
+      return fail(res, 401, 'Session expired. Please log in again.');
     }
 
-    try{
-        const data = jwt.verify(userToken,process.env.JWT_SECRET);
-        if(!data){
-            return res.status(401).send({Success:false,Message:"Invalid Token"})
-        }
-
-        // The admin token minted in routes/admin/admin.js carries only
-        // {isAdmin:true} and is signed with this same secret, so it reaches
-        // here with no userID. Mongoose 9 answers findOne({_id: undefined})
-        // with null rather than the first document, so this is not currently an
-        // impersonation hole — but that is the driver's behaviour protecting
-        // us, not ours. Reject explicitly so the guarantee is local.
-        if(!data.userID){
-            return res.status(401).send({Success:false,Message:"Invalid Token"})
-        }
-
-        const user = await USERS.findOne({_id:data.userID});
-        if(!user){
-            return res.status(401).send({Success:false,Message:'Invalid User ID.'})
-        }
-
-        // Password resets bump tokenVersion to cut off sessions issued earlier.
-        if((user.tokenVersion || 0) !== (data.tokenVersion || 0)){
-            return res.status(401).send({Success:false,Message:"Session expired. Please log in again."})
-        }
-
-        if (
-                user.premium?.hasPremium &&
-                user.premium?.to &&
-                new Date(user.premium.to) < new Date()
-            ) {
-                user.premium.hasPremium = false;
-                user.premium.premiumType = null;
-                user.premium.to = null;
-
-            await user.save();
-        }
-
-        req.user = user;
-        next()
-    }catch(err){
-        // An expired or forged token is a client problem, not a server fault;
-        // reporting it as "Server Error." kept clients from redirecting to login.
-        if(err.name === 'TokenExpiredError'){
-            return res.status(401).send({Success:false,Message:"Session expired. Please log in again."})
-        }
-        if(err.name === 'JsonWebTokenError' || err.name === 'NotBeforeError'){
-            return res.status(401).send({Success:false,Message:"Invalid Token"})
-        }
-        console.error('Whoami middleware error:', err);
-        return res.status(500).send({Success:false,Message:"Server Error."})
+    req.user = user;
+    next();
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') {
+      return fail(res, 401, 'Session expired. Please log in again.');
     }
-}
+    if (err.name === 'JsonWebTokenError' || err.name === 'NotBeforeError') {
+      return fail(res, 401, 'Invalid Token');
+    }
+    // Prisma connection failures surface here; the DB being down is a 503,
+    // matching the old readyState check.
+    if (err.code === 'P1001' || err.code === 'P1002') {
+      return fail(res, 503, 'Database connection unavailable. Please try again later.');
+    }
+    console.error('Whoami middleware error:', err);
+    return fail(res, 500, 'Server Error.');
+  }
+};
 
-export default whoami
+export default whoami;

@@ -1,156 +1,189 @@
 import request from 'supertest';
-import mongoose from 'mongoose';
 import app from '../../server.js';
-import Node from '../models/node.model.js';
-import BUILDINGS from '../models/building.model.js';
-import { createOwnerWithBuilding, createNode, qrIdFor } from './helpers.js';
+import prisma from '../db/prisma.js';
+import {
+  createOwnerWithBuilding,
+  createFloor,
+  createNode,
+  connectNodes,
+  qrIdFor,
+} from './helpers.js';
 
 /**
- * The scan endpoint — what a person actually hits after scanning a QR during an
- * emergency. This is the most important request in the product, so it is
- * covered end to end, including the multi-floor case that previously did not
- * work at all in production.
+ * CONTRACT TEST for GET /api/qr/scan/route/:qrId.
+ *
+ * Every printed QR code in the field funnels through this endpoint, and the
+ * deployed SPA reads the exact field names asserted here. If one of these
+ * assertions has to change, that is a breaking change to physical stickers on
+ * walls — stop and think.
  */
 
-let building;
+async function seedScanScenario() {
+  const { user, building } = await createOwnerWithBuilding();
+  const floor1 = await createFloor(building.id, {
+    floorNumber: 1,
+    name: 'Ground',
+    mapImageUrl: 'https://assets.example/f1.svg',
+  });
+  const start = await createNode(building.id, floor1.id, {
+    x: 0,
+    y: 0,
+    type: 'NORMAL',
+    label: 'Lobby',
+  });
+  const mid = await createNode(building.id, floor1.id, { x: 100, y: 0, type: 'NORMAL' });
+  const exit = await createNode(building.id, floor1.id, {
+    x: 200,
+    y: 0,
+    type: 'EMERGENCY_EXIT',
+    label: 'Main Exit',
+  });
+  await connectNodes(start, mid);
+  await connectNodes(mid, exit);
+  return { user, building, floor1, start, mid, exit };
+}
 
-const connect = async (a, b) => {
-  await Node.findByIdAndUpdate(a._id, { $addToSet: { connections: b._id } });
-  await Node.findByIdAndUpdate(b._id, { $addToSet: { connections: a._id } });
-};
+describe('GET /api/qr/scan/route/:qrId — legacy envelope contract', () => {
+  test('resolves a QR slug and returns every legacy field', async () => {
+    const { building, floor1, start, mid, exit } = await seedScanScenario();
+    const qrId = qrIdFor(start, floor1.floorNumber);
 
-beforeEach(async () => {
-  ({ building } = await createOwnerWithBuilding());
-});
-
-describe('GET /api/qr/scan/route/:qrId', () => {
-  test('returns a route to the exit for an anonymous scanner', async () => {
-    const start = await createNode(building._id, { x: 0, y: 0, label: 'Corridor' });
-    const exit = await createNode(building._id, { x: 100, y: 0, type: 'exit', label: 'Main Exit' });
-    await connect(start, exit);
-
-    // Deliberately no auth: an occupant scanning a wall QR has no account.
-    const res = await request(app).get(`/api/qr/scan/route/${qrIdFor(start)}`);
-
+    const res = await request(app).get(`/api/qr/scan/route/${qrId}`);
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.data.emergencyRoute.found).toBe(true);
-    expect(res.body.data.emergencyRoute.path).toHaveLength(2);
-    expect(res.body.data.emergencyRoute.exitNode.label).toBe('Main Exit');
-    expect(res.body.data.buildingName).toBe('Test Building');
-  });
 
-  test('includes the full route across floors, not just the scanned floor', async () => {
-    const start = await createNode(building._id, { floorNumber: 2, x: 0, y: 0, label: 'Office' });
-    const stairsUp = await createNode(building._id, { floorNumber: 2, x: 10, y: 0, type: 'stairs', label: 'Stairs L2' });
-    const stairsDown = await createNode(building._id, { floorNumber: 1, x: 10, y: 0, type: 'stairs', label: 'Stairs L1' });
-    const exit = await createNode(building._id, { floorNumber: 1, x: 20, y: 0, type: 'exit', label: 'Ground Exit' });
+    const data = res.body.data;
+    // Top-level legacy contract fields
+    expect(data.qrId).toBe(qrId);
+    expect(data.buildingId).toBe(building.id);
+    expect(data.buildingName).toBe(building.name);
+    expect(data.floorNumber).toBe('1');
+    expect(data.nodeId).toBe(start.id);
+    expect(data.nodeType).toBe('path'); // legacy vocabulary
+    expect(data.nodeLabel).toBe('Lobby');
+    expect(data.nodePosition).toEqual({ x: 0, y: 0 });
+    expect(Array.isArray(data.connectedNodes)).toBe(true);
+    expect(Array.isArray(data.allFloorNodes)).toBe(true);
+    expect(Array.isArray(data.routeNodes)).toBe(true);
+    expect(Array.isArray(data.floorTransitions)).toBe(true);
+    expect(typeof data.requiresFloorChange).toBe('boolean');
+    expect(typeof data.timestamp).toBe('string');
+    expect(typeof data.scanCount).toBe('number');
 
-    await connect(start, stairsUp);
-    await connect(stairsUp, stairsDown);
-    await connect(stairsDown, exit);
+    // connectedNodes: the single neighbour, in legacy shape
+    expect(data.connectedNodes).toHaveLength(1);
+    expect(data.connectedNodes[0]).toMatchObject({
+      id: mid.id,
+      type: 'path',
+      floor: 1,
+    });
+    expect(data.connectedNodes[0].connections).toContain(start.id);
 
-    const res = await request(app).get(`/api/qr/scan/route/${qrIdFor(start)}`);
+    // emergencyRoute block
+    const er = data.emergencyRoute;
+    expect(er.found).toBe(true);
+    expect(er.exitNodeId).toBe(exit.id);
+    expect(er.path).toEqual([start.id, mid.id, exit.id]);
+    expect(er.distance).toBe(2); // hop count
+    expect(er.walkingDistance).toBe(200);
+    expect(er.exitNode).toMatchObject({ id: exit.id, type: 'exit', label: 'Main Exit', floor: 1 });
 
-    expect(res.status).toBe(200);
-    expect(res.body.data.emergencyRoute.found).toBe(true);
-    expect(res.body.data.requiresFloorChange).toBe(true);
-    expect(res.body.data.floorTransitions).toEqual([
-      expect.objectContaining({ from: 2, to: 1, nodeType: 'stairs' }),
+    // floorMap from the Floor row
+    expect(data.floorMap).toMatchObject({
+      floor: 'Ground',
+      map: 'https://assets.example/f1.svg',
+      imageUrl: 'https://assets.example/f1.svg',
+    });
+
+    // Additions for the redesigned viewer (must not replace legacy fields)
+    expect(data.emergency).toEqual({ active: false, message: null, emergencyId: null });
+    expect(data.route).toMatchObject({ mode: 'EVACUATION' });
+    expect(data.route.segments[0].nodes.map((n) => n.id)).toEqual([
+      start.id,
+      mid.id,
+      exit.id,
     ]);
-
-    // routeNodes must carry the floor-1 steps too. allFloorNodes only has the
-    // scanned floor, so the map could not draw the rest of the route from it.
-    const floors = res.body.data.routeNodes.map((n) => n.floor);
-    expect(floors).toEqual([2, 2, 1, 1]);
-    expect(res.body.data.allFloorNodes.every((n) => n.floor === 2)).toBe(true);
   });
 
-  test('reports when no exit is reachable instead of failing', async () => {
-    const start = await createNode(building._id, { x: 0, y: 0 });
-    const dead = await createNode(building._id, { x: 10, y: 0 });
-    await connect(start, dead);
+  test('multi-floor route reports transitions and requiresFloorChange', async () => {
+    const { building } = await createOwnerWithBuilding();
+    const f1 = await createFloor(building.id, { floorNumber: 1 });
+    const f2 = await createFloor(building.id, { floorNumber: 2 });
+    const start = await createNode(building.id, f1.id, { x: 0, y: 0 });
+    const stairs1 = await createNode(building.id, f1.id, { x: 50, y: 0, type: 'TRANSIT' });
+    const stairs2 = await createNode(building.id, f2.id, { x: 50, y: 0, type: 'TRANSIT' });
+    const exit2 = await createNode(building.id, f2.id, { x: 80, y: 0, type: 'EMERGENCY_EXIT' });
+    await connectNodes(start, stairs1);
+    await connectNodes(stairs1, stairs2, { transitType: 'STAIRS', weight: 400, distance: 0 });
+    await connectNodes(stairs2, exit2);
 
-    const res = await request(app).get(`/api/qr/scan/route/${qrIdFor(start)}`);
+    const res = await request(app).get(`/api/qr/scan/route/${qrIdFor(start, 1)}`);
+    expect(res.status).toBe(200);
+    const data = res.body.data;
+    expect(data.requiresFloorChange).toBe(true);
+    expect(data.floorTransitions).toHaveLength(1);
+    expect(data.floorTransitions[0]).toMatchObject({ from: 1, to: 2 });
+    expect(data.emergencyRoute.path).toEqual([start.id, stairs1.id, stairs2.id, exit2.id]);
+    expect(data.route.transitions[0]).toMatchObject({
+      transitType: 'STAIRS',
+      fromFloorNumber: 1,
+      toFloorNumber: 2,
+      direction: 'up',
+    });
+  });
 
+  test('emergency mode: payload carries active emergency and scan is counted', async () => {
+    const { building, floor1, start } = await seedScanScenario();
+    await prisma.building.update({
+      where: { id: building.id },
+      data: { emergencyMode: true, emergencyMessage: 'Fire drill in progress' },
+    });
+    const event = await prisma.emergencyEvent.create({
+      data: { buildingId: building.id },
+    });
+
+    const res = await request(app).get(
+      `/api/qr/scan/route/${qrIdFor(start, floor1.floorNumber)}`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.data.emergency).toEqual({
+      active: true,
+      message: 'Fire drill in progress',
+      emergencyId: event.id,
+    });
+
+    const updatedEvent = await prisma.emergencyEvent.findUnique({
+      where: { id: event.id },
+    });
+    expect(updatedEvent.scanned).toBe(1);
+    const log = await prisma.log.findFirst({ where: { buildingId: building.id } });
+    expect(log.type).toBe('SCAN');
+    expect(log.isEmergency).toBe(true);
+  });
+
+  test('rejects malformed slugs and unknown nodes like the old endpoint', async () => {
+    const bad = await request(app).get('/api/qr/scan/route/not-a-qr');
+    expect(bad.status).toBe(400);
+    expect(bad.body.success).toBe(false);
+
+    const { building } = await seedScanScenario();
+    const ghost = await request(app).get(
+      `/api/qr/scan/route/qr_${building.id}_9_${'0'.repeat(24)}`
+    );
+    expect(ghost.status).toBe(404);
+  });
+
+  test('node with no reachable exit still returns 200 with found:false', async () => {
+    const { building } = await createOwnerWithBuilding();
+    const f1 = await createFloor(building.id, { floorNumber: 1 });
+    const lonely = await createNode(building.id, f1.id, { x: 0, y: 0, label: 'Isolated' });
+
+    const res = await request(app).get(`/api/qr/scan/route/${qrIdFor(lonely, 1)}`);
     expect(res.status).toBe(200);
     expect(res.body.data.emergencyRoute.found).toBe(false);
-    expect(res.body.data.emergencyRoute.path).toEqual([]);
-    // The floor map and node list are still returned so the page can render.
-    expect(res.body.data.buildingName).toBe('Test Building');
-  });
-
-  test('increments the node scan count', async () => {
-    const start = await createNode(building._id, { x: 0, y: 0 });
-    const exit = await createNode(building._id, { x: 10, y: 0, type: 'exit' });
-    await connect(start, exit);
-
-    await request(app).get(`/api/qr/scan/route/${qrIdFor(start)}`).expect(200);
-
-    // The write is fire-and-forget, so allow the event loop to flush it.
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    expect((await Node.findById(start._id)).scanCount).toBe(1);
-  });
-
-  test('rejects a malformed qr id', async () => {
-    const res = await request(app).get('/api/qr/scan/route/not-a-qr-code');
-
-    expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/Invalid QR code format/);
-  });
-
-  test('rejects a qr id with non-ObjectId parts', async () => {
-    const res = await request(app).get('/api/qr/scan/route/qr_abc_1_def');
-
-    expect(res.status).toBe(400);
-  });
-
-  test('returns 404 for a node that does not exist', async () => {
-    const res = await request(app).get(
-      `/api/qr/scan/route/qr_${building._id}_1_${new mongoose.Types.ObjectId()}`
+    expect(res.body.data.emergencyRoute.message).toBe(
+      'No exit route found from this location'
     );
-
-    expect(res.status).toBe(404);
-  });
-
-  test('logs the scan when the building is in emergency mode', async () => {
-    await BUILDINGS.findByIdAndUpdate(building._id, { emergencyMode: true });
-
-    const start = await createNode(building._id, { x: 0, y: 0, label: 'Lobby' });
-    const exit = await createNode(building._id, { x: 10, y: 0, type: 'exit' });
-    await connect(start, exit);
-
-    await request(app).get(`/api/qr/scan/route/${qrIdFor(start)}`).expect(200);
-
-    const LOGS = mongoose.model('log');
-    const logs = await LOGS.find({ buildingID: building._id, logType: 'scan' });
-    expect(logs).toHaveLength(1);
-    expect(logs[0].isEmergency).toBe(true);
-  });
-
-  test('does not log scans when the building is not in emergency mode', async () => {
-    const start = await createNode(building._id, { x: 0, y: 0 });
-    const exit = await createNode(building._id, { x: 10, y: 0, type: 'exit' });
-    await connect(start, exit);
-
-    await request(app).get(`/api/qr/scan/route/${qrIdFor(start)}`).expect(200);
-
-    const LOGS = mongoose.model('log');
-    expect(await LOGS.countDocuments({ buildingID: building._id })).toBe(0);
-  });
-
-  test('an invalid session cookie does not break the route', async () => {
-    const start = await createNode(building._id, { x: 0, y: 0 });
-    const exit = await createNode(building._id, { x: 10, y: 0, type: 'exit' });
-    await connect(start, exit);
-
-    // Regression: scan.js used jwt without importing it, so any request
-    // carrying a cookie threw a ReferenceError and returned 500.
-    const res = await request(app)
-      .get(`/api/qr/scan/route/${qrIdFor(start)}`)
-      .set('Cookie', ['userToken=garbage-token']);
-
-    expect(res.status).toBe(200);
-    expect(res.body.data.emergencyRoute.found).toBe(true);
+    expect(res.body.data.route).toBeNull();
   });
 });

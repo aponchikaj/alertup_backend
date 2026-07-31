@@ -91,3 +91,32 @@ export const publicReadLimiter = rateLimit({
   limit: 120,
   message: deny('Too many requests. Please wait a moment.'),
 });
+
+/**
+ * Map-editor writes (node/edge/POI/floor mutations). Authenticated and
+ * permission-guarded already; this bounds runaway clients and scripts.
+ */
+export const editorWriteLimiter = rateLimit({
+  ...baseOptions,
+  windowMs: 60 * 1000,
+  limit: 120,
+  message: deny('Too many editor changes at once. Please slow down.'),
+});
+
+/**
+ * The public AI concierge. Every request costs real Groq tokens, so two
+ * stacked limiters: a per-minute burst cap and a daily budget per IP.
+ */
+export const aiChatLimiter = rateLimit({
+  ...baseOptions,
+  windowMs: 60 * 1000,
+  limit: 10,
+  message: deny('Too many messages. Please wait a moment.'),
+});
+
+export const aiDailyLimiter = rateLimit({
+  ...baseOptions,
+  windowMs: 24 * 60 * 60 * 1000,
+  limit: 150,
+  message: deny('Daily assistant limit reached. Please try again tomorrow.'),
+});

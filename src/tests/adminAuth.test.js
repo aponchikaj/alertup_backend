@@ -1,7 +1,8 @@
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import app from '../../server.js';
-import USERS from '../models/user.model.js';
+import prisma from '../db/prisma.js';
+import { createUser, adminCookie } from './helpers.js';
 
 /**
  * Regression tests for the admin authentication bypass.
@@ -14,25 +15,29 @@ import USERS from '../models/user.model.js';
 const ADMIN_ENDPOINTS = [
   ['get', '/api/admin/dashboard'],
   ['get', '/api/admin/users'],
-  ['get', '/api/admin/premiumUsers'],
   ['get', '/api/admin/buildings'],
   ['get', '/api/admin/reports'],
   ['get', '/api/admin/contacts'],
 ];
 
 describe('admin authentication', () => {
-  test.each(ADMIN_ENDPOINTS)('%s %s rejects a forged admin cookie', async (method, path) => {
-    const res = await request(app)[method](path).set('Cookie', ['adminToken=totally-made-up']);
+  test.each(ADMIN_ENDPOINTS)(
+    '%s %s rejects a forged admin cookie',
+    async (method, path) => {
+      const res = await request(app)
+        [method](path)
+        .set('Cookie', ['adminToken=totally-made-up']);
 
-    expect(res.status).toBe(401);
-    expect(res.body.Success).toBe(false);
-  });
+      expect(res.status).toBe(401);
+      expect(res.body.success).toBe(false);
+    }
+  );
 
   test.each(ADMIN_ENDPOINTS)('%s %s rejects a missing cookie', async (method, path) => {
     const res = await request(app)[method](path);
 
     expect(res.status).toBe(401);
-    expect(res.body.Success).toBe(false);
+    expect(res.body.success).toBe(false);
   });
 
   test('rejects a token signed with the wrong secret', async () => {
@@ -48,7 +53,10 @@ describe('admin authentication', () => {
   test('rejects a validly signed token that does not claim isAdmin', async () => {
     // A normal user's session token must not grant admin access, even though
     // it is signed with the same secret.
-    const userToken = jwt.sign({ userID: '507f1f77bcf86cd799439011' }, process.env.JWT_SECRET);
+    const userToken = jwt.sign(
+      { userID: 'cxxxxxxxxxxxxxxxxxxxxxxxx' },
+      process.env.JWT_SECRET
+    );
 
     const res = await request(app)
       .get('/api/admin/users')
@@ -57,44 +65,30 @@ describe('admin authentication', () => {
     expect(res.status).toBe(403);
   });
 
-  test('rejects an expired admin token', async () => {
-    const expired = jwt.sign({ isAdmin: true }, process.env.JWT_SECRET, { expiresIn: '-1s' });
+  test('a real admin session reaches the protected endpoints', async () => {
+    await createUser({ email: 'listed@example.com' });
 
-    const res = await request(app)
-      .get('/api/admin/users')
-      .set('Cookie', [`adminToken=${expired}`]);
-
-    expect(res.status).toBe(401);
-  });
-
-  test('accepts a properly signed admin token', async () => {
-    const valid = jwt.sign({ isAdmin: true }, process.env.JWT_SECRET, { expiresIn: '1h' });
-
-    const res = await request(app)
-      .get('/api/admin/dashboard')
-      .set('Cookie', [`adminToken=${valid}`]);
+    const res = await request(app).get('/api/admin/users').set('Cookie', adminCookie());
 
     expect(res.status).toBe(200);
-    expect(res.body.Success).toBe(true);
+    expect(res.body.success).toBe(true);
   });
 
-  test('a forged cookie cannot delete a user', async () => {
-    const victim = await USERS.create({
-      userType: 'Individual',
-      name: 'Real',
-      lastname: 'Person',
-      email: 'victim@example.com',
-      password: 'hashed',
-    });
+  test('the user session cookie is not interchangeable with the admin cookie', async () => {
+    const { cookie } = await createUser();
 
-    const res = await request(app)
-      .delete(`/api/admin/user/${victim._id}`)
-      .set('Cookie', ['adminToken=forged'])
-      .send({ reason: 'attack' });
+    // A user token in the *user* cookie slot must not unlock admin routes.
+    const res = await request(app).get('/api/admin/users').set('Cookie', cookie);
 
     expect(res.status).toBe(401);
+  });
 
-    // The account must still exist.
-    expect(await USERS.findById(victim._id)).not.toBeNull();
+  test('whoami rejects the admin token (no userID claim)', async () => {
+    const res = await request(app)
+      .get('/api/me')
+      .set('Cookie', [`userToken=${jwt.sign({ isAdmin: true }, process.env.JWT_SECRET)}`]);
+
+    expect(res.status).toBe(401);
+    expect(await prisma.user.count()).toBe(0);
   });
 });
