@@ -1,7 +1,6 @@
+import mongoose from 'mongoose';
 import BUILDINGS from '../models/building.model.js';
-import USERS from '../models/user.model.js';
 import Node from '../models/node.model.js';
-import whoami from './whoami.js';
 
 /**
  * Middleware to check if user is the owner of a building
@@ -20,8 +19,11 @@ const ownerOnlyAuth = async (req, res, next) => {
       });
     }
 
-    // Get building ID from request parameters or body
-    let buildingId = req.params.buildingId || req.params.id || req.body.buildingId;
+    // Get building ID from request parameters or body.
+    // `req.body` is undefined on requests without a parsed body (e.g. DELETE),
+    // so it must be accessed optionally — reading it directly threw a
+    // TypeError and turned every node deletion into a 500.
+    let buildingId = req.params.buildingId || req.params.id || req.body?.buildingId;
     
     // If no buildingId in params/body, try to get it from nodeId
     if (!buildingId && req.params.nodeId) {
@@ -42,9 +44,18 @@ const ownerOnlyAuth = async (req, res, next) => {
       });
     }
 
+    // Checked before querying: a malformed id would otherwise raise a
+    // Mongoose CastError and surface as a 500 rather than a 400.
+    if (!mongoose.Types.ObjectId.isValid(buildingId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid building ID'
+      });
+    }
+
     // Check if user is the building owner
     const building = await BUILDINGS.findById(buildingId);
-    
+
     if (!building) {
       return res.status(404).json({
         success: false,
@@ -52,8 +63,9 @@ const ownerOnlyAuth = async (req, res, next) => {
       });
     }
 
-    // Check if user is the owner (no admin bypass)
-    if (building.owner.toString() !== req.user._id.toString()) {
+    // `owner` is not required by the schema, so a building without one must be
+    // denied rather than dereferenced.
+    if (!building.owner || building.owner.toString() !== req.user._id.toString()) {
       return res.status(403).json({
         success: false,
         message: 'Access denied. Only the building owner can perform this action.'

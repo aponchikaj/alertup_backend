@@ -10,6 +10,23 @@ dotenv.config()
 
 import isAdmin from '../../middlewares/isAdmin.js';
 import sendMail from '../../services/sendEmail.js';
+import { authLimiter } from '../../services/rateLimiter.js';
+import { displayName } from '../../services/displayName.js';
+import { deleteUserCascade } from '../../services/cascadeDelete.js';
+import { escapeHtml } from '../../services/escapeHtml.js';
+
+/** Escape regex metacharacters in admin search input. */
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Normalize a search query: `?q=a&q=b` arrives as an array, which the driver
+ * rejects, and unescaped metacharacters let a pattern like `(a+)+$` pin a CPU
+ * on the database through catastrophic backtracking.
+ */
+const searchPattern = (q) => {
+  const raw = Array.isArray(q) ? q[0] : q;
+  return escapeRegex(String(raw ?? '').slice(0, 100));
+};
 
 const router = express.Router();
 
@@ -22,21 +39,14 @@ const PREMIUM_OPTIONS = {
 
 // ########################################### IF ADMIN? SECTION ###########################################
 
-router.get('/api/admin/isAdmin',isAdmin,async(req,res)=>{
-  try{
-    if(req.isAdmin = false){
-      return res.send({Success:false})
-    }
-
-    return res.send({Success:true})
-  }catch{
-    return res.send({Success:false,Message:"Something went wrong."})
-  }
+// Reaching this handler means isAdmin verified the token — it returns 401/403 otherwise.
+router.get('/api/admin/isAdmin', isAdmin, async (req, res) => {
+  return res.send({ Success: true })
 })
 
 // ########################################### LOGIN SECTION ###########################################
 
-router.post('/api/admin/login', async (req, res) => {
+router.post('/api/admin/login', authLimiter, async (req, res) => {
   const { user, password } = req.body;
 
   try {
@@ -133,22 +143,38 @@ router.post('/api/admin/sendMail',isAdmin,async(req,res)=>{
             return res.send({Success:false,Message:'Invalid fields.'})
         }
 
-        const findUser =await USERS.findOne({username:user});
+        const findUser = await USERS.findOne({ email: String(user).toLowerCase().trim() });
 
         if(!findUser){
-            return res.send({Success:false,Message:"User not found."})
+            return res.status(404).send({Success:false,Message:"User not found."})
         }
 
+        // This route previously returned "Sent." without ever calling sendMail,
+        // so admins were told their message had been delivered and the
+        // recipient never received anything.
+        const adminMessageHTML = `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+            <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+              <h1 style="color: #FF7B22; margin-top: 0;">${escapeHtml(subject)}</h1>
+              <p style="color: #333; font-size: 16px;">Hello <strong>${escapeHtml(displayName(findUser))}</strong>,</p>
+              <p style="color: #666; white-space: pre-wrap;">${escapeHtml(text)}</p>
+              <p style="color: #666; font-size: 14px; margin-top: 20px;">Best regards,<br><strong style="color: #FF7B22;">AlertUp Team</strong></p>
+            </div>
+          </div>
+        `;
+
         try {
-          return res.send({Success:true,Message:"Sent."})
+          await sendMail(findUser.email, String(subject), String(text), undefined, adminMessageHTML)
         } catch (err) {
-            console.error("MAIL ERROR:", err);
+          console.error("MAIL ERROR:", err);
+          return res.status(502).send({Success:false,Message:"Couldn't send the email."})
         }
 
         return res.send({Success:true,Message:"Sent."})
 
-    }catch{
-        return res.send({Success:false,Message:"Server error."})
+    }catch(err){
+        console.error('Admin sendMail error:', err)
+        return res.status(500).send({Success:false,Message:"Server error."})
     }
 })
 
@@ -181,11 +207,14 @@ router.get('/api/admin/users', isAdmin, async (req, res) => {
     page = Math.max(parseInt(page) || 1, 1);
     limit = Math.min(parseInt(limit) || 20, 100);
 
+    const safeQ = searchPattern(q);
     const searchQuery = q
       ? {
           $or: [
-            { username: { $regex: q, $options: 'i' } },
-            { email: { $regex: q, $options: 'i' } }
+            { name: { $regex: safeQ, $options: 'i' } },
+            { lastname: { $regex: safeQ, $options: 'i' } },
+            { company: { $regex: safeQ, $options: 'i' } },
+            { email: { $regex: safeQ, $options: 'i' } }
           ]
         }
       : {};
@@ -221,12 +250,15 @@ router.get('/api/admin/premiumUsers', isAdmin, async (req, res) => {
     page = Math.max(parseInt(page) || 1, 1);
     limit = Math.min(parseInt(limit) || 20, 100);
 
+    const safeQ = searchPattern(q);
     const searchQuery = {
       'premium.hasPremium': true,
       ...(q && {
         $or: [
-          { username: { $regex: q, $options: 'i' } },
-          { email: { $regex: q, $options: 'i' } }
+          { name: { $regex: safeQ, $options: 'i' } },
+          { lastname: { $regex: safeQ, $options: 'i' } },
+          { company: { $regex: safeQ, $options: 'i' } },
+          { email: { $regex: safeQ, $options: 'i' } }
         ]
       })
     };
@@ -235,7 +267,10 @@ router.get('/api/admin/premiumUsers', isAdmin, async (req, res) => {
       .select('-password')
       .skip((page - 1) * limit)
       .limit(limit)
-      .sort({ 'premium.startedAt': -1 })
+      // premium.startedAt does not exist on the schema — the field written by
+      // givePremium is premium.from. Sorting on a missing path left pagination
+      // unstable, so the same user could appear on two pages.
+      .sort({ 'premium.from': -1 })
       .lean();
 
     const total = await USERS.countDocuments(searchQuery);
@@ -260,23 +295,25 @@ router.get('/api/admin/premiumUsers', isAdmin, async (req, res) => {
 
 router.get('/api/admin/user/:id', isAdmin, async (req, res) => {
   const userID = req.params.id;
-  // console.log(userID)
   try {
-    if (!userID) {
-      return res.send({ Success: false, Message: "Invalid user ID" });
+    if (!userID || !mongoose.Types.ObjectId.isValid(userID)) {
+      return res.status(400).send({ Success: false, Message: "Invalid user ID" });
     }
 
-    const user = await USERS.findOne({_id:userID.toString('hex')})
+    // The password is select:false on the schema now, but this route also
+    // returned trustedIPS and transactions to the browser. It was the only
+    // user-detail route that forgot to narrow the projection.
+    const user = await USERS.findById(userID).select('-trustedIPS -transactions')
 
     if (!user) {
-      return res.send({ Success: false, Message: "User not found." });
+      return res.status(404).send({ Success: false, Message: "User not found." });
     }
 
     return res.send({ Success: true, Message: user });
 
   } catch (err) {
     console.error(err)
-    return res.send({ Success: false, Message: 'Server error !!!' });
+    return res.status(500).send({ Success: false, Message: 'Server error !!!' });
   }
 });
 
@@ -284,29 +321,34 @@ router.delete('/api/admin/user/:id',isAdmin,async(req,res)=>{
     const userID = req.params.id
     const {reason} = req.body
     try{
-        if(!userID){
-            return res.send({Success:false,Message:"Invalid user ID"})
+        if(!userID || !mongoose.Types.ObjectId.isValid(userID)){
+            return res.status(400).send({Success:false,Message:"Invalid user ID"})
         }
 
         const user = await USERS.findById(userID)
 
         if(!user){
-            return res.send({Success:false,Message:"User not found."})
+            return res.status(404).send({Success:false,Message:"User not found."})
         }
-    
-        await USERS.findOneAndDelete({_id:user._id})
 
-        res.send({Success:false,Message:"Deleted."})
+        // Removes their buildings, floors, nodes, logs and reviews too. Deleting
+        // only the user document left all of that orphaned and unreachable,
+        // while the email below stated it had been removed.
+        await deleteUserCascade(user._id)
+
+        // Was Success:false on the success path, so the admin UI reported a
+        // failure and kept showing a user that had in fact been deleted.
+        res.send({Success:true,Message:"Deleted."})
         try {
           const adminDeleteHTML = `
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
               <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
                 <h1 style="color: #d32f2f; margin-top: 0;">⚠️ Account Deletion Notice</h1>
-                <p style="color: #333; font-size: 16px;">Hello Dear <strong>${user.username}</strong>,</p>
+                <p style="color: #333; font-size: 16px;">Hello Dear <strong>${displayName(user)}</strong>,</p>
                 <p style="color: #666;">We've decided that your account should be deleted.</p>
                 <div style="background-color: #ffebee; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #f44336;">
                   <p style="margin: 0; color: #c62828; font-weight: bold;">Reason for Deletion</p>
-                  <p style="margin: 5px 0 0 0; color: #666; font-size: 14px;">${reason}</p>
+                  <p style="margin: 5px 0 0 0; color: #666; font-size: 14px;">${escapeHtml(reason)}</p>
                 </div>
                 <p style="color: #666; font-size: 14px;">All your data has been permanently removed from our system.</p>
                 <p style="color: #666; font-size: 14px; margin-top: 20px;">We are sorry to see you go. If you have any questions, please contact our support team.</p>
@@ -314,7 +356,7 @@ router.delete('/api/admin/user/:id',isAdmin,async(req,res)=>{
               </div>
             </div>
           `;
-          await sendMail(user.email,'Account deleted - AlertUp',`Hello Dear ${user.username} we've decided that your account should be deleted. reason:${reason}. we are sorry goodbye.`, undefined, adminDeleteHTML)
+          await sendMail(user.email,'Account deleted - AlertUp',`Hello Dear ${displayName(user)} we've decided that your account should be deleted. reason:${reason}. we are sorry goodbye.`, undefined, adminDeleteHTML)
         } catch (err) {
           console.error("MAIL ERROR:", err);
         }
@@ -325,7 +367,7 @@ router.delete('/api/admin/user/:id',isAdmin,async(req,res)=>{
 
 router.put('/api/admin/user/:id', isAdmin, async (req, res) => {
   const userID = req.params.id;
-  const { username, country, countryCode, phoneNumber, verified } = req.body;
+  const { name, lastname, company, country, countryCode, phoneNumber, verified } = req.body;
 
   try {
     if (!userID) {
@@ -333,7 +375,9 @@ router.put('/api/admin/user/:id', isAdmin, async (req, res) => {
     }
 
     const updates = {};
-    if (username !== undefined) updates.username = username;
+    if (name !== undefined) updates.name = name;
+    if (lastname !== undefined) updates.lastname = lastname;
+    if (company !== undefined) updates.company = company;
     if (country !== undefined) updates.country = country;
     if (countryCode !== undefined) updates.countryCode = countryCode;
     if (phoneNumber !== undefined) updates.phones = phoneNumber;
@@ -378,13 +422,24 @@ router.post('/api/admin/user/givePremium/:id', isAdmin, async (req, res) => {
 
     const today = new Date();
 
+    // `till` went into the update unvalidated: a malformed value produced a
+    // CastError reported only as "Server error.", and a date in the past
+    // silently granted a plan that whoami revokes on the user's next request.
+    const expiresAt = new Date(till);
+    if (isNaN(expiresAt.getTime())) {
+      return res.status(400).send({ Success: false, Message: "Invalid expiry date." });
+    }
+    if (expiresAt <= today) {
+      return res.status(400).send({ Success: false, Message: "Expiry date must be in the future." });
+    }
+
     const user = await USERS.findByIdAndUpdate(
       userID,
       {
         'premium.hasPremium': true,
         'premium.premiumType': premiumOption,
         'premium.from': today,
-        'premium.to': till
+        'premium.to': expiresAt
       },
       { new: true }
     );
@@ -409,10 +464,11 @@ router.get('/api/admin/buildings',isAdmin,async(req,res)=>{
         page = Math.max(parseInt(page) || 1, 1);
         limit = Math.min(parseInt(limit) || 20, 100);
 
+        const safeQ = searchPattern(q);
         const searchQuery = q
         ? {
             $or: [
-                { buildingName: { $regex: q, $options: 'i' } },
+                { buildingName: { $regex: safeQ, $options: 'i' } },
             ]
             }
         : {};
@@ -434,8 +490,11 @@ router.get('/api/admin/buildings',isAdmin,async(req,res)=>{
             totalUsers: total
         }
         });
-    }catch{
-        return res.send({Success:true,Message:"Server error."})
+    }catch(err){
+        // Was Success:true, so on a DB error the client took the success branch
+        // and read Message.buildings off a string, crashing the admin page.
+        console.error('Admin buildings list error:', err)
+        return res.status(500).send({Success:false,Message:"Server error."})
     }
 }) 
 
@@ -507,15 +566,24 @@ router.delete('/api/admin/reports/:id',isAdmin,async(req,res)=>{
     const reportID = req.params.id;
 
     try{
-        if(!reportID){
-            return res.send({Success:true,Message:"invalid Report ID."})
+        // Was Success:true on the rejection path, so the admin UI treated an
+        // invalid id as a successful delete and removed the row optimistically.
+        if(!reportID || !mongoose.Types.ObjectId.isValid(reportID)){
+            return res.status(400).send({Success:false,Message:"Invalid report ID."})
         }
 
-        await REPORTS.findOneAndDelete({_id:reportID}).catch(()=>{return res.send({Success:false,Message:"Couldn't delete report."})})
+        // The stray .catch here swallowed the rejection and sent a response,
+        // then execution fell through to the success reply below — a second
+        // res.send that threw ERR_HTTP_HEADERS_SENT and destroyed the socket.
+        const deleted = await REPORTS.findOneAndDelete({_id:reportID})
+        if(!deleted){
+            return res.status(404).send({Success:false,Message:"Report not found."})
+        }
 
         return res.send({Success:true,Message:"Deleted."})
-    }catch{
-        return res.send({Success:false,Message:'Server error.'})
+    }catch(err){
+        console.error('Admin report delete error:', err)
+        return res.status(500).send({Success:false,Message:'Server error.'})
     }
 })
 
@@ -535,15 +603,20 @@ router.delete('/api/admin/contacts/:id',isAdmin,async(req,res)=>{
     const contactID = req.params.id;
 
     try{
-        if(!contactID){
-            return res.send({Success:true,Message:"invalid Report ID."})
+        if(!contactID || !mongoose.Types.ObjectId.isValid(contactID)){
+            return res.status(400).send({Success:false,Message:"Invalid contact ID."})
         }
 
-        await CONTACTS.findOneAndDelete({_id:contactID}).catch(()=>{return res.send({Success:false,Message:"Couldn't delete report."})})
+        // Same double-response bug as the report delete above.
+        const deleted = await CONTACTS.findOneAndDelete({_id:contactID})
+        if(!deleted){
+            return res.status(404).send({Success:false,Message:"Contact not found."})
+        }
 
         return res.send({Success:true,Message:"Deleted."})
-    }catch{
-        return res.send({Success:false,Message:'Server error.'})
+    }catch(err){
+        console.error('Admin contact delete error:', err)
+        return res.status(500).send({Success:false,Message:'Server error.'})
     }
 })
 

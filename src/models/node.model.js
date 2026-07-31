@@ -35,6 +35,13 @@ const nodeSchema = new mongoose.Schema(
     label: {
       type: String,
     },
+    // Number of times the QR at this node has been scanned. The scan route
+    // already incremented this, but the field was missing from the schema so
+    // Mongoose silently stripped the update on every write.
+    scanCount: {
+      type: Number,
+      default: 0,
+    },
   },
   { timestamps: true }
 );

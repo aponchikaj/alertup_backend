@@ -4,6 +4,9 @@ import path from 'path';
 import { randomBytes } from 'crypto';
 import { uploadToCloudinary } from './cloudinaryService.js';
 
+// The only Cloudinary folder QR deletion is allowed to touch.
+export const QR_CLOUDINARY_FOLDER = 'alertup/qr-codes';
+
 /**
  * Generate QR code image file and upload to Cloudinary
  * @param {string} data - QR code data
@@ -42,7 +45,7 @@ export const generateQRCodeFile = async (data, options = {}) => {
     try {
       const cloudinaryResult = await uploadToCloudinary(
         qrBuffer,
-        'alertup/qr-codes'
+        QR_CLOUDINARY_FOLDER
       );
       if (cloudinaryResult && cloudinaryResult.secure_url) {
         cloudinaryUrl = cloudinaryResult.secure_url;
@@ -99,7 +102,7 @@ export const generateQRCodeSVGFile = async (data, options = {}) => {
     try {
       const cloudinaryResult = await uploadToCloudinary(
         Buffer.from(svgString),
-        'alertup/qr-codes'
+        QR_CLOUDINARY_FOLDER
       );
       if (cloudinaryResult && cloudinaryResult.secure_url) {
         cloudinaryUrl = cloudinaryResult.secure_url;
@@ -181,11 +184,18 @@ export const deleteQRCodeFile = async (cloudinaryUrl) => {
     const urlParts = cloudinaryUrl.split('/');
     const fileWithExt = urlParts[urlParts.length - 1];
     const fileName = fileWithExt.split('.')[0];
-    
+
     // Reconstruct public_id (includes folder path)
     const uploadIndex = urlParts.indexOf('upload');
     const pathParts = urlParts.slice(uploadIndex + 1, -1);
     const publicId = [...pathParts, fileName].join('/');
+
+    // Scoped to the QR folder. Without this, a caller could hand in the URL of
+    // any Cloudinary asset — including another tenant's floor map — and have it
+    // deleted, because the derived public_id was used verbatim.
+    if (!publicId.startsWith(`${QR_CLOUDINARY_FOLDER}/`)) {
+      return { success: false, message: 'Not a QR code asset' };
+    }
 
     // Delete from Cloudinary
     const { deleteFromCloudinary } = await import('./cloudinaryService.js');

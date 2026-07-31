@@ -5,7 +5,6 @@ import USERS from '../../models/user.model.js';
 import BUILDINGS from '../../models/building.model.js';
 import Floor from '../../models/floor.model.js';
 import Node from '../../models/node.model.js';
-import QRCodeModel from '../../models/qrcode.model.js';
 import mongoose from 'mongoose';
 import { uploadToCloudinary } from '../../services/cloudinaryService.js';
 import whoami from '../../middlewares/whoami.js';
@@ -14,6 +13,8 @@ import { Filter } from 'bad-words';
 import LOGS from '../../models/logs.model.js';
 import jwt from 'jsonwebtoken'
 import EMERGENCIES from '../../models/emergencies.model.js';
+import { displayName } from '../../services/displayName.js';
+import { emergencyActionLimiter, publicReadLimiter } from '../../services/rateLimiter.js';
 
 const router = express.Router();
 
@@ -40,9 +41,17 @@ const checkBuildingName = async (userID, buildingName, buildingId = null) => {
 };
 
 // Normalize floor names array
+/**
+ * Coerce the floorNames field to an array of trimmed strings.
+ *
+ * In a multipart request a field sent exactly once arrives as a bare string,
+ * not a one-element array, so single-floor buildings were rejected outright
+ * unless the client happened to use `floorNames[]` bracket notation.
+ */
 const normalizeFloorNames = (floorNames) => {
-  if (!Array.isArray(floorNames)) return [];
-  return floorNames.map(f => f.trim());
+  if (floorNames === undefined || floorNames === null) return [];
+  const list = Array.isArray(floorNames) ? floorNames : [floorNames];
+  return list.filter((f) => typeof f === 'string').map((f) => f.trim()).filter(Boolean);
 };
 
 /* ---------------- CREATE BUILDING ---------------- */
@@ -53,12 +62,15 @@ router.post("/api/building/new", whoami, upload.array("maps"), async (req, res) 
     if (!USER) return res.send({ Success: false, Message: "User not found." });
     if (USER.verified == false) return res.send({ Success: false, Message: "Verify account first." });
     
-    const { buildingName, floorNames } = req.body;
+    const { buildingName } = req.body;
     if (!buildingName || typeof buildingName !== "string")
       return res.send({ Success: false, Message: "Invalid building name." });
-    if (!Array.isArray(floorNames) || floorNames.length === 0)
+    // Normalized first: a single floor arrives as a string in multipart, which
+    // the previous Array.isArray check rejected.
+    const floorNames = normalizeFloorNames(req.body.floorNames);
+    if (floorNames.length === 0)
       return res.send({ Success: false, Message: "Invalid floor names." });
-    
+
     const normalizedFloors = floorNames.map(f => f.trim().toLowerCase());
     if (new Set(normalizedFloors).size !== normalizedFloors.length)
       return res.send({ Success: false, Message: "Floor names must be unique." });
@@ -148,13 +160,17 @@ router.post("/api/building/new", whoami, upload.array("maps"), async (req, res) 
 
 /* ---------------- UPDATE BUILDING ---------------- */
 router.put('/api/building/:id', whoami, upload.array('maps'), async (req, res) => {
+  // Collected up front so the finally block can clean up on every exit path.
+  // The early returns below used to leave their temp files behind, growing
+  // uploads/buildings/ until the disk filled.
+  const uploadedFiles = (req.files || []).map((f) => f.path).filter(Boolean);
   try {
     const user = await USERS.findById(req.user._id);
     const building = await BUILDINGS.findById(req.params.id);
 
-    if (!user || !building) return res.send({ Success: false, Message: 'Not found.' });
-    if (building.owner.toString() !== user._id.toString())
-      return res.send({ Success: false, Message: 'Unauthorized.' });
+    if (!user || !building) return res.status(404).send({ Success: false, Message: 'Not found.' });
+    if (!building.owner || building.owner.toString() !== user._id.toString())
+      return res.status(403).send({ Success: false, Message: 'Unauthorized.' });
 
     let { buildingName, floorNames } = req.body;
     floorNames = normalizeFloorNames(floorNames);
@@ -170,7 +186,7 @@ router.put('/api/building/:id', whoami, upload.array('maps'), async (req, res) =
     const MAPS = await Promise.all(
       floorNames.map(async (floor, i) => {
         let mapUrl = null;
-        
+
         // If there's a file, upload it to Cloudinary
         if (files[i]) {
           try {
@@ -178,30 +194,37 @@ router.put('/api/building/:id', whoami, upload.array('maps'), async (req, res) =
               fs.readFileSync(files[i].path),
               `alertup/buildings/${building._id}/floor-${floor.trim()}`
             );
-            
+
             if (cloudinaryResult && cloudinaryResult.secure_url) {
               mapUrl = cloudinaryResult.secure_url;
-              
-              // Clean up local file after successful upload
-              if (files[i].path && fs.existsSync(files[i].path)) {
-                fs.unlinkSync(files[i].path);
-              }
             }
           } catch (error) {
             console.error(`❌ Failed to upload floor ${floor} map:`, error);
-            // Keep local file as fallback
-            mapUrl = files[i]?.path || null;
+            // null, matching the create route. Storing files[i].path here put an
+            // absolute server path into the document, which leaked the
+            // filesystem layout through the public building endpoint and became
+            // a broken image URL for anyone scanning during an emergency.
+            mapUrl = null;
           }
         }
-        
+
+        const floorName = floor.trim();
+        // Carried over so editing a building does not reset its scan history.
+        const existing = building.maps?.find((m) => m.floor === floorName);
+
         return {
-          floor: floor.trim(),
+          floor: floorName,
           map: mapUrl,
+          // Same URL shape the create route uses. This route used to build a
+          // CLIENT_SCAN_QR_URL query keyed on the building *name*, which no
+          // backend route can resolve — and encoded the literal string
+          // "undefined" whenever that variable was unset — so every QR code
+          // reprinted after an edit stopped working.
           qrCode: await QRCode.toDataURL(
-            `${process.env.CLIENT_SCAN_QR_URL}?building=${encodeURIComponent(buildingName)}&floor=${encodeURIComponent(floor)}`
+            `https://www.alertup.world/building/${building._id}/${encodeURIComponent(floorName)}`
           ),
-          scanned: 0,
-          createdAt: Date.now()
+          scanned: existing?.scanned || 0,
+          createdAt: existing?.createdAt || Date.now()
         };
       })
     );
@@ -216,30 +239,53 @@ router.put('/api/building/:id', whoami, upload.array('maps'), async (req, res) =
     res.send({ Success: true, Message: 'Building updated.' });
   } catch (error) {
     console.error(error);
-    res.send({ Success: false, Message: 'Server error.' });
+    res.status(500).send({ Success: false, Message: 'Server error.' });
+  } finally {
+    uploadedFiles.forEach((filePath) => {
+      if (filePath && fs.existsSync(filePath)) {
+        try {
+          fs.unlinkSync(filePath);
+        } catch (err) {
+          console.error(`Failed to delete file ${filePath}:`, err);
+        }
+      }
+    });
   }
 });
 
 /* ---------------- GET BUILDING BY ID ---------------- */
+// Public on purpose: an occupant scanning a QR has no account, and the
+// frontend BuildingOwnerGuard compares `Message.owner` against the current
+// user id. So the building stays readable, but the owner is reduced to an id
+// plus a display name — never their email, phone, transactions, trusted IPs,
+// or scan history.
 router.get('/api/building/id/:buildingID', async (req, res) => {
-  const {buildingID} = req.params;
-  // console.log(buildingID)
+  const { buildingID } = req.params;
+
   try {
-    // Validate ObjectId
-    if (!buildingID) {
+    if (!buildingID || !mongoose.Types.ObjectId.isValid(buildingID)) {
       return res.send({ Success: false, Message: "Invalid building ID." });
     }
 
-    // Load building and owner info
-    const BUILDING = await BUILDINGS.findById(buildingID);
+    const BUILDING = await BUILDINGS.findById(buildingID)
+      .select('buildingName owner floors maps globalScans emergencyMode isDeactivated createdAt updatedAt')
+      .lean();
     if (!BUILDING) return res.send({ Success: false, Message: 'Building not found.' });
 
-    const owner = await USERS.findById(BUILDING.owner).select('-password')
+    const owner = await USERS.findById(BUILDING.owner)
+      .select('_id name lastname company userType')
+      .lean();
     if (!owner) return res.send({ Success: false, Message: 'Owner data missing.' });
 
-    // console.log(BUILDING)
-
-    return res.send({ Success: true, Message: BUILDING,Owner:owner} );
+    return res.send({
+      Success: true,
+      Message: BUILDING,
+      Owner: {
+        _id: owner._id,
+        displayName: displayName(owner),
+        userType: owner.userType,
+      },
+    });
 
   } catch (error) {
     console.error('GET /api/building/id/:buildingID error:', error);
@@ -262,7 +308,7 @@ router.get("/api/building/my", whoami, async (req, res) => {
 });
 
 /* ---------------- SCAN FLOOR ---------------- */
-router.get('/api/building/scan/:id/:floor', async (req, res) => {
+router.get('/api/building/scan/:id/:floor', publicReadLimiter, async (req, res) => {
   const { id, floor } = req.params;
   try {
     if (!id || !mongoose.Types.ObjectId.isValid(id)) return res.status(400).send({ Success: false, Message: 'Invalid building id.' });
@@ -271,10 +317,11 @@ router.get('/api/building/scan/:id/:floor', async (req, res) => {
     const building = await BUILDINGS.findById(id);
     if (!building) return res.status(404).send({ Success: false, Message: 'Building not found.' });
 
-    // No deactivation checks - all buildings are always active
+    // A deactivated building is honored rather than silently switched back on.
+    // This endpoint is anonymous, so reactivating here let any passer-by undo
+    // the owner-only deactivation and get served stale evacuation data.
     if (building.isDeactivated) {
-      // Reactivate building automatically
-      await BUILDINGS.findByIdAndUpdate(id, { isDeactivated: false });
+      return res.status(410).send({ Success: false, Message: 'This building is currently deactivated.' });
     }
 
     // Atomic increment of the scanned counter for the matching floor
@@ -296,14 +343,22 @@ router.get('/api/building/scan/:id/:floor', async (req, res) => {
       // await EMERGENCIES.findOneAndUpdate({buildingID:building._id,isFinished:false},{$inc:{scanned:1}},{new:true})
     }
 
+    // Same reasoning as the QR scan route: an invalid token must not turn a
+    // successful floor lookup into a 500 for the person standing in the building.
     const userToken = req.cookies['userToken']
-    // console.log(userToken)
-    let decoded
-    if(userToken){
-      decoded = jwt.verify(userToken, process.env.JWT_SECRET)
-      await USERS.findOneAndUpdate({_id:decoded.userID},{$push:{scanned:{buildingName:building.buildingName,scannedAt: Date.now(),buildingID:building._id}}},{new:true})
+    if (userToken) {
+      try {
+        const decoded = jwt.verify(userToken, process.env.JWT_SECRET)
+        await USERS.findOneAndUpdate(
+          { _id: decoded.userID },
+          { $push: { scanned: { buildingName: building.buildingName, scannedAt: Date.now(), buildingID: building._id } } },
+          { new: true }
+        )
+      } catch (tokenErr) {
+        console.warn('Scan history not recorded (invalid token):', tokenErr.message)
+      }
     }
-    
+
 
     const floorData = updated.maps.find(f => f.floor === floor);
     return res.send({ Success: true, Message: { buildingName: updated.buildingName, floorData, scannedCount: floorData.scanned } });
@@ -314,13 +369,11 @@ router.get('/api/building/scan/:id/:floor', async (req, res) => {
 });
 
 
-router.get('/api/debug/user-buildings', whoami, async (req, res) => {
-  const user = await USERS.findById(req.user._id).select('Buildings');
-  res.json({
-    buildingsCount: user.Buildings.length,
-    buildings: user.Buildings.map(b => b.toString())
-  });
-});
+// The /api/debug/user-buildings endpoint was removed: it duplicated
+// /api/building/my, was registered unconditionally in production, and had no
+// try/catch, so any database error there reached Express's default HTML
+// handler.
+
 /* ---------------- DELETE BUILDING ---------------- */
 router.delete('/api/building/delete/:buildingID', whoami, async (req, res) => {
   const { buildingID } = req.params;
@@ -347,22 +400,24 @@ router.delete('/api/building/delete/:buildingID', whoami, async (req, res) => {
       });
     }
 
-    // 1. Delete all nodes for this building
-    const nodeDeleteResult = await Node.deleteMany({ buildingId: buildingID });
+    // 1. Collect the node ids BEFORE deleting them. The previous version ran
+    //    this query after the delete, so it always came back empty and the
+    //    orphaned-connection cleanup below silently did nothing.
+    const nodeIds = await Node.find({ buildingId: buildingID }).distinct('_id');
 
-    // 2. Delete all QR codes for this building
-    const qrDeleteResult = await QRCodeModel.deleteMany({ buildingId: buildingID });
+    // 2. Delete all nodes for this building
+    const nodeDeleteResult = await Node.deleteMany({ buildingId: buildingID });
 
     // 3. Delete all floor maps for this building
     const floorDeleteResult = await Floor.deleteMany({ buildingId: buildingID });
 
-    // 4. Update all other nodes that had connections to deleted nodes
-    // (This is handled by the node connections cleanup in the node deletion route)
-    // But we should also clean up any orphaned connections
-    await Node.updateMany(
-      { connections: { $exists: true, $ne: [] } },
-      { $pull: { connections: { $in: await Node.find({ buildingId: buildingID }).distinct('_id') } } }
-    );
+    // 4. Drop any remaining edges pointing at the deleted nodes
+    if (nodeIds.length) {
+      await Node.updateMany(
+        { connections: { $in: nodeIds } },
+        { $pull: { connections: { $in: nodeIds } } }
+      );
+    }
 
     // 5. Delete the building itself
     await BUILDINGS.findByIdAndDelete(building._id);
@@ -374,12 +429,11 @@ router.delete('/api/building/delete/:buildingID', whoami, async (req, res) => {
       { new: true }
     );
 
-    return res.send({ 
-      Success: true, 
+    return res.send({
+      Success: true,
       Message: "Building and all related data deleted successfully.",
       DeletedCounts: {
         nodes: nodeDeleteResult.deletedCount,
-        qrCodes: qrDeleteResult.deletedCount,
         floors: floorDeleteResult.deletedCount
       }
     });
@@ -428,10 +482,7 @@ router.delete('/api/building/:buildingId/floor/:floorNumber', whoami, async (req
     const floorNodes = await Node.find({ buildingId, floorNumber: floorNum });
     const nodeIds = floorNodes.map(node => node._id);
 
-    // 2. Delete all QR codes for nodes on this floor
-    const qrDeleteResult = await QRCodeModel.deleteMany({ nodeId: { $in: nodeIds } });
-
-    // 3. Delete all nodes on this floor
+    // 2. Delete all nodes on this floor
     const nodeDeleteResult = await Node.deleteMany({ buildingId, floorNumber: floorNum });
 
     // 4. Clean up connections from other nodes to deleted nodes
@@ -443,19 +494,25 @@ router.delete('/api/building/:buildingId/floor/:floorNumber', whoami, async (req
     // 5. Delete the floor map
     const floorDeleteResult = await Floor.deleteOne({ buildingId, floorNumber: floorNum });
 
-    // 6. Remove floor from building's maps array
+    // 6. Remove floor from building's maps array.
+    //    Matched by index rather than by name: buildings may use arbitrary
+    //    floor names ("Ground", "Mezzanine"), and comparing against
+    //    floorNum.toString() could never remove those entries.
+    const remainingMaps = building.maps.filter((_, index) => index + 1 !== floorNum);
+
+    // 7. Keep the floors count in step with the maps that are actually left.
+    //    It was never decremented, so it drifted upward on every deletion.
     await BUILDINGS.findByIdAndUpdate(
       buildingId,
-      { $pull: { maps: { floor: floorNum.toString() } } },
+      { maps: remainingMaps, floors: remainingMaps.length, updatedAt: Date.now() },
       { new: true }
     );
 
-    return res.send({ 
-      Success: true, 
+    return res.send({
+      Success: true,
       Message: "Floor and all related data deleted successfully.",
       DeletedCounts: {
         nodes: nodeDeleteResult.deletedCount,
-        qrCodes: qrDeleteResult.deletedCount,
         floorMap: floorDeleteResult.deletedCount
       }
     });
@@ -516,19 +573,31 @@ router.put('/api/building/:buildingId/floor/:floorNumber/map', whoami, async (re
     const mapWidth = parseInt(width) || 1000;
     const mapHeight = parseInt(height) || 800;
 
-    // Update or create floor record
+    // svgMapUrl is required by the Floor schema, so a request carrying only
+    // svgContent (or neither) would upsert an invalid document — silently,
+    // because the upsert ran without validators.
+    if (!mapUrl) {
+      return res.status(400).json({
+        Success: false,
+        Message: 'A floor map requires either svgContent or svgMapUrl.'
+      });
+    }
+
+    // Update or create floor record.
+    // The former `map` field does not exist on the Floor schema, so Mongoose
+    // stripped it — and its fallback pointed at /uploads/floor-maps/..., a path
+    // nothing in the application ever writes.
     const floorData = await Floor.findOneAndUpdate(
       { buildingId, floorNumber: floorNum },
       {
         buildingId,
         floorNumber: floorNum,
         svgContent: mapData,
-        map: mapUrl || `/uploads/floor-maps/${buildingId}-${floorNum}.svg`,
         svgMapUrl: mapUrl,
         width: mapWidth,
         height: mapHeight
       },
-      { upsert: true, new: true }
+      { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
     );
 
     return res.json({
@@ -576,10 +645,14 @@ router.put('/api/building/deactivate/:id', whoami, async (req, res) => {
   }
 });
 
-router.post('/api/building/evacuated',async(req,res)=>{
+// Anonymous on purpose: the person evacuating a burning building does not have
+// an account. Throttled per IP instead of authenticated.
+router.post('/api/building/evacuated', emergencyActionLimiter, async(req,res)=>{
   const {buildingId} =req.body;
-  // console.log(req.body)
   try{
+    if(!buildingId || !mongoose.Types.ObjectId.isValid(buildingId)){
+      return res.send({Success:false,Message:"Invalid building"});
+    }
     const building = await BUILDINGS.findById(buildingId)
     if(!building) return res.send({Success:false,Message:"Invalid building"});
 
@@ -599,21 +672,29 @@ router.post('/api/building/evacuated',async(req,res)=>{
   }
 })
 
-router.post('/api/building/emergencyCall',async(req,res)=>{
+// Anonymous on purpose, same reasoning as /evacuated above.
+router.post('/api/building/emergencyCall', emergencyActionLimiter, async(req,res)=>{
   const {buildingID} = req.body;
   try{
+    if(!buildingID || !mongoose.Types.ObjectId.isValid(buildingID)){
+      return res.send({Success:false,Message:"Invalid building."});
+    }
+
     const building = await BUILDINGS.findById(buildingID)
-    if(!building) return;
+    if(!building) return res.send({Success:false,Message:"Invalid building."});
+
     await LOGS.create({
       logType:'system',
       logMessage:"+1 user called ambulance",
-      buildingID:buildingID,
+      buildingID:building._id,
       isEmergency:true
     })
-    await EMERGENCIES.findOneAndUpdate({buildingID:buildingID,isFinished:false},{$inc:{calledEmergency:1}},{new:true})
-    return;
-  }catch{
-    console.error("Error occured while trying to call ambulance.")
+    await EMERGENCIES.findOneAndUpdate({buildingID:building._id,isFinished:false},{$inc:{calledEmergency:1}},{new:true})
+
+    return res.send({Success:true,Message:"Recorded."})
+  }catch(err){
+    console.error("Error occured while trying to call ambulance.", err)
+    return res.send({Success:false,Message:"Server error."})
   }
 })
 

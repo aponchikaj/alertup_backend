@@ -3,6 +3,33 @@ import path from 'path';
 import { randomBytes } from 'crypto';
 
 /**
+ * Reduce a caller-supplied name to a single safe path segment.
+ *
+ * Strips any directory component and every character that could escape the
+ * upload directory or alter the extension. Returns '' when nothing usable is
+ * left, so callers fall back to a generated name.
+ */
+export const sanitizeBaseName = (name) => {
+  if (typeof name !== 'string') return '';
+  return path.basename(name).replace(/[^a-zA-Z0-9._-]/g, '').replace(/^\.+/, '').slice(0, 100);
+};
+
+/**
+ * Escape text before interpolating it into SVG/XML.
+ *
+ * Generated SVGs are written under uploads/ and served from the API origin as
+ * image/svg+xml, so an unescaped value carrying `</text><script>…` would be a
+ * stored XSS hosted on the API domain.
+ */
+export const escapeXml = (value) =>
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+
+/**
  * Convert image to SVG with proper file saving
  * @param {string} imagePath - Path to the uploaded image
  * @param {Object} options - Conversion options
@@ -24,8 +51,14 @@ export const convertImageToSVG = async (imagePath, options = {}) => {
       fs.mkdirSync(uploadDir, { recursive: true });
     }
 
-    // Generate unique filename if not provided
-    const baseFilename = filename || `converted-${randomBytes(8).toString('hex')}-${Date.now()}`;
+    // Generate unique filename if not provided.
+    //
+    // `filename` is derived from the client-supplied multipart originalname, so
+    // it is run through path.basename and stripped of anything but safe
+    // characters. Passing it to path.join unsanitized let a file named
+    // "../../server.js.png" write its .svg outside the upload directory.
+    const requestedName = filename ? sanitizeBaseName(filename) : '';
+    const baseFilename = requestedName || `converted-${randomBytes(8).toString('hex')}-${Date.now()}`;
     const svgFilename = `${baseFilename}.svg`;
     const svgPath = path.join(uploadDir, svgFilename);
 
@@ -48,8 +81,19 @@ export const convertImageToSVG = async (imagePath, options = {}) => {
       // Could not determine image dimensions, using defaults
     }
 
-    // Create SVG wrapper with embedded image
-    const imageUrl = `${baseUrl}/uploads/images/${imageFilename}`;
+    // The image is embedded as a data URI rather than linked. The caller
+    // deletes the uploaded source file as soon as this returns, so an
+    // `/uploads/images/...` reference always resolved to a missing file and
+    // every converted SVG rendered as an empty rectangle.
+    const mimeByExt = {
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+    };
+    const mimeType = mimeByExt[imageExt.toLowerCase()] || 'image/png';
+    const imageUrl = `data:${mimeType};base64,${fs.readFileSync(imagePath).toString('base64')}`;
     const svgContent = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" 
      xmlns:xlink="http://www.w3.org/1999/xlink"
@@ -88,9 +132,8 @@ export const convertImageToSVG = async (imagePath, options = {}) => {
         <dc:description>Floor map converted from ${imageExt} for AlertUp emergency routing</dc:description>
         <dc:date>${new Date().toISOString()}</dc:date>
         <dc:format>image/svg+xml</dc:format>
-        <dc:source>${imageFilename}</dc:source>
+        <dc:source>${escapeXml(imageFilename)}</dc:source>
         <dc:dimensions>${width}x${height}</dc:dimensions>
-        <dc:imageUrl>${imageUrl}</dc:imageUrl>
       </rdf:Description>
     </rdf:RDF>
   </metadata>
@@ -162,10 +205,16 @@ export const createBasicSVG = async (options = {}) => {
       fs.mkdirSync(uploadDir, { recursive: true });
     }
 
-    // Generate unique filename
-    const baseFilename = filename || `floor-map-${randomBytes(8).toString('hex')}-${Date.now()}`;
+    // Generate unique filename (sanitized — see convertImageToSVG).
+    const requestedName = filename ? sanitizeBaseName(filename) : '';
+    const baseFilename = requestedName || `floor-map-${randomBytes(8).toString('hex')}-${Date.now()}`;
     const svgFilename = `${baseFilename}.svg`;
     const svgPath = path.join(uploadDir, svgFilename);
+
+    // These come from the request body and land in a file served as
+    // image/svg+xml from the API origin, so they must be XML-escaped.
+    const safeBuildingName = escapeXml(buildingName);
+    const safeTitle = escapeXml(title);
 
     // Create basic SVG structure
     const svgContent = `
@@ -179,13 +228,13 @@ export const createBasicSVG = async (options = {}) => {
   <!-- Building Title -->
   <text x="${width/2}" y="40" text-anchor="middle" font-family="Arial, sans-serif" 
         font-size="24" font-weight="bold" fill="#212529">
-    ${buildingName}
+    ${safeBuildingName}
   </text>
-  
+
   <!-- Floor Title -->
-  <text x="${width/2}" y="70" text-anchor="middle" font-family="Arial, sans-serif" 
+  <text x="${width/2}" y="70" text-anchor="middle" font-family="Arial, sans-serif"
         font-size="18" fill="#6c757d">
-    ${title}
+    ${safeTitle}
   </text>
   
   <!-- Grid lines for reference -->
@@ -215,8 +264,8 @@ export const createBasicSVG = async (options = {}) => {
     <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
              xmlns:dc="http://purl.org/dc/elements/1.1/">
       <rdf:Description about="">
-        <dc:title>${title}</dc:title>
-        <dc:description>Generated floor map for ${buildingName}</dc:description>
+        <dc:title>${safeTitle}</dc:title>
+        <dc:description>Generated floor map for ${safeBuildingName}</dc:description>
         <dc:date>${new Date().toISOString()}</dc:date>
         <dc:format>image/svg+xml</dc:format>
         <dc:dimensions>${width}x${height}</dc:dimensions>

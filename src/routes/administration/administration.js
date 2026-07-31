@@ -1,4 +1,5 @@
 import express from 'express'
+import mongoose from 'mongoose'
 import LOGS from '../../models/logs.model.js'
 import BUILDINGS from '../../models/building.model.js'
 import whoami from '../../middlewares/whoami.js'
@@ -8,14 +9,25 @@ const router = express.Router()
 
 router.post('/api/administration/emergency',whoami,async(req,res)=>{
     const {buildingID} =req.body
-    if(!buildingID) return res.send({Success:false,Message:"Invalid building ID."})
+    if(!buildingID || !mongoose.Types.ObjectId.isValid(buildingID)) return res.status(400).send({Success:false,Message:"Invalid building ID."})
     try{
         const building = await BUILDINGS.findById(buildingID)
-        if(!building) return res.send({Success:false,Message:"Invalid building."})
-        if(building.owner.toString() !== req.user._id.toString()) return res.send({Success:false,Message:"You can't access this function."})
+        if(!building) return res.status(404).send({Success:false,Message:"Invalid building."})
+        if(!building.owner || building.owner.toString() !== req.user._id.toString()) return res.status(403).send({Success:false,Message:"You can't access this function."})
 
-        const updated = await BUILDINGS.findOneAndUpdate({_id:buildingID},{emergencyMode:building.emergencyMode == false ? true : false},{new:true})
-        
+        // Flipped inside the database rather than read-then-written. Reading the
+        // current value and writing its negation in a separate round trip meant
+        // a double-tapped panic button (or two open tabs) had both requests read
+        // `false` and both write `true`, creating two open emergencies — and the
+        // close path below only ever finishes one, stranding the other and
+        // corrupting the logs feed and analytics.
+        const updated = await BUILDINGS.findOneAndUpdate(
+            {_id:buildingID, owner:req.user._id},
+            [{ $set: { emergencyMode: { $not: "$emergencyMode" } } }],
+            {new:true}
+        )
+        if(!updated) return res.status(404).send({Success:false,Message:"Invalid building."})
+
         await LOGS.create({
             logType:'emergency',
             logMessage:updated.emergencyMode == true ? "Emergency Mode has been activated." : "Emergency Mode has been deactivated.",
@@ -24,19 +36,26 @@ router.post('/api/administration/emergency',whoami,async(req,res)=>{
         })
 
         if(updated.emergencyMode == true){
-          await EMERGENCIES.create({
-            buildingID:building._id,
-          })
-        }else if(updated.emergencyMode == false){
-          await EMERGENCIES.findOneAndUpdate({buildingID:building._id,isFinished:false},{
+          // Upserted on the open-emergency key so a racing second activation
+          // reuses the existing record instead of opening a parallel one.
+          await EMERGENCIES.findOneAndUpdate(
+            {buildingID:building._id,isFinished:false},
+            {$setOnInsert:{buildingID:building._id}},
+            {upsert:true,new:true,setDefaultsOnInsert:true}
+          )
+        }else{
+          // updateMany, so any duplicates left behind by the previous race are
+          // closed rather than stranded forever.
+          await EMERGENCIES.updateMany({buildingID:building._id,isFinished:false},{
             isFinished:true,
             endedAt:new Date()
-          },{new:true})
+          })
         }
 
         return res.send({Success:true,Message:"Saved."})
-    }catch{
-        return res.send({Success:false,Message:"Server error."})
+    }catch(err){
+        console.error('Emergency toggle error:', err)
+        return res.status(500).send({Success:false,Message:"Server error."})
     }
 })
 
@@ -131,19 +150,26 @@ router.get('/api/administration/analytics/:buildingID',whoami,async(req,res)=>{
 
 router.get('/api/administration/analytics/:buildingID/:emergencyID',whoami,async(req,res)=>{
   const {buildingID,emergencyID} = req.params
-  if(!buildingID || !emergencyID) return res.send({Success:false,Message:"Invalid parameters."})
+  if(!buildingID || !emergencyID) return res.status(400).send({Success:false,Message:"Invalid parameters."})
+  if(!mongoose.Types.ObjectId.isValid(buildingID) || !mongoose.Types.ObjectId.isValid(emergencyID)){
+    return res.status(400).send({Success:false,Message:"Invalid parameters."})
+  }
   const {logType,dateFrom,dateTo} = req.query;
   try{
     const building = await BUILDINGS.findById(buildingID)
-    if(!building) return res.send({Success:false,Message:'Invalid building.'});
-    if(building.owner.toString() !== req.user._id.toString()) return res.send({Success:false,Message:"You can't access this."})
+    if(!building) return res.status(404).send({Success:false,Message:'Invalid building.'});
+    if(!building.owner || building.owner.toString() !== req.user._id.toString()) return res.status(403).send({Success:false,Message:"You can't access this."})
 
     const emergency = await EMERGENCIES.findOne({
       _id: emergencyID,
       buildingID,
       isFinished: true
     }).select('-buildingID')
-    // if(!emergency) return res.send({Success:false,Message:"Invalid emergency."});
+    // Restored: with this commented out, requesting analytics for an ongoing
+    // emergency (excluded by isFinished:true) dereferenced null on the next
+    // line, and the catch below never sent a response — so the request hung
+    // until the proxy timed out, holding the socket open.
+    if(!emergency) return res.status(404).send({Success:false,Message:"Invalid emergency."});
 
     const STARTED_DATE = dateFrom ? new Date(dateFrom) : emergency.startedAt;
     const FINISHED_DATE = dateTo ? new Date(dateTo) : emergency.endedAt;
@@ -169,8 +195,9 @@ router.get('/api/administration/analytics/:buildingID/:emergencyID',whoami,async
 
     return res.send({Success:true,Message:{logs:logs,emergency:emergency}})
   }catch(e){
-    console.log(e)
-    console.log("Error occured while getting emergency analytics.")
+    console.error("Error occured while getting emergency analytics.", e)
+    // The catch previously only logged, leaving the client waiting forever.
+    return res.status(500).send({Success:false,Message:"Server error."})
   }
 })
 

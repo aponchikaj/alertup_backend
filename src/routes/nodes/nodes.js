@@ -1,7 +1,6 @@
 import express from 'express';
 import Node from '../../models/node.model.js';
 import BUILDINGS from '../../models/building.model.js';
-import QRCodeModel from '../../models/qrcode.model.js';
 import { isValidObjectId } from 'mongoose';
 import ownerOnlyAuth from '../../middlewares/ownerOnlyAuth.js';
 import whoami from '../../middlewares/whoami.js';
@@ -34,12 +33,30 @@ const validateNodeData = (data) => {
 };
 
 /**
+ * Resolve a caller-supplied connections list to ids that actually exist in this
+ * building.
+ *
+ * Connections were previously stored verbatim, so a malformed id raised a
+ * CastError (reported as a 200 "Server error") and an id belonging to another
+ * building would have been walkable by the routing graph.
+ */
+const resolveConnections = async (connections, buildingId) => {
+  if (!Array.isArray(connections) || connections.length === 0) return [];
+
+  const candidates = connections.filter((id) => isValidObjectId(id));
+  if (candidates.length === 0) return [];
+
+  const found = await Node.find({ _id: { $in: candidates }, buildingId }).distinct('_id');
+  return found;
+};
+
+/**
  * Create a new node
  */
 router.post('/api/nodes', whoami, ownerOnlyAuth, async (req, res) => {
   try {
     const { buildingId, floorNumber, x, y, type, label, connections } = req.body;
-    
+
     // Validate required fields
     const validationErrors = validateNodeData(req.body);
     if (validationErrors.length > 0) {
@@ -49,7 +66,9 @@ router.post('/api/nodes', whoami, ownerOnlyAuth, async (req, res) => {
         errors: validationErrors
       });
     }
-    
+
+    const validConnections = await resolveConnections(connections, buildingId);
+
     // Create new node
     const newNode = new Node({
       buildingId,
@@ -58,11 +77,21 @@ router.post('/api/nodes', whoami, ownerOnlyAuth, async (req, res) => {
       y,
       type,
       label,
-      connections: connections || []
+      connections: validConnections
     });
-    
+
     await newNode.save();
-    
+
+    // Edges are undirected in the routing graph, so the reverse edge is written
+    // too. Storing only one direction left the graph asymmetric and made
+    // Dijkstra treat a corridor as passable one way only.
+    if (validConnections.length > 0) {
+      await Node.updateMany(
+        { _id: { $in: validConnections } },
+        { $addToSet: { connections: newNode._id } }
+      );
+    }
+
     res.json({
       success: true,
       message: 'Node created successfully',
@@ -70,7 +99,9 @@ router.post('/api/nodes', whoami, ownerOnlyAuth, async (req, res) => {
     });
   } catch (error) {
     console.error('Error creating node:', error);
-    res.json({
+    // Was res.json without a status, so a failed creation was reported as
+    // HTTP 200 with success:false.
+    res.status(500).json({
       success: false,
       message: 'Server error',
       error: error.message
@@ -179,18 +210,42 @@ router.put('/api/nodes/:nodeId', whoami, ownerOnlyAuth, async (req, res) => {
           message: 'Connections must be an array'
         });
       }
-      updateData.connections = connections;
+      updateData.connections = await resolveConnections(connections, node.buildingId);
     }
-    
+
     // Update timestamp
     updateData.updatedAt = new Date();
-    
+
     const updatedNode = await Node.findByIdAndUpdate(
       nodeId,
       updateData,
       { new: true }
     );
-    
+
+    // Mirror the edge change on the other side. Edits were one-directional, so
+    // removing a connection here left the reverse edge in place and the routing
+    // graph still treated the deleted corridor as walkable.
+    if (updateData.connections) {
+      const before = (node.connections || []).map((id) => id.toString());
+      const after = updateData.connections.map((id) => id.toString());
+
+      const added = after.filter((id) => !before.includes(id));
+      const removed = before.filter((id) => !after.includes(id));
+
+      if (added.length > 0) {
+        await Node.updateMany(
+          { _id: { $in: added } },
+          { $addToSet: { connections: updatedNode._id } }
+        );
+      }
+      if (removed.length > 0) {
+        await Node.updateMany(
+          { _id: { $in: removed } },
+          { $pull: { connections: updatedNode._id } }
+        );
+      }
+    }
+
     res.status(200).json({
       success: true,
       message: 'Node updated successfully',
@@ -231,25 +286,22 @@ router.delete('/api/nodes/:nodeId', whoami, ownerOnlyAuth, async (req, res) => {
     
     // Authorization is handled by ownerOnlyAuth middleware (building owners only)
     
-    // 1. Delete all QR codes for this node
-    const qrDeleteResult = await QRCodeModel.deleteMany({ nodeId: nodeId });
-
-    // 2. Remove connections from other nodes
+    // Remove connections from other nodes, so no edge points at a missing node.
     await Node.updateMany(
       { connections: nodeId },
       { $pull: { connections: nodeId } }
     );
-    
-    // 3. Delete the node
+
     await Node.findByIdAndDelete(nodeId);
-    
+
+    // QR codes need no cleanup: the code is derived from the node id rather
+    // than stored, so deleting the node invalidates it automatically.
     res.status(200).json({
       success: true,
-      message: 'Node and related QR codes deleted successfully',
+      message: 'Node deleted successfully',
       data: {
         deletedNodeId: nodeId,
-        buildingId: node.buildingId,
-        deletedQRCodes: qrDeleteResult.deletedCount
+        buildingId: node.buildingId
       }
     });
   } catch (error) {

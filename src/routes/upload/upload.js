@@ -4,10 +4,57 @@ import path from 'path';
 import fs from 'fs';
 import { randomBytes } from 'crypto';
 import ownerAuth from '../../middlewares/ownerAuth.js';
+import whoami from '../../middlewares/whoami.js';
+import safeFilename from '../../middlewares/safeFilename.js';
 import { convertImageToSVG, createBasicSVG, processMultipleImages } from '../../services/svgConverter.js';
 import { uploadToCloudinary, deleteFromCloudinary } from '../../services/cloudinaryService.js';
 
 const router = express.Router();
+
+const SVG_DIR = path.join(process.cwd(), 'uploads', 'svg');
+
+const DEFAULT_MAP_WIDTH = 1000;
+const DEFAULT_MAP_HEIGHT = 800;
+
+/**
+ * Read the intrinsic size of an SVG document.
+ * Handles `width="1200"`, `width="1200px"`, and viewBox-only documents.
+ *
+ * @param {string} svgContent
+ * @returns {{width: number, height: number}}
+ */
+const parseSvgDimensions = (svgContent) => {
+  const svgTag = svgContent.slice(svgContent.indexOf('<svg'), svgContent.indexOf('>', svgContent.indexOf('<svg')) + 1);
+
+  const numeric = (value) => {
+    const parsed = parseFloat(value);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : null;
+  };
+
+  const widthAttr = svgTag.match(/\bwidth\s*=\s*["']([^"']+)["']/i);
+  const heightAttr = svgTag.match(/\bheight\s*=\s*["']([^"']+)["']/i);
+
+  let width = widthAttr ? numeric(widthAttr[1]) : null;
+  let height = heightAttr ? numeric(heightAttr[1]) : null;
+
+  // Percentage widths (e.g. width="100%") parse to a number but are meaningless
+  // here, so fall through to the viewBox in that case.
+  if (widthAttr && /%/.test(widthAttr[1])) width = null;
+  if (heightAttr && /%/.test(heightAttr[1])) height = null;
+
+  if (!width || !height) {
+    const viewBox = svgTag.match(/\bviewBox\s*=\s*["']\s*([-\d.]+)[\s,]+([-\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)\s*["']/i);
+    if (viewBox) {
+      width = width || numeric(viewBox[3]);
+      height = height || numeric(viewBox[4]);
+    }
+  }
+
+  return {
+    width: width || DEFAULT_MAP_WIDTH,
+    height: height || DEFAULT_MAP_HEIGHT,
+  };
+};
 
 // Configure multer for SVG uploads
 const svgStorage = multer.diskStorage({
@@ -78,7 +125,11 @@ const imageUpload = multer({
  * POST /api/upload/svg
  * Upload and process SVG file for building floor
  */
-router.post('/svg', svgUpload.single('svg'), async (req, res) => {
+// `whoami` runs before multer on every upload route so an unauthenticated
+// request is rejected before any bytes are written to disk or sent to
+// Cloudinary. These endpoints are not building-scoped (no buildingId in the
+// request), so ownerAuth does not apply — authentication is the correct gate.
+router.post('/svg', whoami, svgUpload.single('svg'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -102,7 +153,17 @@ router.post('/svg', svgUpload.single('svg'), async (req, res) => {
       });
     }
 
-    // ... validation code ...
+    if (!svgContent.includes('<svg')) {
+      return res.status(400).json({
+        success: false,
+        message: 'File does not contain valid SVG markup'
+      });
+    }
+
+    // Derive the drawing dimensions. Prefer explicit width/height attributes,
+    // fall back to the viewBox, then to the 1000x800 default used elsewhere in
+    // the app (see routes/routing/route.js and building floor-map handling).
+    const { width, height } = parseSvgDimensions(svgContent);
 
     // Upload to Cloudinary
     let cloudinaryUrl = null;
@@ -156,7 +217,7 @@ router.post('/svg', svgUpload.single('svg'), async (req, res) => {
  * POST /api/upload/convert
  * Convert image to SVG with proper file saving
  */
-router.post('/convert', imageUpload.single('image'), async (req, res) => {
+router.post('/convert', whoami, imageUpload.single('image'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -219,7 +280,7 @@ router.post('/convert', imageUpload.single('image'), async (req, res) => {
  * POST /api/upload/convert-multiple
  * Convert multiple images to SVG
  */
-router.post('/convert-multiple', imageUpload.array('images', 10), async (req, res) => {
+router.post('/convert-multiple', whoami, imageUpload.array('images', 10), async (req, res) => {
   try {
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({
@@ -277,7 +338,7 @@ router.post('/convert-multiple', imageUpload.array('images', 10), async (req, re
  * POST /api/upload/create-basic-svg
  * Create a basic SVG from scratch
  */
-router.post('/create-basic-svg', async (req, res) => {
+router.post('/create-basic-svg', whoami, async (req, res) => {
   try {
     const { width, height, title, buildingName } = req.body;
 
@@ -324,18 +385,15 @@ router.post('/create-basic-svg', async (req, res) => {
  * GET /api/uploads/svg/:filename
  * Serve uploaded SVG files
  */
-router.get('/svg/:filename', (req, res) => {
-  const filename = req.params.filename;
-  const filePath = path.join(process.cwd(), 'uploads', 'svg', filename);
-
-  if (!fs.existsSync(filePath)) {
+router.get('/svg/:filename', safeFilename(SVG_DIR), (req, res) => {
+  if (!fs.existsSync(req.safePath)) {
     return res.status(404).json({
       success: false,
       message: 'File not found'
     });
   }
 
-  res.sendFile(filePath);
+  res.sendFile(req.safePath);
 });
 
 export default router;

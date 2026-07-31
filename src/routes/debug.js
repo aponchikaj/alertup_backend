@@ -1,8 +1,12 @@
 import express from 'express';
 const router = express.Router();
 
-// Debug endpoints are only enabled in non-production for safety
-if (process.env.NODE_ENV !== 'production') {
+// Debug endpoints require an explicit opt-in rather than merely "not
+// production". NODE_ENV is unset by default on Render, and that same condition
+// also re-enables the permissive *.vercel.app CORS branch in server.js — so a
+// deploy that forgot to set it would let any page on a free Vercel account read
+// this response with credentials attached.
+if (process.env.ENABLE_DEBUG_ROUTES === 'true' && process.env.NODE_ENV !== 'production') {
   // Simple debug endpoint to inspect headers and cookies from client
   router.get('/api/debug', (req, res) => {
     try {
@@ -10,7 +14,10 @@ if (process.env.NODE_ENV !== 'production') {
         origin: req.headers.origin || null,
         forwarded_proto: req.headers['x-forwarded-proto'] || null,
         secure: req.secure || false,
-        cookies: req.cookies || {},
+        // Names only. Echoing the values handed back the httpOnly userToken and
+        // adminToken in a readable JSON body, which defeats the entire point of
+        // marking them httpOnly.
+        cookieNames: Object.keys(req.cookies || {}),
         headers: {
           host: req.headers.host,
           referer: req.headers.referer || null,

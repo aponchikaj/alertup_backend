@@ -10,6 +10,14 @@ const storage = new CloudinaryStorage({
   },
 });
 
-const upload = multer({ storage });
+// Bounded so an unbounded multipart body cannot be streamed straight to
+// Cloudinary on every request.
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB
+    files: 20,
+  },
+});
 
 export default upload;

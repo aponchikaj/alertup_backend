@@ -1,17 +1,21 @@
 import express from 'express';
-import QRCode from '../../models/qrcode.model.js';
 import Floor from '../../models/floor.model.js';
-import { findShortestRoute } from '../../services/routingService.js';
+import BUILDINGS from '../../models/building.model.js';
 import { isValidObjectId } from 'mongoose';
-import ownerAuth from '../../middlewares/ownerAuth.js';
+import { publicReadLimiter } from '../../services/rateLimiter.js';
 
 const router = express.Router();
+
+// Note: this router used to also expose GET /api/route/:qrId, which resolved a
+// QRCode document by code. Nothing in the application ever created those
+// documents, so that endpoint could only ever 404. Scanning is handled by
+// /api/qr/scan/route/:qrId, which parses the self-describing qr_ id instead.
 
 /**
  * GET /api/route/building/:buildingId/floor/:floorNumber
  * Retrieves floor map data for a specific building and floor
  */
-router.get('/building/:buildingId/floor/:floorNumber', async (req, res) => {
+router.get('/building/:buildingId/floor/:floorNumber', publicReadLimiter, async (req, res) => {
   try {
     const { buildingId, floorNumber } = req.params;
 
@@ -23,11 +27,25 @@ router.get('/building/:buildingId/floor/:floorNumber', async (req, res) => {
       });
     }
 
+    // Floor 0 is a legitimate ground floor — node creation accepts it, so
+    // rejecting it here made ground-floor maps unreachable.
     const floor = parseInt(floorNumber, 10);
-    if (isNaN(floor) || floor < 1) {
+    if (isNaN(floor) || floor < 0) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid floor number. Must be a positive integer.',
+        message: 'Invalid floor number. Must be a non-negative integer.',
+      });
+    }
+
+    // The building must exist before anything is written for it. This endpoint
+    // is public and used to persist a new Floor document for *any* well-formed
+    // ObjectId and floor number, so a script walking random ids could fill the
+    // collection with orphaned documents.
+    const buildingExists = await BUILDINGS.exists({ _id: buildingId });
+    if (!buildingExists) {
+      return res.status(404).json({
+        success: false,
+        message: 'Building not found',
       });
     }
 
@@ -83,16 +101,26 @@ router.get('/building/:buildingId/floor/:floorNumber', async (req, res) => {
   </g>
 </svg>`;
 
-      floorData = new Floor({
-        buildingId,
-        floorNumber: floor,
-        svgContent: defaultSVG,
-        svgMapUrl: `/uploads/floor-maps/${buildingId}-${floor}.svg`,
-        width: 1000,
-        height: 800
-      });
-      
-      await floorData.save();
+      // Upserted rather than saved: two concurrent first-requests for the same
+      // floor both reached the create path and one lost to the unique index,
+      // returning a 500. $setOnInsert also means an existing floor's map is
+      // never overwritten with the placeholder.
+      floorData = await Floor.findOneAndUpdate(
+        { buildingId, floorNumber: floor },
+        {
+          $setOnInsert: {
+            buildingId,
+            floorNumber: floor,
+            svgContent: defaultSVG,
+            // Points at the inline svgContent above; there is no file behind
+            // this path, and nothing in the app writes one.
+            svgMapUrl: `/api/route/building/${buildingId}/floor/${floor}`,
+            width: 1000,
+            height: 800,
+          },
+        },
+        { new: true, upsert: true, setDefaultsOnInsert: true },
+      );
     }
 
     // Validate SVG content
@@ -122,126 +150,5 @@ router.get('/building/:buildingId/floor/:floorNumber', async (req, res) => {
     });
   }
 });
-
-/**
- * Validate QR ID format
- * @param {string} qrId - QR code identifier
- * @returns {boolean} True if valid
- */
-const isValidQRId = (qrId) => {
-  return typeof qrId === 'string' && qrId.length > 0 && qrId.length < 500;
-};
-
-/**
- * GET /api/route/:qrId
- * Retrieves the shortest emergency exit route for a scanned QR code
- */
-router.get('/:qrId', async (req, res) => {
-  try {
-    const { qrId } = req.params;
-
-    // Validate input
-    if (!isValidQRId(qrId)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid QR code format',
-      });
-    }
-
-    // Find QR code record
-    const qrCode = await QRCode.findOne({
-      code: qrId,
-      isActive: true,
-    })
-      .populate('nodeId')
-      .populate('buildingId');
-
-    if (!qrCode) {
-      return res.status(404).json({
-        success: false,
-        message: 'QR code not found or inactive',
-      });
-    }
-
-    // Validate QR code data
-    if (!qrCode.nodeId) {
-      return res.status(500).json({
-        success: false,
-        message: 'QR code has invalid node reference',
-      });
-    }
-
-    if (!qrCode.buildingId) {
-      return res.status(500).json({
-        success: false,
-        message: 'QR code has invalid building reference',
-      });
-    }
-
-    // Get floor information for SVG details
-    const floor = await Floor.findOne({
-      buildingId: qrCode.buildingId._id,
-      floorNumber: qrCode.floorNumber,
-    });
-
-    // Find shortest route to exit
-    let route;
-    try {
-      route = await findShortestRoute(qrCode.nodeId._id);
-    } catch (routeError) {
-      if (routeError instanceof Error) {
-        return res.status(400).json({
-          success: false,
-          message: routeError.message,
-        });
-      }
-      throw routeError;
-    }
-
-    // Ensure route is valid
-    if (!Array.isArray(route) || route.length === 0) {
-      return res.status(500).json({
-        success: false,
-        message: 'Invalid route returned from algorithm',
-      });
-    }
-
-    // Validate start point coordinates
-    if (
-      typeof qrCode.nodeId.x !== 'number' ||
-      typeof qrCode.nodeId.y !== 'number'
-    ) {
-      return res.status(500).json({
-        success: false,
-        message: 'Invalid start point coordinates',
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      floor: qrCode.floorNumber,
-      building: qrCode.buildingId.name || 'Unknown Building',
-      svgMapUrl: floor?.svgMapUrl || null,
-      svgContent: floor?.svgContent || null,
-      svgDimensions: {
-        width: floor?.width || 1000,
-        height: floor?.height || 800,
-      },
-      route: route,
-      startPoint: {
-        x: qrCode.nodeId.x,
-        y: qrCode.nodeId.y,
-      },
-    });
-  } catch (error) {
-    console.error('Error retrieving route:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to calculate route',
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
-  }
-});
-
 
 export default router;

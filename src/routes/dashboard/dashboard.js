@@ -26,7 +26,36 @@ router.get('/api/dashboard', whoami, async (req, res) => {
     ]);
 
     const totalScans = buildingScans[0]?.totalScans || 0;
-    // console.log(USER.scanned)
+
+    // Most recent scans, newest first, for the dashboard table.
+    const scans = USER.scanned || [];
+    const recentScans = [...scans]
+      .slice(-8)
+      .reverse()
+      .map((s) => ({
+        buildingName: s.buildingName || null,
+        scannedAt: s.scannedAt || null,
+        buildingID: s.buildingID || null,
+      }));
+
+    // Scans-per-day for the last 14 days (UTC buckets) for the activity chart.
+    const DAYS = 14;
+    const today = new Date();
+    const buckets = new Map();
+    for (let i = DAYS - 1; i >= 0; i--) {
+      const d = new Date(today);
+      d.setUTCDate(d.getUTCDate() - i);
+      buckets.set(d.toISOString().slice(0, 10), 0);
+    }
+    for (const s of scans) {
+      if (!s.scannedAt) continue;
+      const t = new Date(s.scannedAt);
+      if (isNaN(t.getTime())) continue;
+      const key = t.toISOString().slice(0, 10);
+      if (buckets.has(key)) buckets.set(key, buckets.get(key) + 1);
+    }
+    const scanActivity = [...buckets.entries()].map(([date, count]) => ({ date, count }));
+
     // Build dashboard object
     const dashboardData = {
       MyBuildings: USER.Buildings.length,
@@ -35,6 +64,8 @@ router.get('/api/dashboard', whoami, async (req, res) => {
       lastScanned: USER.scanned.length > 0 ? USER.scanned[USER.scanned.length - 1].buildingName : null,
       premiumStatus: USER.premium.hasPremium ? USER.premium.premiumType : "Free",
       premiumExpires: USER.premium.to || null,
+      recentScans,
+      scanActivity,
     };
 
     return res.send({ Success: true, Message: dashboardData });

@@ -1,189 +1,138 @@
 import express from 'express';
+import jwt from 'jsonwebtoken';
 import Node from '../../models/node.model.js';
 import BUILDINGS from '../../models/building.model.js';
 import USERS from '../../models/user.model.js';
 import { isValidObjectId } from 'mongoose';
 import LOGS from '../../models/logs.model.js';
 import EMERGENCIES from '../../models/emergencies.model.js';
+import { findShortestRoute, validateRoute, routeDistance } from '../../services/routingService.js';
+import { publicReadLimiter } from '../../services/rateLimiter.js';
 
 const router = express.Router();
 
+// qr_<buildingId>_<floorNumber>_<nodeId>
+const QR_PATTERN = /^qr_(.+)_(\d+)_(.+)$/;
+
 /**
- * GET /route/:qrId
- * Handle QR code scan requests from frontend
+ * Resolve the floor's map entry from the building's embedded `maps` array.
+ * Floor is stored as a string in some records and a number in others.
  */
-router.get('/route/:qrId', async (req, res) => {
+const findFloorMap = (building, floor) => {
+  const maps = building.maps || [];
+  return (
+    maps.find((map) => map.floor === String(floor)) ||
+    maps.find((map) => parseInt(map.floor, 10) === floor) ||
+    maps[0] ||
+    null
+  );
+};
+
+const buildFloorMapData = (floorMap) => {
+  if (!floorMap) return null;
+
+  const imageUrl = (() => {
+    const map = floorMap.map;
+    if (!map) return null;
+    if (map.startsWith('http')) return map;
+
+    const base = process.env.API_BASE_URL || 'https://www.alertup.world';
+    if (map.startsWith('/uploads')) return `${base}${map}`;
+    if (map.includes('uploads')) return `${base}/uploads${map.split('uploads')[1]}`;
+    return null;
+  })();
+
+  return {
+    floor: floorMap.floor,
+    map: floorMap.map,
+    qrCode: floorMap.qrCode,
+    imageUrl,
+    svgContent: floorMap.map?.includes('<svg') ? floorMap.map : null,
+    createdAt: floorMap.createdAt,
+  };
+};
+
+/**
+ * GET /route/:qrId  (mounted at /api/qr/scan)
+ *
+ * The single entry point for a scanned QR code. The id is self-describing, so
+ * no database record needs to exist for a printed code to work — which matters,
+ * because nothing in the app ever created the QRCode documents the old
+ * /api/route/:qrId endpoint looked for.
+ */
+router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
   try {
     const { qrId } = req.params;
-    
-    // Parse QR ID format: qr_${buildingId}_${floorNumber}_${nodeId}
-    const qrPattern = /^qr_(.+)_(\d+)_(.+)$/;
-    const match = qrId.match(qrPattern);
-    
+
+    const match = qrId.match(QR_PATTERN);
     if (!match) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid QR code format',
-        qrId
-      });
+      return res.status(400).json({ success: false, message: 'Invalid QR code format', qrId });
     }
-    
+
     const [, buildingId, floorNumber, nodeId] = match;
-    
-    // Validate IDs
+
     if (!isValidObjectId(buildingId) || !isValidObjectId(nodeId)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid building or node ID format',
-        qrId
-      });
+      return res.status(400).json({ success: false, message: 'Invalid building or node ID format', qrId });
     }
-    
+
     const floor = parseInt(floorNumber, 10);
-    
-    // Find the node
-    const node = await Node.findOne({
-      _id: nodeId,
-      buildingId: buildingId,
-      floorNumber: floor
+
+    const [node, building] = await Promise.all([
+      Node.findOne({ _id: nodeId, buildingId, floorNumber: floor }).lean(),
+      BUILDINGS.findById(buildingId).lean(),
+    ]);
+
+    if (!node) return res.status(404).json({ success: false, message: 'Node not found', qrId });
+    if (!building) return res.status(404).json({ success: false, message: 'Building not found', qrId });
+
+    // Nodes on the scanned floor, for drawing the map.
+    const floorNodes = await Node.find({ buildingId, floorNumber: floor }).sort({ x: 1, y: 1 }).lean();
+
+    const describe = (n) => ({
+      id: String(n._id),
+      x: n.x,
+      y: n.y,
+      type: n.type,
+      label: n.label || `${n.type} (${n.x}, ${n.y})`,
+      floor: n.floorNumber,
+      connections: (n.connections || []).map(String),
     });
-    
-    if (!node) {
-      return res.status(404).json({
-        success: false,
-        message: 'Node not found',
-        qrId
-      });
+
+    // Shortest route to the nearest exit, across floors where necessary.
+    let route = [];
+    let routeError = null;
+    try {
+      route = await findShortestRoute(node._id);
+    } catch (err) {
+      routeError = err.message;
     }
-    
-    // Find the building
-    const building = await BUILDINGS.findById(buildingId);
-    if (!building) {
-      return res.status(404).json({
-        success: false,
-        message: 'Building not found',
-        qrId
-      });
-    }
-    
-    // Get all nodes for this floor with full connection data
-    const floorNodes = await Node.find({
-      buildingId: buildingId,
-      floorNumber: floor
-    }).sort({ x: 1, y: 1 });
-    
-    // Build complete graph for pathfinding
-    const nodeGraph = {};
-    floorNodes.forEach(node => {
-      nodeGraph[node._id.toString()] = {
-        id: node._id.toString(),
-        x: node.x,
-        y: node.y,
-        type: node.type,
-        label: node.label || `${node.type} (${node.x}, ${node.y})`,
-        connections: node.connections || []
-      };
-    });
-    
-    // Find nearest exit using BFS
-    const findNearestExit = (startNodeId, graph) => {
-      const queue = [{ nodeId: startNodeId, path: [startNodeId] }];
-      const visited = new Set([startNodeId]);
-      
-      while (queue.length > 0) {
-        const { nodeId, path } = queue.shift();
-        const node = graph[nodeId];
-        
-        if (node.type === 'exit') {
-          return {
-            found: true,
-            exitNodeId: nodeId,
-            path: path,
-            distance: path.length - 1
-          };
-        }
-        
-        for (const connectedId of node.connections) {
-          if (!visited.has(connectedId) && graph[connectedId]) {
-            visited.add(connectedId);
-            queue.push({
-              nodeId: connectedId,
-              path: [...path, connectedId]
-            });
+
+    const found = route.length > 0;
+    const exitNode = found ? route[route.length - 1] : null;
+    const transitions = found ? validateRoute(route) : { floorChanges: [], hasStairs: false };
+
+    const emergencyRoute = {
+      found,
+      message: routeError,
+      exitNodeId: exitNode ? String(exitNode._id) : null,
+      // Node ids in walking order — the map layer resolves these to coordinates.
+      path: route.map((point) => String(point._id)),
+      // Hop count, kept for the existing "N steps" label in the UI.
+      distance: found ? route.length - 1 : 0,
+      // Physical walking distance in SVG units, ignoring floor changes.
+      walkingDistance: routeDistance(route),
+      exitNode: exitNode
+        ? {
+            id: String(exitNode._id),
+            x: exitNode.x,
+            y: exitNode.y,
+            type: exitNode.type,
+            label: exitNode.label || 'Emergency Exit',
+            floor: exitNode.floor,
           }
-        }
-      }
-      
-      return { found: false, exitNodeId: null, path: [], distance: 0 };
+        : null,
     };
-    
-    // Calculate path to nearest exit
-    const pathResult = findNearestExit(nodeId, nodeGraph);
-    
-    // Get floor map data if available
-    // Try multiple matching strategies for floor
-    let floorMap = building.maps?.find(map => map.floor === floor.toString());
-    
-    // If not found with string, try with numeric floor
-    if (!floorMap) {
-      floorMap = building.maps?.find(map => parseInt(map.floor) === floor);
-    }
-    
-    // If still not found, try to find the first map (fallback)
-    if (!floorMap && building.maps && building.maps.length > 0) {
-      floorMap = building.maps[0];
-    }
-    
-    if (floorMap) {
-      // Show the converted URL
-      const imageUrl = (() => {
-        if (floorMap.map?.startsWith('http')) {
-          return floorMap.map;
-        } else if (floorMap.map?.startsWith('/uploads')) {
-          return process.env.API_BASE_URL ? `${process.env.API_BASE_URL}${floorMap.map}` : `https://www.alertup.world${floorMap.map}`;
-        }
-        return null;
-      })();
-    }
-    
-    // Construct floor map data - handle both uploaded images and SVG content
-    const floorMapData = floorMap ? {
-      floor: floorMap.floor,
-      map: floorMap.map,
-      qrCode: floorMap.qrCode,
-      // Handle different image path formats
-      imageUrl: (() => {
-        if (floorMap.map?.startsWith('http')) {
-          return floorMap.map; // Already a full URL
-        } else if (floorMap.map?.startsWith('/uploads')) {
-          return `${process.env.API_BASE_URL || 'https://www.alertup.world'}${floorMap.map}`; // Relative path
-        } else if (floorMap.map?.includes('uploads')) {
-          // Convert local path to URL
-          const relativePath = floorMap.map.split('uploads')[1];
-          return `${process.env.API_BASE_URL || 'https://www.alertup.world'}/uploads${relativePath}`;
-        }
-        return null;
-      })(),
-      svgContent: floorMap.map?.includes('<svg') ? floorMap.map : null,
-      createdAt: floorMap.createdAt
-    } : null;
-    
-    // Find connections for this node (for backward compatibility)
-    const connectedNodes = [];
-    for (const connectionId of node.connections) {
-      const connectedNode = await Node.findById(connectionId);
-      if (connectedNode && connectedNode.floorNumber === floor) {
-        connectedNodes.push({
-          id: connectedNode._id,
-          x: connectedNode.x,
-          y: connectedNode.y,
-          type: connectedNode.type,
-          label: connectedNode.label || `${connectedNode.type} (${connectedNode.x}, ${connectedNode.y})`
-        });
-      }
-    }
-    
-    // Build route data with pathfinding and map info
+
     const routeData = {
       qrId,
       buildingId,
@@ -193,79 +142,80 @@ router.get('/route/:qrId', async (req, res) => {
       nodeType: node.type,
       nodeLabel: node.label || `${node.type} (${node.x}, ${node.y})`,
       nodePosition: { x: node.x, y: node.y },
-      connectedNodes,
-      allFloorNodes: floorNodes.map(n => ({
-        id: n._id,
-        x: n.x,
-        y: n.y,
-        type: n.type,
-        label: n.label || `${n.type} (${n.x}, ${n.y})`,
-        connections: n.connections || []
+      connectedNodes: floorNodes
+        .filter((n) => (node.connections || []).some((c) => String(c) === String(n._id)))
+        .map(describe),
+      allFloorNodes: floorNodes.map(describe),
+      // Full node objects for every step of the route, including steps on other
+      // floors. `allFloorNodes` only covers the scanned floor, so a multi-floor
+      // route cannot be drawn from it alone.
+      routeNodes: route.map((point) => ({
+        id: String(point._id),
+        x: point.x,
+        y: point.y,
+        type: point.type,
+        label: point.label || point.type,
+        floor: point.floor,
       })),
-      // Pathfinding data
-      emergencyRoute: {
-        found: pathResult.found,
-        exitNodeId: pathResult.exitNodeId,
-        path: pathResult.path,
-        distance: pathResult.distance,
-        exitNode: pathResult.found ? nodeGraph[pathResult.exitNodeId] : null
-      },
-      // Floor map data
-      floorMap: floorMapData,
+      floorTransitions: transitions.floorChanges,
+      requiresFloorChange: transitions.hasStairs,
+      emergencyRoute,
+      floorMap: buildFloorMapData(findFloorMap(building, floor)),
       timestamp: new Date().toISOString(),
-      scanCount: (node.scanCount || 0) + 1
+      scanCount: (node.scanCount || 0) + 1,
     };
-    
-    // Update scan count
-    await Node.findByIdAndUpdate(nodeId, {
-      $inc: { scanCount: 1 }
-    });
 
-    if(building.emergencyMode == true){
-      await LOGS.create({
-        logType:"scan",
-        logMessage:`new Scan on ${node.floorNumber} Floor near ${node.label}`,
-        buildingID:node.buildingId,
-        isEmergency:building.emergencyMode,
-      })
-      await EMERGENCIES.findOneAndUpdate({buildingID:building._id,isFinished:false},{$inc:{scanned:1}},{new:true})
+    // Persist the scan. None of this may block or break the response — the
+    // route above is what the person standing in the building actually needs.
+    Node.findByIdAndUpdate(nodeId, { $inc: { scanCount: 1 } }).catch((err) =>
+      console.error('Failed to increment node scanCount:', err.message)
+    );
+
+    if (building.emergencyMode === true) {
+      try {
+        await LOGS.create({
+          logType: 'scan',
+          logMessage: `new Scan on ${node.floorNumber} Floor near ${node.label}`,
+          buildingID: node.buildingId,
+          isEmergency: true,
+        });
+        await EMERGENCIES.findOneAndUpdate(
+          { buildingID: building._id, isFinished: false },
+          { $inc: { scanned: 1 } },
+          { new: true }
+        );
+      } catch (logErr) {
+        console.error('Failed to record emergency scan:', logErr.message);
+      }
     }
 
-    await BUILDINGS.findOneAndUpdate(
-      {
-        _id: node.buildingId,
-        'maps.floor': node.floorNumber,
-        'maps.qrCode': node.label
-      },
-      {
-        updatedAt: Date.now(),
-        $inc: { 'maps.$.scanned': 1 }
-      },
-      { new: true }
-    )
-
-    const userToken = req.cookies['userToken']
-    // console.log(userToken)
-    let decoded
-    if(userToken){
-        decoded = jwt.verify(userToken, process.env.JWT_SECRET)
-        await USERS.findOneAndUpdate({_id:decoded.userID},{$push:{scanned:{buildingName:building.buildingName,scannedAt:Date.now(),buildingID:building._id}}},{new:true})
+    // Record the scan against a logged-in user's history. An expired or
+    // malformed token must never stop an occupant getting their route.
+    const userToken = req.cookies?.['userToken'];
+    if (userToken) {
+      try {
+        const decoded = jwt.verify(userToken, process.env.JWT_SECRET);
+        await USERS.findOneAndUpdate(
+          { _id: decoded.userID },
+          { $push: { scanned: { buildingName: building.buildingName, scannedAt: Date.now(), buildingID: building._id } } },
+          { new: true }
+        );
+      } catch (tokenErr) {
+        console.warn('Scan history not recorded (invalid token):', tokenErr.message);
+      }
     }
 
-    // console.log('Scanned. '+N_LOG)
-    
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'Route data retrieved successfully',
-      data: routeData
+      data: routeData,
     });
-    
   } catch (error) {
     console.error('Error handling QR code scan:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: 'Server error while processing QR code scan',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined,
     });
   }
 });

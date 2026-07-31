@@ -14,10 +14,25 @@ const USER_SCHEMA = new mongoose.Schema({
         default:""
     },
     password:{
-        type:String
+        type:String,
+        // Never returned by default; an admin route was serving the bcrypt hash
+        // to the browser because it forgot to exclude it.
+        select:false
     },
     email:{
-        type:String
+        type:String,
+        // Normalized and unique so Foo@x.com and foo@x.com cannot become two
+        // accounts, and so a check-then-insert race cannot create duplicates
+        // that would make login resolve to an arbitrary one of them.
+        unique:true,
+        lowercase:true,
+        trim:true,
+        index:true
+    },
+    // Bumped on password reset to invalidate sessions issued beforehand.
+    tokenVersion:{
+        type:Number,
+        default:0
     },
     country:{
         type:String
@@ -36,7 +51,10 @@ const USER_SCHEMA = new mongoose.Schema({
     ],
     updatedAt:{
         type:Date,
-        default:`${new Date().toISOString()}`
+        // A factory, not a value: the previous form was evaluated once at module
+        // load, so every user created during a process's lifetime was stamped
+        // with the server's start time.
+        default: () => new Date()
     },
     notifications:[
         {

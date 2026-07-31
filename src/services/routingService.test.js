@@ -1,469 +1,237 @@
-import { findShortestRoute, calculateDistance, findAllExits, validateRoute } from './routingService.js';
-import Node from '../models/node.model.js';
 import mongoose from 'mongoose';
+import Node from '../models/node.model.js';
+import BUILDINGS from '../models/building.model.js';
+import { findShortestRoute, validateRoute, routeDistance, calculateDistance } from './routingService.js';
 
-const MONGODB_TEST_URL = process.env.MONGODB_TEST_URL || 'mongodb://localhost:27017/alertup-test';
+/**
+ * These cover the single most safety-critical function in the app: given the
+ * node someone scanned, produce the route they should walk.
+ */
 
-beforeAll(async () => {
-  try {
-    if (mongoose.connection.readyState === 0) {
-      await mongoose.connect(MONGODB_TEST_URL);
-    }
-  } catch (error) {
-    console.error('Database connection error:', error);
-    throw error;
+const buildingId = new mongoose.Types.ObjectId();
+
+/** Create nodes from a compact spec and wire up bidirectional connections. */
+const seedGraph = async (specs) => {
+  const created = new Map();
+
+  for (const spec of specs) {
+    const node = await Node.create({
+      buildingId,
+      floorNumber: spec.floor ?? 1,
+      x: spec.x,
+      y: spec.y,
+      type: spec.type,
+      label: spec.id,
+      connections: [],
+    });
+    created.set(spec.id, node);
   }
-});
 
-afterAll(async () => {
-  try {
-    if (mongoose.connection.readyState === 1) {
-      await mongoose.disconnect();
-    }
-  } catch (error) {
-    console.error('Database disconnect error:', error);
+  for (const spec of specs) {
+    const node = created.get(spec.id);
+    node.connections = (spec.to || []).map((id) => created.get(id)._id);
+    await node.save();
   }
-});
+
+  return created;
+};
+
+const labels = (route) => route.map((p) => p.label).join(' -> ');
 
 beforeEach(async () => {
-  try {
-    await Node.deleteMany({});
-    await Building.deleteMany({});
-  } catch (error) {
-    console.error('Error clearing collections:', error);
-  }
+  await BUILDINGS.create({ _id: buildingId, buildingName: 'Test Tower', floors: 2 });
 });
 
 describe('findShortestRoute', () => {
-  describe('Basic Functionality', () => {
-    test('should find shortest path to exit from start node', async () => {
-      // Setup
-      const building = await Building.create({ name: 'Test Building' });
+  test('returns just the node when the scan point is already an exit', async () => {
+    const nodes = await seedGraph([{ id: 'E', x: 0, y: 0, type: 'exit' }]);
 
-      const startNode = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 100,
-        y: 100,
-        type: 'path',
-        connections: [],
-      });
+    const route = await findShortestRoute(nodes.get('E')._id);
 
-      const exitNode = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 500,
-        y: 500,
-        type: 'exit',
-        connections: [],
-      });
-
-      // Update connections
-      await Node.updateOne({ _id: startNode._id }, { connections: [exitNode._id] });
-
-      // Execute
-      const route = await findShortestRoute(startNode._id);
-
-      // Assert
-      expect(Array.isArray(route)).toBe(true);
-      expect(route.length).toBeGreaterThanOrEqual(1);
-      expect(route[route.length - 1].type).toBe('exit');
-      expect(route[0].type).toBe('path');
-      expect(route[0].x).toBe(100);
-      expect(route[0].y).toBe(100);
-    });
-
-    test('should return immediate exit if start node is exit', async () => {
-      // Setup
-      const building = await Building.create({ name: 'Test Building' });
-
-      const exitNode = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 100,
-        y: 100,
-        type: 'exit',
-        connections: [],
-      });
-
-      // Execute
-      const route = await findShortestRoute(exitNode._id);
-
-      // Assert
-      expect(route).toHaveLength(1);
-      expect(route[0].type).toBe('exit');
-      expect(route[0].x).toBe(100);
-    });
-
-    test('should find shortest path through multiple nodes', async () => {
-      // Setup
-      const building = await Building.create({ name: 'Test Building' });
-
-      const node1 = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 100,
-        y: 100,
-        type: 'path',
-        connections: [],
-      });
-
-      const node2 = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 300,
-        y: 300,
-        type: 'path',
-        connections: [],
-      });
-
-      const exitNode = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 500,
-        y: 500,
-        type: 'exit',
-        connections: [],
-      });
-
-      // Create connections
-      await Node.updateOne({ _id: node1._id }, { connections: [node2._id] });
-      await Node.updateOne({ _id: node2._id }, { connections: [exitNode._id] });
-
-      // Execute
-      const route = await findShortestRoute(node1._id);
-
-      // Assert
-      expect(route.length).toBeGreaterThanOrEqual(2);
-      expect(route[route.length - 1].type).toBe('exit');
-    });
-
-    test('should use stairs to reach exit', async () => {
-      // Setup
-      const building = await Building.create({ name: 'Test Building' });
-
-      const startNode = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 100,
-        y: 100,
-        type: 'path',
-        connections: [],
-      });
-
-      const stairsNode = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 300,
-        y: 300,
-        type: 'stairs',
-        connections: [],
-      });
-
-      const exitNode = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 500,
-        y: 500,
-        type: 'exit',
-        connections: [],
-      });
-
-      // Create connections
-      await Node.updateOne({ _id: startNode._id }, { connections: [stairsNode._id] });
-      await Node.updateOne({ _id: stairsNode._id }, { connections: [exitNode._id] });
-
-      // Execute
-      const route = await findShortestRoute(startNode._id);
-
-      // Assert
-      expect(route.length).toBeGreaterThanOrEqual(2);
-      expect(route.some((n) => n.type === 'stairs')).toBe(true);
-      expect(route[route.length - 1].type).toBe('exit');
-    });
+    expect(route).toHaveLength(1);
+    expect(route[0].type).toBe('exit');
   });
 
-  describe('BFS Guarantees Shortest Path', () => {
-    test('should return shortest of two paths', async () => {
-      // Setup: Graph with two paths to exit
-      const building = await Building.create({ name: 'Test Building' });
+  test('walks a simple corridor to the exit', async () => {
+    const nodes = await seedGraph([
+      { id: 'A', x: 0, y: 0, type: 'path', to: ['B'] },
+      { id: 'B', x: 10, y: 0, type: 'path', to: ['A', 'E'] },
+      { id: 'E', x: 20, y: 0, type: 'exit', to: ['B'] },
+    ]);
 
-      const start = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 0,
-        y: 0,
-        type: 'path',
-        connections: [],
-      });
+    const route = await findShortestRoute(nodes.get('A')._id);
 
-      // Short path: start -> exit
-      const exit1 = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 100,
-        y: 100,
-        type: 'exit',
-        connections: [],
-      });
-
-      // Long path: start -> node1 -> node2 -> node3 -> exit2
-      const node1 = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 50,
-        y: 50,
-        type: 'path',
-        connections: [],
-      });
-
-      const node2 = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 75,
-        y: 75,
-        type: 'path',
-        connections: [],
-      });
-
-      const node3 = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 90,
-        y: 90,
-        type: 'path',
-        connections: [],
-      });
-
-      const exit2 = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 200,
-        y: 200,
-        type: 'exit',
-        connections: [],
-      });
-
-      // Create connections
-      await Node.updateOne({ _id: start._id }, { connections: [exit1._id, node1._id] });
-      await Node.updateOne({ _id: node1._id }, { connections: [node2._id] });
-      await Node.updateOne({ _id: node2._id }, { connections: [node3._id] });
-      await Node.updateOne({ _id: node3._id }, { connections: [exit2._id] });
-
-      // Execute
-      const route = await findShortestRoute(start._id);
-
-      // Assert
-      expect(route.length).toBeLessThanOrEqual(2); // Should take short path
-      expect(route[route.length - 1].type).toBe('exit');
-      expect(route[route.length - 1].x).toBe(100); // Should be exit1, not exit2
-    });
+    expect(labels(route)).toBe('A -> B -> E');
   });
 
-  describe('Error Handling', () => {
-    test('should throw error for null node ID', async () => {
-      await expect(findShortestRoute(null)).rejects.toThrow();
-    });
+  test('prefers the physically shorter route over the one with fewer hops', async () => {
+    // A->B->E is 2 hops but 1000 units of walking.
+    // A->C->D->E is 3 hops but only 300 units.
+    // A hop-counting BFS picks the wrong one here.
+    const nodes = await seedGraph([
+      { id: 'A', x: 0, y: 0, type: 'path', to: ['B', 'C'] },
+      { id: 'B', x: 500, y: 0, type: 'path', to: ['A', 'E'] },
+      { id: 'C', x: 100, y: 0, type: 'path', to: ['A', 'D'] },
+      { id: 'D', x: 200, y: 0, type: 'path', to: ['C', 'E'] },
+      { id: 'E', x: 300, y: 0, type: 'exit', to: ['B', 'D'] },
+    ]);
 
-    test('should throw error for undefined node ID', async () => {
-      await expect(findShortestRoute(undefined)).rejects.toThrow();
-    });
+    const route = await findShortestRoute(nodes.get('A')._id);
 
-    test('should throw error for non-existent node', async () => {
-      const fakeObjectId = new mongoose.Types.ObjectId();
-
-      await expect(findShortestRoute(fakeObjectId)).rejects.toThrow(
-        'Start node not found'
-      );
-    });
-
-    test('should throw error when no exit exists on floor', async () => {
-      // Setup
-      const building = await Building.create({ name: 'Test Building' });
-
-      const node = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 100,
-        y: 100,
-        type: 'path',
-        connections: [],
-      });
-
-      // Execute & Assert
-      await expect(findShortestRoute(node._id)).rejects.toThrow(
-        'No exit route found'
-      );
-    });
-
-    test('should throw error when exit is unreachable', async () => {
-      // Setup
-      const building = await Building.create({ name: 'Test Building' });
-
-      const startNode = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 100,
-        y: 100,
-        type: 'path',
-        connections: [],
-      });
-
-      // Create unreachable exit
-      const exitNode = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 500,
-        y: 500,
-        type: 'exit',
-        connections: [],
-      });
-
-      // No connections between nodes
-
-      // Execute & Assert
-      await expect(findShortestRoute(startNode._id)).rejects.toThrow(
-        'No exit route found'
-      );
-    });
-
-    test('should detect and prevent infinite loops', async () => {
-      // Setup: Circular graph without exit
-      const building = await Building.create({ name: 'Test Building' });
-
-      const node1 = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 100,
-        y: 100,
-        type: 'path',
-        connections: [],
-      });
-
-      const node2 = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 200,
-        y: 200,
-        type: 'path',
-        connections: [],
-      });
-
-      const node3 = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 300,
-        y: 300,
-        type: 'path',
-        connections: [],
-      });
-
-      // Create circular connections
-      await Node.updateOne({ _id: node1._id }, { connections: [node2._id] });
-      await Node.updateOne({ _id: node2._id }, { connections: [node3._id] });
-      await Node.updateOne({ _id: node3._id }, { connections: [node1._id] });
-
-      // Execute & Assert
-      await expect(findShortestRoute(node1._id)).rejects.toThrow();
-    });
+    expect(labels(route)).toBe('A -> C -> D -> E');
   });
 
-  describe('Data Validation', () => {
-    test('should validate node coordinates in route', async () => {
-      // Setup
-      const building = await Building.create({ name: 'Test Building' });
+  test('chooses the nearer of two exits', async () => {
+    const nodes = await seedGraph([
+      { id: 'S', x: 0, y: 0, type: 'path', to: ['near', 'far'] },
+      { id: 'near', x: 50, y: 0, type: 'exit', to: ['S'] },
+      { id: 'far', x: 900, y: 0, type: 'exit', to: ['S'] },
+    ]);
 
-      const startNode = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 123.45,
-        y: 678.90,
-        type: 'path',
-        connections: [],
-      });
+    const route = await findShortestRoute(nodes.get('S')._id);
 
-      const exitNode = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 456.78,
-        y: 912.34,
-        type: 'exit',
-        connections: [],
-      });
+    expect(labels(route)).toBe('S -> near');
+  });
 
-      await Node.updateOne({ _id: startNode._id }, { connections: [exitNode._id] });
+  test('routes across floors through stairs', async () => {
+    const nodes = await seedGraph([
+      { id: 'up', x: 0, y: 0, floor: 2, type: 'path', to: ['stairs2'] },
+      { id: 'stairs2', x: 10, y: 0, floor: 2, type: 'stairs', to: ['up', 'stairs1'] },
+      { id: 'stairs1', x: 10, y: 0, floor: 1, type: 'stairs', to: ['stairs2', 'exit1'] },
+      { id: 'exit1', x: 20, y: 0, floor: 1, type: 'exit', to: ['stairs1'] },
+    ]);
 
-      // Execute
-      const route = await findShortestRoute(startNode._id);
+    const route = await findShortestRoute(nodes.get('up')._id);
 
-      // Assert
-      route.forEach((node) => {
-        expect(typeof node.x).toBe('number');
-        expect(typeof node.y).toBe('number');
-        expect(typeof node.type).toBe('string');
-        expect(['path', 'exit', 'stairs']).toContain(node.type);
-      });
-    });
+    expect(labels(route)).toBe('up -> stairs2 -> stairs1 -> exit1');
+    expect(route[0].floor).toBe(2);
+    expect(route[route.length - 1].floor).toBe(1);
+  });
 
-    test('should include node labels in route when available', async () => {
-      // Setup
-      const building = await Building.create({ name: 'Test Building' });
+  test('prefers an exit on the current floor over going downstairs', async () => {
+    const nodes = await seedGraph([
+      { id: 'P', x: 0, y: 0, floor: 2, type: 'path', to: ['sameFloorExit', 'stairs2'] },
+      { id: 'sameFloorExit', x: 200, y: 0, floor: 2, type: 'exit', to: ['P'] },
+      { id: 'stairs2', x: 5, y: 0, floor: 2, type: 'stairs', to: ['P', 'stairs1'] },
+      { id: 'stairs1', x: 5, y: 0, floor: 1, type: 'stairs', to: ['stairs2', 'downExit'] },
+      { id: 'downExit', x: 10, y: 0, floor: 1, type: 'exit', to: ['stairs1'] },
+    ]);
 
-      const startNode = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 100,
-        y: 100,
-        type: 'path',
-        label: 'Main Entrance',
-        connections: [],
-      });
+    const route = await findShortestRoute(nodes.get('P')._id);
 
-      const exitNode = await Node.create({
-        buildingId: building._id,
-        floorNumber: 1,
-        x: 500,
-        y: 500,
-        type: 'exit',
-        label: 'Emergency Exit A',
-        connections: [],
-      });
+    expect(labels(route)).toBe('P -> sameFloorExit');
+  });
 
-      await Node.updateOne({ _id: startNode._id }, { connections: [exitNode._id] });
+  test('throws when no exit is reachable', async () => {
+    const nodes = await seedGraph([
+      { id: 'A', x: 0, y: 0, type: 'path', to: ['B'] },
+      { id: 'B', x: 10, y: 0, type: 'path', to: ['A'] },
+    ]);
 
-      // Execute
-      const route = await findShortestRoute(startNode._id);
+    await expect(findShortestRoute(nodes.get('A')._id)).rejects.toThrow(
+      'No exit route found from this location'
+    );
+  });
 
-      // Assert
-      expect(route[0].label).toBe('Main Entrance');
-      expect(route[route.length - 1].label).toBe('Emergency Exit A');
-    });
+  test('throws when the exit exists but is not connected', async () => {
+    const nodes = await seedGraph([
+      { id: 'A', x: 0, y: 0, type: 'path', to: [] },
+      { id: 'E', x: 10, y: 0, type: 'exit', to: [] },
+    ]);
+
+    await expect(findShortestRoute(nodes.get('A')._id)).rejects.toThrow(
+      'No exit route found from this location'
+    );
+  });
+
+  test('terminates on a cyclic graph', async () => {
+    const nodes = await seedGraph([
+      { id: 'A', x: 0, y: 0, type: 'path', to: ['B', 'C'] },
+      { id: 'B', x: 10, y: 0, type: 'path', to: ['A', 'C'] },
+      { id: 'C', x: 20, y: 0, type: 'path', to: ['A', 'B', 'E'] },
+      { id: 'E', x: 30, y: 0, type: 'exit', to: ['C'] },
+    ]);
+
+    const route = await findShortestRoute(nodes.get('A')._id);
+
+    expect(labels(route)).toBe('A -> C -> E');
+  });
+
+  test('ignores connections pointing at deleted nodes', async () => {
+    const nodes = await seedGraph([
+      { id: 'A', x: 0, y: 0, type: 'path', to: ['ghost', 'E'] },
+      { id: 'ghost', x: 5, y: 5, type: 'path', to: ['A'] },
+      { id: 'E', x: 10, y: 0, type: 'exit', to: ['A'] },
+    ]);
+
+    await Node.findByIdAndDelete(nodes.get('ghost')._id);
+
+    const route = await findShortestRoute(nodes.get('A')._id);
+    expect(labels(route)).toBe('A -> E');
+  });
+
+  test('rejects a missing start node', async () => {
+    await expect(findShortestRoute(new mongoose.Types.ObjectId())).rejects.toThrow(
+      'Start node not found'
+    );
+  });
+
+  test('rejects an empty start node id', async () => {
+    await expect(findShortestRoute(null)).rejects.toThrow('Start node ID is required');
+  });
+});
+
+describe('validateRoute', () => {
+  test('reports no floor changes for a single-floor route', () => {
+    const result = validateRoute([
+      { x: 0, y: 0, floor: 1, type: 'path' },
+      { x: 1, y: 0, floor: 1, type: 'exit' },
+    ]);
+
+    expect(result.valid).toBe(true);
+    expect(result.hasStairs).toBe(false);
+    expect(result.floorChanges).toHaveLength(0);
+  });
+
+  test('describes each floor transition', () => {
+    const result = validateRoute([
+      { x: 0, y: 0, floor: 3, type: 'path' },
+      { x: 1, y: 0, floor: 2, type: 'stairs' },
+      { x: 2, y: 0, floor: 1, type: 'stairs' },
+      { x: 3, y: 0, floor: 1, type: 'exit' },
+    ]);
+
+    expect(result.hasStairs).toBe(true);
+    expect(result.floorChanges).toEqual([
+      { from: 3, to: 2, atStep: 1, nodeType: 'stairs' },
+      { from: 2, to: 1, atStep: 2, nodeType: 'stairs' },
+    ]);
+  });
+
+  test('flags an empty route as invalid', () => {
+    expect(validateRoute([]).valid).toBe(false);
+  });
+});
+
+describe('routeDistance', () => {
+  test('sums same-floor segments only', () => {
+    const distance = routeDistance([
+      { x: 0, y: 0, floor: 1 },
+      { x: 30, y: 40, floor: 1 }, // 50 units
+      { x: 30, y: 40, floor: 2 }, // floor change, not counted
+      { x: 30, y: 50, floor: 2 }, // 10 units
+    ]);
+
+    expect(distance).toBe(60);
+  });
+
+  test('is zero for a single point', () => {
+    expect(routeDistance([{ x: 5, y: 5, floor: 1 }])).toBe(0);
   });
 });
 
 describe('calculateDistance', () => {
-  test('should calculate distance between two points', () => {
-    // Points (0,0) and (3,4) should have distance 5
-    const distance = calculateDistance(0, 0, 3, 4);
-
-    expect(distance).toBe(5);
-  });
-
-  test('should calculate distance with same points', () => {
-    const distance = calculateDistance(100, 100, 100, 100);
-
-    expect(distance).toBe(0);
-  });
-
-  test('should work with negative coordinates', () => {
-    const distance = calculateDistance(-10, -10, 0, 0);
-
-    expect(distance).toBeCloseTo(Math.sqrt(200), 5);
-  });
-
-  test('should work with decimal coordinates', () => {
-    const distance = calculateDistance(0, 0, 1.5, 2);
-
-    expect(distance).toBeCloseTo(2.5, 5);
+  test('computes euclidean distance', () => {
+    expect(calculateDistance(0, 0, 3, 4)).toBe(5);
   });
 });

@@ -3,18 +3,28 @@ const router = express.Router()
 
 import CONTACTS from '../../models/contact.model.js';
 import sendMail from '../../services/sendEmail.js'
+import { emailLimiter } from '../../services/rateLimiter.js'
+import { escapeHtml } from '../../services/escapeHtml.js'
 
-router.post('/api/contact',async(req,res)=>{
+const MAX_MESSAGE_LENGTH = 5000;
+
+router.post('/api/contact', emailLimiter, async(req,res)=>{
     const {email,message,reason} = req.body;
     const date = new Date().toISOString()
 
     if(!email || !message || !reason ){
-        return res.send({Success:false,Message:"Invalid fields."})
+        return res.status(400).send({Success:false,Message:"Invalid fields."})
     }
 
     try{
+        if(typeof email !== 'string' || typeof message !== 'string' || typeof reason !== 'string'){
+            return res.status(400).send({Success:false,Message:"Invalid fields."})
+        }
         if(!email.includes('@')){
-            return res.send({Success:false,Message:"Invalid Email."})
+            return res.status(400).send({Success:false,Message:"Invalid Email."})
+        }
+        if(message.length > MAX_MESSAGE_LENGTH){
+            return res.status(400).send({Success:false,Message:"Message is too long."})
         }
         const newContact = await CONTACTS({
             email:email,
@@ -31,12 +41,12 @@ router.post('/api/contact',async(req,res)=>{
                   <h1 style="color: #FF7B22; margin-top: 0;">📧 New Contact Message</h1>
                   <p style="color: #333; font-size: 16px;">You have received a new message from AlertUp contact form.</p>
                   <div style="background-color: #f9f9f9; padding: 20px; border-radius: 5px; margin: 20px 0;">
-                    <p style="margin: 0 0 10px 0; color: #666;"><strong style="color: #333;">From:</strong> ${email}</p>
-                    <p style="margin: 0 0 10px 0; color: #666;"><strong style="color: #333;">Reason:</strong> ${reason}</p>
+                    <p style="margin: 0 0 10px 0; color: #666;"><strong style="color: #333;">From:</strong> ${escapeHtml(email)}</p>
+                    <p style="margin: 0 0 10px 0; color: #666;"><strong style="color: #333;">Reason:</strong> ${escapeHtml(reason)}</p>
                     <p style="margin: 0 0 10px 0; color: #666;"><strong style="color: #333;">Date:</strong> ${new Date(date).toLocaleString()}</p>
                     <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #ddd;">
                       <p style="margin: 0 0 5px 0; color: #333; font-weight: bold;">Message:</p>
-                      <p style="margin: 0; color: #666; white-space: pre-wrap;">${message}</p>
+                      <p style="margin: 0; color: #666; white-space: pre-wrap;">${escapeHtml(message)}</p>
                     </div>
                   </div>
                   <p style="color: #666; font-size: 14px; margin-top: 20px;">Best regards,<br><strong style="color: #FF7B22;">AlertUp Contact System</strong></p>

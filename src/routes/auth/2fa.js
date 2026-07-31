@@ -4,10 +4,20 @@ import VERIFICATIONS from '../../models/verificatios.model.js'
 import sendMail from '../../services/sendEmail.js';
 import whoami from '../../middlewares/whoami.js'
 import bcrypt from 'bcrypt'
+import { displayName } from '../../services/displayName.js'
+import { emailLimiter, authLimiter } from '../../services/rateLimiter.js'
+import crypto from 'crypto'
 
 const router = express.Router()
 
-router.post('/api/2fa/activate',whoami,async(req,res)=>{
+// Math.random() is predictable from a few observed outputs; a verification code
+// must come from a CSPRNG.
+const generateCode = () => crypto.randomInt(100000, 1000000)
+
+// Wrong guesses allowed against a single code before it is destroyed.
+const MAX_CODE_ATTEMPTS = 5
+
+router.post('/api/2fa/activate',whoami,emailLimiter,async(req,res)=>{
     // making new verification + code and sending it to users email and sending response
     try{
         const FIND_VERIFICATION = await VERIFICATIONS.findOne({verificationBy:req.user._id,verificationType:"2fa-activation"});
@@ -15,7 +25,7 @@ router.post('/api/2fa/activate',whoami,async(req,res)=>{
             await VERIFICATIONS.findOneAndDelete({verificationBy:req.user._id,verificationType:"2fa-activation"})
         }
 
-        const VERIFICATION_CODE = Math.floor(Math.random()*(999999-100000)+100000)
+        const VERIFICATION_CODE = generateCode()
         const hashedCode = await bcrypt.hash(String(VERIFICATION_CODE),12)
         const VERIFICATION_CONFIG = {
             verificationBy:req.user._id,
@@ -26,15 +36,15 @@ router.post('/api/2fa/activate',whoami,async(req,res)=>{
         await VERIFICATIONS.create(VERIFICATION_CONFIG)
 
         try{
-            const displayName = req.user.userType === "Individual" ? req.user.name : req.user.company;
+            const userName = displayName(req.user);
 
-            const twoFAText = `Hey ${displayName}, your two-factor authentication code is: ${VERIFICATION_CODE}. This code will expire in 5 minutes.`;
+            const twoFAText = `Hey ${userName}, your two-factor authentication code is: ${VERIFICATION_CODE}. This code will expire in 5 minutes.`;
 
             const twoFAHTML = `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
                     <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
                     <h1 style="color: #FF7B22; margin-top: 0;">🔐 Two-Factor Authentication</h1>
-                    <p style="color: #333; font-size: 16px;">Hello <strong>${displayName}</strong>,</p>
+                    <p style="color: #333; font-size: 16px;">Hello <strong>${userName}</strong>,</p>
                     <p style="color: #666;">Here is your verification code to complete your 2fa activation:</p>
                     
                     <div style="background-color: #f9f9f9; padding: 20px; border-radius: 6px; margin: 25px 0; text-align: center; border: 2px dashed #FF7B22;">
@@ -65,14 +75,14 @@ router.post('/api/2fa/activate',whoami,async(req,res)=>{
     }
 })
 
-router.post('/api/2fa/deactivate',whoami,async(req,res)=>{
+router.post('/api/2fa/deactivate',whoami,emailLimiter,async(req,res)=>{
     try{
         const FIND_VERIFICATION = await VERIFICATIONS.findOne({verificationBy:req.user._id,verificationType:'2fa-deactivation'})
         if(FIND_VERIFICATION) {
             await VERIFICATIONS.findOneAndDelete({verificationBy:req.user._id,verificationType:'2fa-deactivation'})
         }
 
-        const VERIFICATION_CODE = Math.floor(Math.random()*(999999-100000)+100000);
+        const VERIFICATION_CODE = generateCode();
         const HASHEDCODE = await bcrypt.hash(String(VERIFICATION_CODE),12)
         const VERIFICATION_CONFIG ={
             verificationBy:req.user._id,
@@ -83,15 +93,15 @@ router.post('/api/2fa/deactivate',whoami,async(req,res)=>{
         await VERIFICATIONS.create(VERIFICATION_CONFIG)
 
         try{
-            const displayName = req.user.userType === "Individual" ? req.user.name : req.user.company;
+            const userName = displayName(req.user);
 
-            const twoFAText = `Hey ${displayName}, your two-factor authentication code is: ${VERIFICATION_CODE}. This code will expire in 5 minutes.`;
+            const twoFAText = `Hey ${userName}, your two-factor authentication code is: ${VERIFICATION_CODE}. This code will expire in 5 minutes.`;
 
             const twoFAHTML = `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
                     <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
                     <h1 style="color: #FF7B22; margin-top: 0;">🔐 Two-Factor Deactivation</h1>
-                    <p style="color: #333; font-size: 16px;">Hello <strong>${displayName}</strong>,</p>
+                    <p style="color: #333; font-size: 16px;">Hello <strong>${userName}</strong>,</p>
                     <p style="color: #666;">Here is your verification code to deactivate 2fa:</p>
                     
                     <div style="background-color: #f9f9f9; padding: 20px; border-radius: 6px; margin: 25px 0; text-align: center; border: 2px dashed #FF7B22;">
@@ -122,32 +132,59 @@ router.post('/api/2fa/deactivate',whoami,async(req,res)=>{
     }
 })
 
-router.post('/api/2fa/verify',whoami,async(req,res)=>{
+// authLimiter added: this endpoint checks a 6-digit code and can switch off the
+// account's second factor, but was the only code-checking route with no
+// throttle at all.
+router.post('/api/2fa/verify',whoami,authLimiter,async(req,res)=>{
     const {verificationCode,verificationType} = req.body;
 
-    if(!verificationCode) return res.send({Success:false,Message:"Invalid verification code."});
+    if(!verificationCode) return res.status(400).send({Success:false,Message:"Invalid verification code."});
+    if(verificationType !== "activate" && verificationType !== "deactivate"){
+        return res.status(400).send({Success:false,Message:"Invalid verification type."})
+    }
+
+    const expectedType = verificationType === "activate" ? '2fa-activation' : '2fa-deactivation';
 
     try{
-        let VERIFICATION;
+        const VERIFICATION = await VERIFICATIONS.findOne({verificationBy:req.user._id,verificationType:expectedType});
 
-        if(verificationType == "activate") VERIFICATION = await VERIFICATIONS.findOne({verificationBy:req.user._id,verificationType:'2fa-activation'});
-        if(verificationType == "deactivate") VERIFICATION = await VERIFICATIONS.findOne({verificationBy:req.user._id,verificationType:'2fa-deactivation'});
+        if(!VERIFICATION) return res.status(400).send({Success:false,Message:"Invalid verification."})
+        if(VERIFICATION.expires < Date.now()) {
+            await VERIFICATIONS.findByIdAndDelete(VERIFICATION._id)
+            return res.status(400).send({Success:false,Message:"Verification expired."})
+        }
 
-        if(!VERIFICATION) return res.send({Success:false,Message:"Invalid verification."})
-        if(VERIFICATION.expires < Date.now()) return res.send({Success:false,Message:"Verification expired."})
-        
         const compareCode = await bcrypt.compare(String(verificationCode),VERIFICATION.verificationCode)
-        if(!compareCode) return res.send({Success:false,Message:"Invalid Code."})
+        if(!compareCode) {
+            // Destroyed after repeated wrong guesses so the code cannot be
+            // ground down to disable someone's second factor.
+            VERIFICATION.attempts = (VERIFICATION.attempts || 0) + 1;
+            if(VERIFICATION.attempts >= MAX_CODE_ATTEMPTS){
+                await VERIFICATIONS.findByIdAndDelete(VERIFICATION._id)
+                return res.status(400).send({Success:false,Message:"Too many incorrect attempts. Request a new code."})
+            }
+            await VERIFICATION.save()
+            return res.status(400).send({Success:false,Message:"Invalid Code."})
+        }
 
-        if(verificationType == "deactivate") await USERS.findOneAndUpdate({_id:req.user._id},{TwoFactorEnabled:false},{new:true})
-        if(verificationType == "activate") await USERS.findOneAndUpdate({_id:req.user._id},{TwoFactorEnabled:true},{new:true})
-        
-        await VERIFICATIONS.findOneAndDelete({verificationBy:req.user._id})
+        if(verificationType == "deactivate") await USERS.findOneAndUpdate({_id:req.user._id},{TwoFactorEnabled:false})
+        if(verificationType == "activate") {
+            // trustedIPS is cleared on activation. Otherwise every address the
+            // user had logged in from before enabling 2FA stayed on the skip
+            // list, so an attacker who already knew the password and had logged
+            // in once would never be challenged.
+            await USERS.findOneAndUpdate({_id:req.user._id},{TwoFactorEnabled:true,trustedIPS:[]})
+        }
+
+        // Scoped to the consumed verification. An unscoped delete removed an
+        // arbitrary record for this user — typically an in-flight password
+        // reset — while leaving the just-used 2FA code replayable.
+        await VERIFICATIONS.findByIdAndDelete(VERIFICATION._id)
 
         return res.send({Success:true,Message:"Done."})
-    }catch{
-        console.log("Something went wrong.")
-        return res.send({Success:false,Message:'Server error.'})
+    }catch(err){
+        console.error("2FA verify error:", err)
+        return res.status(500).send({Success:false,Message:'Server error.'})
     }
 })
 
