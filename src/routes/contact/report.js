@@ -1,46 +1,44 @@
 import express from 'express';
 const router = express.Router()
 
-import REPORTS from '../../models/report.model.js';
+import prisma from '../../db/prisma.js';
 import { emailLimiter } from '../../services/rateLimiter.js';
+import { ok, fail } from '../../utils/respond.js';
 
 const MAX_MESSAGE_LENGTH = 5000;
 const MAX_EMAIL_LENGTH = 355;
 
-// This endpoint is unauthenticated and validated nothing — every field was
-// optional and unbounded, so a script could fill the reports collection with
-// empty documents until the storage quota blew.
-router.post('/api/report', emailLimiter, async(req,res)=>{
-    const {email,message,reason} = req.body
-    const date = new Date().toISOString()
+// This endpoint is unauthenticated; every field is validated and bounded so a
+// script cannot fill the reports table with empty rows.
+router.post('/api/report', emailLimiter, async (req, res) => {
+    const { email, message, reason } = req.body
 
-    if(typeof email !== 'string' || typeof message !== 'string' || typeof reason !== 'string'){
-        return res.status(400).send({Success:false,Message:"Invalid fields."})
+    if (typeof email !== 'string' || typeof message !== 'string' || typeof reason !== 'string') {
+        return fail(res, 400, "Invalid fields.")
     }
-    if(!email.includes('@') || email.length > MAX_EMAIL_LENGTH){
-        return res.status(400).send({Success:false,Message:"Invalid email."})
+    if (!email.includes('@') || email.length > MAX_EMAIL_LENGTH) {
+        return fail(res, 400, "Invalid email.")
     }
-    if(!message.trim() || message.length > MAX_MESSAGE_LENGTH){
-        return res.status(400).send({Success:false,Message:"Invalid message."})
+    if (!message.trim() || message.length > MAX_MESSAGE_LENGTH) {
+        return fail(res, 400, "Invalid message.")
     }
-    if(!reason.trim() || reason.length > 200){
-        return res.status(400).send({Success:false,Message:"Invalid reason."})
+    if (!reason.trim() || reason.length > 200) {
+        return fail(res, 400, "Invalid reason.")
     }
 
-    try{
-        const newReport = new REPORTS({
-            reason:reason,
-            email:email.toLowerCase().trim(),
-            message:message,
-            createdAt:date
+    try {
+        await prisma.report.create({
+            data: {
+                reason,
+                email: email.toLowerCase().trim(),
+                message,
+            },
         })
 
-        await newReport.save()
-
-        return res.send({Success:true,Message:"Sent."})
-    }catch(err){
+        return ok(res, { message: "Sent." })
+    } catch (err) {
         console.error('Report submission error:', err)
-        return res.status(500).send({Success:false,Message:"Server error."})
+        return fail(res, 500, "Server error.")
     }
 })
 

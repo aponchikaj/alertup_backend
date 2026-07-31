@@ -1,41 +1,40 @@
 import express from "express";
 import bcrypt from "bcrypt";
-import crypto from "crypto";
 
-import USERS from "../../models/user.model.js";
-import VERIFICATIONS from "../../models/verificatios.model.js";
+import prisma from "../../db/prisma.js";
 import sendMail from "../../services/sendEmail.js";
 import { displayName } from "../../services/displayName.js";
 import { emailLimiter, authLimiter } from "../../services/rateLimiter.js";
+import { ok, fail } from "../../utils/respond.js";
+import {
+    issueVerification,
+    findActiveVerification,
+    compareCode,
+    recordFailedAttempt,
+    LONG_CODE_TTL_MS,
+} from "../../services/verificationCodes.js";
 
 const router = express.Router();
 
 /* ================= HELPERS ================= */
 
-// Reset is email-only. The previous non-email branch queried a `username`
-// field that does not exist on the schema, so it could never match anything.
+// Reset is email-only.
 const findUser = async (identifier) => {
-    // Must be a string: an object such as {"$ne": null} would otherwise reach
-    // findOne as a query operator and match an arbitrary account.
+    // Must be a string — anything else never reaches the query layer.
     if (typeof identifier !== "string" || !identifier.includes("@")) {
-        return { success: false, message: "Please enter the email address on your account." };
+        return { success: false, status: 400, message: "Please enter the email address on your account." };
     }
 
-    const user = await USERS.findOne({ email: identifier.toLowerCase().trim() });
+    const user = await prisma.user.findUnique({
+        where: { email: identifier.toLowerCase().trim() },
+    });
 
     if (!user) {
-        return { success: false, message: "User not found." };
+        return { success: false, status: 404, message: "User not found." };
     }
 
     return { success: true, user };
 };
-
-// Math.random() is an xorshift128+ PRNG whose state is recoverable from a few
-// observed outputs, which would let an attacker predict a victim's next code.
-const generateCode = () => crypto.randomInt(100000, 1000000);
-
-// Wrong guesses allowed against a single reset code before it is destroyed.
-const MAX_CODE_ATTEMPTS = 5;
 
 /* ================= SEND CODE ================= */
 
@@ -43,7 +42,7 @@ router.post("/api/reset/send-code", emailLimiter, async (req, res) => {
     const { user } = req.body;
 
     if (!user) {
-        return res.json({ success: false, message: "Invalid user." });
+        return fail(res, 400, "Invalid user.");
     }
 
     try {
@@ -53,32 +52,23 @@ router.post("/api/reset/send-code", emailLimiter, async (req, res) => {
             // account-enumeration oracle. Unknown addresses get the same reply a
             // real one does; the flow simply fails at the verify step.
             if (result.message === "User not found.") {
-                return res.json({ success: true, message: "Verification code sent." });
+                return ok(res, { message: "Verification code sent." });
             }
-            return res.json(result);
+            return fail(res, result.status, result.message);
         }
 
         const USER = result.user;
 
-        // Remove old reset codes
-        await VERIFICATIONS.deleteMany({
-            verificationBy: USER._id,
-            verificationType: "reset",
+        // Replaces any pending reset code with a fresh 10-minute one, stored
+        // hashed — a reset code is a temporary credential and should not be
+        // readable from the database.
+        const { code } = await issueVerification({
+            userId: USER.id,
+            type: "reset",
+            ttlMs: LONG_CODE_TTL_MS,
         });
 
-        const code = generateCode();
-
-        // Stored hashed, matching how 2FA codes are handled in routes/auth/2fa.js.
-        // A reset code is a temporary credential and should not be readable from
-        // the database.
-        await VERIFICATIONS.create({
-            verificationBy: USER._id,
-            verificationType: "reset",
-            verificationCode: await bcrypt.hash(String(code), 12),
-            expires: Date.now() + 10 * 60 * 1000, // 10 minutes
-        });
-
-        res.json({ success: true, message: "Verification code sent." });
+        ok(res, { message: "Verification code sent." });
         try {
             const userName = displayName(USER);
             const resetHTML = `
@@ -100,18 +90,18 @@ router.post("/api/reset/send-code", emailLimiter, async (req, res) => {
               </div>
             `;
             await sendMail(
-            USER.email,
-            "Reset password - AlertUp",
-            `Hello ${userName}, your password reset code is ${code}. If this wasn't you, please contact support immediately.`,
-            undefined,
-            resetHTML
-        );
+                USER.email,
+                "Reset password - AlertUp",
+                `Hello ${userName}, your password reset code is ${code}. If this wasn't you, please contact support immediately.`,
+                undefined,
+                resetHTML
+            );
         } catch (err) {
             console.error("MAIL ERROR:", err);
         }
     } catch (err) {
         console.error(err);
-        return res.json({ success: false, message: "Server error." });
+        return fail(res, 500, "Server error.");
     }
 });
 
@@ -121,59 +111,60 @@ router.post("/api/reset/verify-code", authLimiter, async (req, res) => {
     const { user, code } = req.body;
 
     if (!user || !code) {
-        return res.json({ success: false, message: "Invalid fields." });
+        return fail(res, 400, "Invalid fields.");
     }
 
     try {
         const result = await findUser(user);
         if (!result.success) {
-            return res.json(result);
+            return fail(res, result.status, result.message);
         }
 
         const USER = result.user;
 
-        const verification = await VERIFICATIONS.findOne({
-            verificationBy: USER._id,
-            verificationType: "reset",
-        });
+        // Excludes expired rows — the Mongo TTL index is gone, so the filter is
+        // the only thing keeping a stale code from matching.
+        const verification = await findActiveVerification(USER.id, "reset");
 
         if (!verification) {
-            return res.json({ success: false, message: "Invalid or expired code." });
+            return fail(res, 400, "Invalid or expired code.");
         }
 
-        if (verification.expires < Date.now()) {
-            await VERIFICATIONS.deleteOne({ _id: verification._id });
-            return res.json({ success: false, message: "Code expired." });
+        if (verification.expiresAt.getTime() < Date.now()) {
+            await prisma.verification.delete({ where: { id: verification.id } }).catch(() => {});
+            return fail(res, 400, "Code expired.");
         }
 
-        const codeMatches = await bcrypt.compare(String(code), verification.verificationCode);
+        const codeMatches = await compareCode(code, verification);
         if (!codeMatches) {
             // Destroy the code after repeated wrong guesses; the IP-keyed
             // limiter alone does not stop an attacker rotating addresses
             // through a 6-digit space.
-            verification.attempts = (verification.attempts || 0) + 1;
-            if (verification.attempts >= MAX_CODE_ATTEMPTS) {
-                await VERIFICATIONS.deleteOne({ _id: verification._id });
-                return res.json({ success: false, message: "Too many incorrect attempts. Request a new code." });
+            const destroyed = await recordFailedAttempt(verification);
+            if (destroyed) {
+                return fail(res, 400, "Too many incorrect attempts. Request a new code.");
             }
-            await verification.save();
-            return res.json({ success: false, message: "Invalid code." });
+            return fail(res, 400, "Invalid code.");
         }
 
         // Mark verification as confirmed
-        verification.verified = true;
-        await verification.save();
+        await prisma.verification.update({
+            where: { id: verification.id },
+            data: { verified: true },
+        });
 
         // Auto-verify account if not verified
         if (!USER.verified) {
-            USER.verified = true;
-            await USER.save();
+            await prisma.user.update({
+                where: { id: USER.id },
+                data: { verified: true },
+            });
         }
 
-        return res.json({ success: true, message: "Code verified." });
+        return ok(res, { message: "Code verified." });
     } catch (err) {
         console.error(err);
-        return res.json({ success: false, message: "Server error." });
+        return fail(res, 500, "Server error.");
     }
 });
 
@@ -183,86 +174,73 @@ router.post("/api/reset/password", authLimiter, async (req, res) => {
     const { user, newPassword, code } = req.body;
 
     if (!user || typeof newPassword !== "string" || newPassword.length < 6) {
-        return res.json({
-            success: false,
-            message: "Password must be at least 6 characters.",
-        });
+        return fail(res, 400, "Password must be at least 6 characters.");
     }
 
     // bcrypt silently truncates past 72 bytes, so a longer password would have
     // its tail ignored rather than rejected.
     if (Buffer.byteLength(newPassword) > 72) {
-        return res.json({
-            success: false,
-            message: "Password must be at most 72 bytes.",
-        });
+        return fail(res, 400, "Password must be at most 72 bytes.");
     }
 
     if (!code) {
-        return res.json({ success: false, message: "Reset verification required." });
+        return fail(res, 400, "Reset verification required.");
     }
 
     try {
         const result = await findUser(user);
         if (!result.success) {
-            return res.json(result);
+            return fail(res, result.status, result.message);
         }
 
         const USER = result.user;
 
-        const verification = await VERIFICATIONS.findOne({
-            verificationBy: USER._id,
-            verificationType: "reset",
-            verified: true,
-        });
+        // Must be verified AND unexpired: "some verified reset record exists
+        // for this email" is not authorization — an abandoned reset must not
+        // linger as a standing credential.
+        const verification = await findActiveVerification(USER.id, "reset", { verified: true });
 
         if (!verification) {
-            return res.json({
-                success: false,
-                message: "Reset verification required.",
-            });
+            return fail(res, 400, "Reset verification required.");
         }
 
-        // Without these two checks the endpoint accepted "some verified reset
-        // record exists for this email" as authorization: a user who abandoned
-        // a reset after entering the code left behind a record that never
-        // expired, letting anyone who knew the address change the password.
-        if (verification.expires < Date.now()) {
-            await VERIFICATIONS.deleteOne({ _id: verification._id });
-            return res.json({ success: false, message: "Code expired." });
+        if (verification.expiresAt.getTime() < Date.now()) {
+            await prisma.verification.delete({ where: { id: verification.id } }).catch(() => {});
+            return fail(res, 400, "Code expired.");
         }
 
-        const codeMatches = await bcrypt.compare(String(code), verification.verificationCode);
+        const codeMatches = await compareCode(code, verification);
         if (!codeMatches) {
-            verification.attempts = (verification.attempts || 0) + 1;
-            if (verification.attempts >= MAX_CODE_ATTEMPTS) {
-                await VERIFICATIONS.deleteOne({ _id: verification._id });
-                return res.json({ success: false, message: "Too many incorrect attempts. Request a new code." });
+            const destroyed = await recordFailedAttempt(verification);
+            if (destroyed) {
+                return fail(res, 400, "Too many incorrect attempts. Request a new code.");
             }
-            await verification.save();
-            return res.json({ success: false, message: "Invalid code." });
+            return fail(res, 400, "Invalid code.");
         }
 
         const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-        USER.password = hashedPassword;
-        // Invalidate every session issued before this reset — otherwise a user
-        // resetting *because* their session was stolen leaves the thief's
-        // 7-day token working.
-        USER.tokenVersion = (USER.tokenVersion || 0) + 1;
-        // A stolen-session attacker may have added their own address here.
-        USER.trustedIPS = [];
-        await USER.save();
-
-        await VERIFICATIONS.deleteMany({
-            verificationBy: USER._id,
-            verificationType: "reset",
+        await prisma.user.update({
+            where: { id: USER.id },
+            data: {
+                password: hashedPassword,
+                // Invalidate every session issued before this reset — otherwise
+                // a user resetting *because* their session was stolen leaves the
+                // thief's 7-day token working.
+                tokenVersion: { increment: 1 },
+                // A stolen-session attacker may have added their own address here.
+                trustedIps: [],
+            },
         });
 
-        return res.json({ success: true, message: "Password changed successfully." });
+        await prisma.verification.deleteMany({
+            where: { userId: USER.id, type: "reset" },
+        });
+
+        return ok(res, { message: "Password changed successfully." });
     } catch (err) {
         console.error(err);
-        return res.json({ success: false, message: "Server error." });
+        return fail(res, 500, "Server error.");
     }
 });
 

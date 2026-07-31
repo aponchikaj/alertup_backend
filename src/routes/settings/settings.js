@@ -1,52 +1,56 @@
 import express from 'express';
 const router = express.Router();
 
-import USERS from '../../models/user.model.js';
-import VERIFICATIONS from '../../models/verificatios.model.js';
-import whoami from '../../middlewares/whoami.js';
 import bcrypt from 'bcrypt';
+
+import prisma from '../../db/prisma.js';
+import whoami from '../../middlewares/whoami.js';
 import sendMail from '../../services/sendEmail.js';
 import { displayName } from '../../services/displayName.js';
 import { checkNames } from '../../services/validation.js';
 import { emailLimiter, authLimiter } from '../../services/rateLimiter.js';
-import { deleteUserCascade } from '../../services/cascadeDelete.js';
-import crypto from 'crypto';
-import jwt from 'jsonwebtoken';
-
-// Math.random() is predictable from a handful of observed outputs, which would
-// let an attacker derive a victim's next verification code.
-const generateCode = () => crypto.randomInt(100000, 1000000);
-
-// Wrong guesses allowed against a single code before it is destroyed.
-const MAX_CODE_ATTEMPTS = 5;
+import { ok, fail } from '../../utils/respond.js';
+import {
+  issueVerification,
+  findActiveVerification,
+  compareCode,
+  recordFailedAttempt,
+  LONG_CODE_TTL_MS,
+} from '../../services/verificationCodes.js';
+import {
+  signSessionToken,
+  setSessionCookie,
+  clearSessionCookie,
+} from '../../utils/session.js';
 
 // GET /api/settings
 router.get('/api/settings', whoami, async (req, res) => {
   try {
-    const user = await USERS.findById(req.user._id);
-    if (!user) return res.send({ Success: false, Message: "User not found." });
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+    if (!user) return fail(res, 404, "User not found.");
 
+    // Response keys are the ones the frontend already reads; only the source
+    // columns changed (phones -> phone, TwoFactorEnabled -> twoFactorEnabled).
     const settings = {
       country: user.country,
-      phone: user.phones,
-      verified:user.verified,
-      userType:user.userType,
-      name:user.name,
-      lastname:user.lastname,
-      company:user.company,
-      TwoFactorEnabled:user.TwoFactorEnabled
+      phone: user.phone,
+      verified: user.verified,
+      userType: user.userType,
+      name: user.name,
+      lastname: user.lastname,
+      company: user.company,
+      TwoFactorEnabled: user.twoFactorEnabled,
     };
 
-    return res.send({ Success: true, Message: settings });
+    return ok(res, { data: settings });
   } catch (err) {
-    return res.send({ Success: false, Message: "Server error." });
+    console.error('GET /api/settings error:', err);
+    return fail(res, 500, "Server error.");
   }
-}); 
+});
 
 // PUT /api/settings/save
-// Saves the fields the settings page actually sends. This previously validated
-// a `username` that neither the client nor the schema had, so every save was
-// rejected and name/lastname/company could never be changed at all.
+// Saves the fields the settings page actually sends.
 router.put('/api/settings/save', whoami, async (req, res) => {
   const { name, lastname, company, country, phone } = req.body;
 
@@ -54,72 +58,70 @@ router.put('/api/settings/save', whoami, async (req, res) => {
     const userType = req.user.userType;
 
     const nameError = checkNames({ userType, name, lastname, company });
-    if (nameError) return res.send({ Success: false, Message: nameError });
+    if (nameError) return fail(res, 400, nameError);
 
-    if (!country || !phone) return res.send({ Success: false, Message: "Invalid fields." });
+    if (!country || !phone) return fail(res, 400, "Invalid fields.");
 
     // Only write the name fields that apply to this account type, so a Company
     // cannot end up with a personal name attached (and vice versa).
     const updates = {
-      country,
-      phones: phone,
+      country: String(country),
+      phone: String(phone),
     };
 
-    if (userType === 'Individual') {
+    if (userType === 'INDIVIDUAL') {
       updates.name = name.trim();
       updates.lastname = lastname.trim();
     } else {
       updates.company = company.trim();
     }
 
-    await USERS.findByIdAndUpdate(req.user._id, updates, { new: true });
+    await prisma.user.update({ where: { id: req.user.id }, data: updates });
 
-    return res.send({ Success: true, Message: "Profile saved." });
+    return ok(res, { message: "Profile saved." });
   } catch (err) {
     console.error('PUT /api/settings/save error:', err);
-    return res.send({ Success: false, Message: "Server error." });
+    return fail(res, 500, "Server error.");
   }
 });
 
-// PUT /api/settings/change-password
+// PUT /api/settings/changePassword
 router.put('/api/settings/changePassword', whoami, async (req, res) => {
   const { oldPassword, newPassword } = req.body;
 
-  if (!oldPassword || !newPassword) return res.send({ Success: false, Message: "Invalid fields." });
-  if (newPassword.length < 6 || newPassword.length > 16) return res.send({ Success: false, Message: "Password must be 6-16 characters." });
+  if (!oldPassword || !newPassword) return fail(res, 400, "Invalid fields.");
+  if (typeof newPassword !== 'string' || newPassword.length < 6 || newPassword.length > 16) {
+    return fail(res, 400, "Password must be 6-16 characters.");
+  }
 
   try {
-    // password is select:false on the schema, so it must be requested here.
-    const user = await USERS.findById(req.user._id).select('+password');
-    const oldPasswordMatches = await bcrypt.compare(oldPassword, user.password);
-    if (!oldPasswordMatches) return res.send({ Success: false, Message: "Old password is incorrect." });
+    // password is globally omitted, so it must be opted back in here.
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      omit: { password: false },
+    });
+    const oldPasswordMatches = await bcrypt.compare(String(oldPassword), user.password || '');
+    if (!oldPasswordMatches) return fail(res, 401, "Old password is incorrect.");
 
     const newPasswordMatchesOld = await bcrypt.compare(newPassword, user.password);
-    if (newPasswordMatchesOld) return res.send({ Success: false, Message: "You cannot use the same password." });
+    if (newPasswordMatchesOld) return fail(res, 400, "You cannot use the same password.");
 
     const hashed = await bcrypt.hash(newPassword, 10);
     // Cuts off every session issued before the change, so a stolen cookie stops
-    // working. The caller's own session is re-issued below rather than dropped.
-    const updated = await USERS.findByIdAndUpdate(
-      user._id,
-      { password: hashed, $inc: { tokenVersion: 1 } },
-      { new: true },
-    );
-
-    const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
-    res.cookie('userToken', jwt.sign(
-      { userID: updated._id, tokenVersion: updated.tokenVersion },
-      process.env.JWT_SECRET,
-      { expiresIn: '7d' },
-    ), {
-      httpOnly: true,
-      secure: reqIsSecure,
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-      path: '/',
-      sameSite: reqIsSecure ? 'None' : 'Lax',
+    // working, and drops the trusted-address list a session thief may have
+    // extended. The caller's own session is re-issued below rather than dropped.
+    const updated = await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        password: hashed,
+        tokenVersion: { increment: 1 },
+        trustedIps: [],
+      },
     });
 
-    res.send({ Success: true, Message: "Password updated successfully." });
+    setSessionCookie(req, res, signSessionToken(updated));
+
+    ok(res, { message: "Password updated successfully." });
     try {
         const passwordChangedHTML = `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
@@ -139,46 +141,46 @@ router.put('/api/settings/changePassword', whoami, async (req, res) => {
     } catch (err) {
         console.error("MAIL ERROR:", err);
     }
-  } catch {
-    return res.send({ Success: false, Message: "Server error." });
+  } catch (err) {
+    console.error('PUT /api/settings/changePassword error:', err);
+    return fail(res, 500, "Server error.");
   }
 });
 
 // POST /api/settings/email - send verification code for new email
 router.post('/api/settings/email', whoami, emailLimiter, async (req, res) => {
   const { newEmail } = req.body;
-  if (typeof newEmail !== 'string' || !newEmail.includes('@')) return res.status(400).send({ Success: false, Message: "Invalid email." });
+  if (typeof newEmail !== 'string' || !newEmail.includes('@')) return fail(res, 400, "Invalid email.");
 
   const normalizedEmail = newEmail.toLowerCase().trim();
 
   try {
-    const user = await USERS.findById(req.user._id);
+    const user = req.user;
 
-    // Scoped by type: an unscoped delete also destroyed any pending 2FA or
+    // Scoped by type: an unscoped delete would also destroy any pending 2FA or
     // password-reset code the user had in flight.
-    await VERIFICATIONS.findOneAndDelete({ verificationBy: user._id, verificationType: 'change email' });
-
-    if (user.email === normalizedEmail) return res.send({ Success: false, Message: "Can't use the same email." });
-
-    const taken = await USERS.findOne({ email: normalizedEmail, _id: { $ne: user._id } });
-    if (taken) return res.send({ Success: false, Message: "That email is already in use." });
-
-    const code = generateCode();
-
-    const verification = new VERIFICATIONS({
-      verificationType: 'change email',
-      // Hashed, matching how the reset and 2FA flows store their codes.
-      verificationCode: await bcrypt.hash(String(code), 12),
-      // Binds the code to the address it is mailed to, so the address proven
-      // at verification time is the one that actually received the code.
-      pendingEmail: normalizedEmail,
-      verificationBy: user._id,
-      expires: Date.now() + 10 * 60 * 1000 // 10 minutes
+    await prisma.verification.deleteMany({
+      where: { userId: user.id, type: 'change email' },
     });
 
-    await verification.save();
+    if (user.email === normalizedEmail) return fail(res, 400, "Can't use the same email.");
 
-    res.send({ Success: true, Message: "Verification code sent." });
+    const taken = await prisma.user.findFirst({
+      where: { email: normalizedEmail, NOT: { id: user.id } },
+    });
+    if (taken) return fail(res, 409, "That email is already in use.");
+
+    // Hashed code, 10-minute expiry. pendingEmail binds the code to the
+    // address it is mailed to, so the address proven at verification time is
+    // the one that actually received the code.
+    const { code } = await issueVerification({
+      userId: user.id,
+      type: 'change email',
+      ttlMs: LONG_CODE_TTL_MS,
+      pendingEmail: normalizedEmail,
+    });
+
+    ok(res, { message: "Verification code sent." });
     try {
         const emailVerifyHTML = `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
@@ -198,27 +200,28 @@ router.post('/api/settings/email', whoami, emailLimiter, async (req, res) => {
     } catch (err) {
         console.error("MAIL ERROR:", err);
     }
-  } catch {
-    return res.send({ Success: false, Message: "Server error." });
+  } catch (err) {
+    console.error('POST /api/settings/email error:', err);
+    return fail(res, 500, "Server error.");
   }
 });
 
 // PUT /api/settings/email - verify new email
 router.put('/api/settings/email', whoami, async (req, res) => {
   const { newEmail, userCode } = req.body;
-  if (typeof newEmail !== 'string' || !userCode || !newEmail.includes('@') || userCode.toString().length !== 6)
-    return res.status(400).send({ Success: false, Message: "Invalid fields." });
+  if (typeof newEmail !== 'string' || !userCode || !newEmail.includes('@') || String(userCode).length !== 6)
+    return fail(res, 400, "Invalid fields.");
 
   const normalizedEmail = newEmail.toLowerCase().trim();
 
   try {
-    const user = await USERS.findById(req.user._id);
-    const verification = await VERIFICATIONS.findOne({ verificationBy: user._id, verificationType: 'change email' });
+    const user = req.user;
+    const verification = await findActiveVerification(user.id, 'change email');
 
-    if (!verification) return res.send({ Success: false, Message: "Verification expired or invalid." });
-    if (verification.expires < Date.now()) {
-      await VERIFICATIONS.findByIdAndDelete(verification._id);
-      return res.send({ Success: false, Message: "Verification code expired." });
+    if (!verification) return fail(res, 400, "Verification expired or invalid.");
+    if (verification.expiresAt.getTime() < Date.now()) {
+      await prisma.verification.delete({ where: { id: verification.id } }).catch(() => {});
+      return fail(res, 400, "Verification code expired.");
     }
 
     // The submitted address must be the one the code was mailed to. Without
@@ -226,29 +229,34 @@ router.put('/api/settings/email', whoami, async (req, res) => {
     // then submit a victim's address, moving the victim's email onto their
     // own account.
     if (verification.pendingEmail !== normalizedEmail)
-      return res.send({ Success: false, Message: "This code was issued for a different email address." });
+      return fail(res, 400, "This code was issued for a different email address.");
 
-    const codeMatches = await bcrypt.compare(String(userCode), verification.verificationCode);
+    const codeMatches = await compareCode(userCode, verification);
     if (!codeMatches) {
-      verification.attempts = (verification.attempts || 0) + 1;
-      if (verification.attempts >= MAX_CODE_ATTEMPTS) {
-        await VERIFICATIONS.findByIdAndDelete(verification._id);
-        return res.send({ Success: false, Message: "Too many incorrect attempts. Request a new code." });
+      const destroyed = await recordFailedAttempt(verification);
+      if (destroyed) {
+        return fail(res, 400, "Too many incorrect attempts. Request a new code.");
       }
-      await verification.save();
-      return res.send({ Success: false, Message: "Invalid code." });
+      return fail(res, 400, "Invalid code.");
     }
 
     // Re-checked here because the address may have been claimed in the window
-    // between requesting the code and submitting it.
-    const taken = await USERS.findOne({ email: normalizedEmail, _id: { $ne: user._id } });
-    if (taken) return res.send({ Success: false, Message: "That email is already in use." });
+    // between requesting the code and submitting it. The unique constraint on
+    // users.email backstops the remaining race.
+    const taken = await prisma.user.findFirst({
+      where: { email: normalizedEmail, NOT: { id: user.id } },
+    });
+    if (taken) return fail(res, 409, "That email is already in use.");
 
-    await USERS.findByIdAndUpdate(user._id, { email: normalizedEmail });
-    await VERIFICATIONS.findByIdAndDelete(verification._id);
+    try {
+      await prisma.user.update({ where: { id: user.id }, data: { email: normalizedEmail } });
+    } catch (err) {
+      if (err.code === 'P2002') return fail(res, 409, "That email is already in use.");
+      throw err;
+    }
+    await prisma.verification.delete({ where: { id: verification.id } }).catch(() => {});
 
-
-    res.send({ Success: true, Message: "Email updated successfully." });
+    ok(res, { message: "Email updated successfully." });
     try {
         const emailUpdatedHTML = `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
@@ -268,29 +276,24 @@ router.put('/api/settings/email', whoami, async (req, res) => {
     } catch (err) {
         console.error("MAIL ERROR:", err);
     }
-  } catch {
-    return res.send({ Success: false, Message: "Server error." });
+  } catch (err) {
+    console.error('PUT /api/settings/email error:', err);
+    return fail(res, 500, "Server error.");
   }
 });
 
 // POST /api/settings/verify - send account verification code
 router.post('/api/settings/verify', whoami, emailLimiter, async (req, res) => {
   try {
-    const user = await USERS.findById(req.user._id);
-    await VERIFICATIONS.findOneAndDelete({ verificationBy: user._id, verificationType: 'verify account' });
+    const user = req.user;
 
-    const code = generateCode();
-
-    const verification = new VERIFICATIONS({
-      verificationBy: user._id,
-      verificationCode: await bcrypt.hash(String(code), 12),
-      verificationType: 'verify account',
-      expires: Date.now() + 10 * 60 * 1000
+    const { code } = await issueVerification({
+      userId: user.id,
+      type: 'verify account',
+      ttlMs: LONG_CODE_TTL_MS,
     });
 
-    await verification.save();
-
-    res.send({ Success: true, Message: "Verification code sent." });
+    ok(res, { message: "Verification code sent." });
     try {
         const accountVerifyHTML = `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
@@ -310,8 +313,9 @@ router.post('/api/settings/verify', whoami, emailLimiter, async (req, res) => {
     } catch (err) {
         console.error("MAIL ERROR:", err);
     }
-  } catch {
-    return res.send({ Success: false, Message: "Server error." });
+  } catch (err) {
+    console.error('POST /api/settings/verify error:', err);
+    return fail(res, 500, "Server error.");
   }
 });
 
@@ -319,35 +323,32 @@ router.post('/api/settings/verify', whoami, emailLimiter, async (req, res) => {
 router.put('/api/settings/verify', whoami, authLimiter, async (req, res) => {
   const { userCode } = req.body;
 
-  // Coerced first: a code sent as a JSON number has no .length, so this check
-  // rejected every numeric submission while the email-change route accepted it.
-  if (!userCode || String(userCode).length !== 6) return res.status(400).send({ Success: false, Message: "Invalid verification code." });
+  // Coerced first: a code sent as a JSON number has no .length.
+  if (!userCode || String(userCode).length !== 6) return fail(res, 400, "Invalid verification code.");
 
   try {
-    const user = await USERS.findById(req.user._id);
-    const verification = await VERIFICATIONS.findOne({ verificationBy: user._id, verificationType: 'verify account' });
+    const user = req.user;
+    const verification = await findActiveVerification(user.id, 'verify account');
 
-    if (!verification) return res.send({ Success: false, Message: "Verification expired or invalid." });
-    if (verification.expires < Date.now()) {
-      await VERIFICATIONS.findByIdAndDelete(verification._id);
-      return res.send({ Success: false, Message: "Verification expired." });
+    if (!verification) return fail(res, 400, "Verification expired or invalid.");
+    if (verification.expiresAt.getTime() < Date.now()) {
+      await prisma.verification.delete({ where: { id: verification.id } }).catch(() => {});
+      return fail(res, 400, "Verification expired.");
     }
 
-    const codeMatches = await bcrypt.compare(String(userCode), verification.verificationCode);
+    const codeMatches = await compareCode(userCode, verification);
     if (!codeMatches) {
-      verification.attempts = (verification.attempts || 0) + 1;
-      if (verification.attempts >= MAX_CODE_ATTEMPTS) {
-        await VERIFICATIONS.findByIdAndDelete(verification._id);
-        return res.send({ Success: false, Message: "Too many incorrect attempts. Request a new code." });
+      const destroyed = await recordFailedAttempt(verification);
+      if (destroyed) {
+        return fail(res, 400, "Too many incorrect attempts. Request a new code.");
       }
-      await verification.save();
-      return res.send({ Success: false, Message: "Invalid code." });
+      return fail(res, 400, "Invalid code.");
     }
 
-    await USERS.findByIdAndUpdate(user._id, { verified: true });
-    await VERIFICATIONS.findByIdAndDelete(verification._id);
+    await prisma.user.update({ where: { id: user.id }, data: { verified: true } });
+    await prisma.verification.delete({ where: { id: verification.id } }).catch(() => {});
 
-    res.send({ Success: true, Message: "Account verified." });
+    ok(res, { message: "Account verified." });
     try {
       const verifiedHTML = `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
@@ -367,35 +368,47 @@ router.put('/api/settings/verify', whoami, authLimiter, async (req, res) => {
     } catch (err) {
       console.error("MAIL ERROR:", err);
     }
-  } catch {
-    return res.send({ Success: false, Message: "Server error." });
+  } catch (err) {
+    console.error('PUT /api/settings/verify error:', err);
+    return fail(res, 500, "Server error.");
   }
 });
 
 // POST /api/settings/account - delete account
 router.post('/api/settings/account', whoami, async (req, res) => {
   const { password } = req.body;
-  if (!password) return res.send({ Success: false, Message: "Password required." });
+  if (!password) return fail(res, 400, "Password required.");
   try {
-    // password is select:false on the schema, so it must be requested here.
-    const user = await USERS.findById(req.user._id).select('+password');
-    const validPassword = await bcrypt.compare(password, user.password);
-    if (!validPassword) return res.send({ Success: false, Message: "Incorrect password." });
+    // password is globally omitted, so it must be opted back in here.
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      omit: { password: false },
+    });
+    const validPassword = await bcrypt.compare(String(password), user.password || '');
+    if (!validPassword) return fail(res, 401, "Incorrect password.");
 
     // Removes their buildings, floors, nodes, logs, emergencies and reviews
     // too — the farewell email below promises exactly that.
-    await deleteUserCascade(user._id);
-
-    // Determine whether the current request is secure (HTTPS)
-    const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
-    res.clearCookie('userToken', {
-        httpOnly: true,
-        secure: reqIsSecure,
-        sameSite: reqIsSecure ? 'None' : 'Lax',
-        path: '/',
+    //
+    // Postgres FK cascades handle everything hanging off a building and off the
+    // user, with two exceptions handled explicitly here:
+    //  - buildings.ownerId has no ON DELETE action, so owned buildings are
+    //    deleted first (their delete cascades floors/nodes/edges/roles/
+    //    members/invites/logs/scans);
+    //  - members/invites reference roles with RESTRICT, so they are removed
+    //    before the building delete cascades the roles away, and invites this
+    //    user sent into other people's buildings are removed before the user.
+    await prisma.$transaction(async (tx) => {
+      await tx.buildingMember.deleteMany({ where: { building: { ownerId: user.id } } });
+      await tx.buildingInvite.deleteMany({ where: { building: { ownerId: user.id } } });
+      await tx.building.deleteMany({ where: { ownerId: user.id } });
+      await tx.buildingInvite.deleteMany({ where: { invitedById: user.id } });
+      await tx.user.delete({ where: { id: user.id } });
     });
 
-    res.send({ Success: true, Message: "Account deleted." });
+    clearSessionCookie(req, res);
+
+    ok(res, { message: "Account deleted." });
     try {
         const goodbyeHTML = `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
@@ -416,26 +429,20 @@ router.post('/api/settings/account', whoami, async (req, res) => {
     } catch (err) {
         console.error("MAIL ERROR:", err);
     }
-  } catch {
-    return res.send({ Success: false, Message: "Server error." });
+  } catch (err) {
+    console.error('POST /api/settings/account error:', err);
+    return fail(res, 500, "Server error.");
   }
 });
 
 // POST /api/settings/logout
 router.post('/api/settings/logout', whoami, async (req, res) => {
   try {
-    // Determine whether the current request is secure (HTTPS)
-    const reqIsSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
-    
-    res.clearCookie('userToken', {
-        httpOnly: true,
-        secure: reqIsSecure, // must match login
-        sameSite: reqIsSecure ? 'None' : 'Lax', // must match login
-        path: '/', // must match login
-    });
-    return res.send({ Success: true, Message: "Logged out successfully." });
+    // Attributes must match the ones login set, or the browser keeps the cookie.
+    clearSessionCookie(req, res);
+    return ok(res, { message: "Logged out successfully." });
   } catch {
-    return res.send({ Success: false, Message: "Server error." });
+    return fail(res, 500, "Server error.");
   }
 });
 

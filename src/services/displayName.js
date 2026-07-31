@@ -13,7 +13,10 @@
 export const displayName = (user) => {
   if (!user) return 'there';
 
-  if (user.userType === 'Company') {
+  // userType is the legacy string ('Company') on Mongoose documents and the
+  // Postgres enum value ('COMPANY') on Prisma rows — accept both.
+  const type = typeof user.userType === 'string' ? user.userType.trim().toUpperCase() : '';
+  if (type === 'COMPANY') {
     return (user.company || '').trim() || 'there';
   }
 

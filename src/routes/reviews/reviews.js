@@ -1,7 +1,8 @@
 import express from "express";
-import WEBSITE_REVIEWS from "../../models/reviews.model.js";
+import prisma from "../../db/prisma.js";
 import whoami from "../../middlewares/whoami.js";
 import sendMail from "../../services/sendEmail.js";
+import { ok, fail } from "../../utils/respond.js";
 
 const router = express.Router();
 
@@ -11,47 +12,42 @@ router.post("/api/review/alertup", whoami, async (req, res) => {
   try {
     // Validate stars
     if (typeof stars !== "number" || stars < 1 || stars > 5) {
-      return res.send({
-        Success: false,
-        Message: "Stars must be between 1 and 5.",
-      });
+      return fail(res, 400, "Stars must be between 1 and 5.");
     }
 
     // Validate comment length
     if (comment && comment.length > 500) {
-      return res.send({
-        Success: false,
-        Message: "Comment too long.",
-      });
+      return fail(res, 400, "Comment too long.");
     }
 
-    // Check if user already sent review
-    const exists = await WEBSITE_REVIEWS.findOne({
-      userID: req.user._id,
+    // Check if user already sent a review (userId is unique on Review)
+    const exists = await prisma.review.findUnique({
+      where: { userId: req.user.id },
     });
 
     if (exists) {
-      return res.send({
-        Success: false,
-        Message: "Already sent.",
-      });
+      return fail(res, 409, "Already sent.");
     }
 
     const displayName =
-      req.user.userType === "Individual"
-        ? req.user.name
-        : req.user.company;
+      req.user.userType === "COMPANY" ? req.user.company : req.user.name;
 
-    const reviewConfig = {
-      userID: req.user._id,
-      userName: displayName,
-      userType: req.user.userType,
-      stars: stars,
-      comment: comment,
-    };
-
-    const newWebsiteReview = new WEBSITE_REVIEWS(reviewConfig);
-    await newWebsiteReview.save();
+    try {
+      await prisma.review.create({
+        data: {
+          userId: req.user.id,
+          userName: displayName,
+          userType: req.user.userType,
+          stars,
+          comment,
+        },
+      });
+    } catch (err) {
+      // Unique(userId) race: two submissions in flight — same answer as the
+      // pre-check above.
+      if (err.code === "P2002") return fail(res, 409, "Already sent.");
+      throw err;
+    }
 
     // Email HTML
     const reviewThankYouHTML = `
@@ -102,41 +98,29 @@ router.post("/api/review/alertup", whoami, async (req, res) => {
       console.error("Couldn't send email:", err.message);
     }
 
-    return res.send({
-      Success: true,
-      Message: "Sent.",
-    });
+    return ok(res, { message: "Sent." });
   } catch (err) {
     console.error(err);
-    return res.send({
-      Success: false,
-      Message: "Something went wrong.",
-    });
+    return fail(res, 500, "Something went wrong.");
   }
 });
 
 router.get("/api/review/already", whoami, async (req, res) => {
   try {
-    const exists = await WEBSITE_REVIEWS.findOne({
-      userID: req.user._id,
+    const exists = await prisma.review.findUnique({
+      where: { userId: req.user.id },
     });
 
+    // success:false + "Sent" is the legacy contract the frontend reads to know
+    // the user already reviewed; it now rides a real conflict status.
     if (exists) {
-      return res.send({
-        Success: false,
-        Message: "Sent",
-      });
+      return fail(res, 409, "Sent");
     }
 
-    return res.send({
-      Success: true,
-      Message: "Can",
-    });
-  } catch {
-    return res.send({
-      Success: false,
-      Message: "Something went wrong.",
-    });
+    return ok(res, { message: "Can" });
+  } catch (err) {
+    console.error(err);
+    return fail(res, 500, "Something went wrong.");
   }
 });
 

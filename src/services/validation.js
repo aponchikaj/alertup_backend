@@ -18,7 +18,11 @@ const filter = new Filter();
  * @returns {string|null} error message, or null when valid
  */
 export const checkNames = ({ userType, name, lastname, company }) => {
-  if (userType === 'Individual') {
+  // Legacy string ('Individual'/'Company') on Mongoose documents, Postgres
+  // enum value ('INDIVIDUAL'/'COMPANY') on Prisma rows — accept both.
+  const type = typeof userType === 'string' ? userType.trim().toUpperCase() : '';
+
+  if (type === 'INDIVIDUAL') {
     const first = (name || '').trim();
     const last = (lastname || '').trim();
 
@@ -29,7 +33,7 @@ export const checkNames = ({ userType, name, lastname, company }) => {
     return null;
   }
 
-  if (userType === 'Company') {
+  if (type === 'COMPANY') {
     const companyName = (company || '').trim();
 
     if (companyName.length < 4 || companyName.length > 50) return 'Company name must be 4-50 characters.';

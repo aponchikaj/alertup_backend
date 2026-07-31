@@ -1,39 +1,45 @@
 import express from 'express'
 const router = express.Router()
 
-import CONTACTS from '../../models/contact.model.js';
+import prisma from '../../db/prisma.js';
+import config from '../../config/index.js';
 import sendMail from '../../services/sendEmail.js'
 import { emailLimiter } from '../../services/rateLimiter.js'
 import { escapeHtml } from '../../services/escapeHtml.js'
+import { ok, fail } from '../../utils/respond.js'
 
 const MAX_MESSAGE_LENGTH = 5000;
 
-router.post('/api/contact', emailLimiter, async(req,res)=>{
-    const {email,message,reason} = req.body;
+router.post('/api/contact', emailLimiter, async (req, res) => {
+    const { email, message, reason } = req.body;
     const date = new Date().toISOString()
 
-    if(!email || !message || !reason ){
-        return res.status(400).send({Success:false,Message:"Invalid fields."})
+    if (!email || !message || !reason) {
+        return fail(res, 400, "Invalid fields.")
     }
 
-    try{
-        if(typeof email !== 'string' || typeof message !== 'string' || typeof reason !== 'string'){
-            return res.status(400).send({Success:false,Message:"Invalid fields."})
+    try {
+        if (typeof email !== 'string' || typeof message !== 'string' || typeof reason !== 'string') {
+            return fail(res, 400, "Invalid fields.")
         }
-        if(!email.includes('@')){
-            return res.status(400).send({Success:false,Message:"Invalid Email."})
+        if (!email.includes('@')) {
+            return fail(res, 400, "Invalid Email.")
         }
-        if(message.length > MAX_MESSAGE_LENGTH){
-            return res.status(400).send({Success:false,Message:"Message is too long."})
+        if (message.length > MAX_MESSAGE_LENGTH) {
+            return fail(res, 400, "Message is too long.")
         }
-        const newContact = await CONTACTS({
-            email:email,
-            message:message,
-            contactType:reason,
-            createdAt:date
+
+        await prisma.contact.create({
+            data: {
+                email,
+                message,
+                contactType: reason,
+            },
         })
-        await newContact.save()
-        res.send({Success:true,Message:"Sent."})
+
+        // Respond first — the notification email must not delay or fail the
+        // submission the user already made.
+        ok(res, { message: "Sent." })
         try {
             const contactHTML = `
               <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
@@ -53,12 +59,13 @@ router.post('/api/contact', emailLimiter, async(req,res)=>{
                 </div>
               </div>
             `;
-            await sendMail(process.env.GMAIL_USER,'New Message - Alertup',`Author: ${email}, Reason: ${reason}, Message: ${message}. ${date}`, undefined, contactHTML)
+            await sendMail(config.email.notifyRecipient, 'New Message - Alertup', `Author: ${email}, Reason: ${reason}, Message: ${message}. ${date}`, undefined, contactHTML)
         } catch (err) {
             console.error("MAIL ERROR:", err);
         }
-    }catch{
-        return res.send({Success:false,Message:"Server error."})
+    } catch (err) {
+        console.error("Contact submission error:", err);
+        return fail(res, 500, "Server error.")
     }
 })
 
