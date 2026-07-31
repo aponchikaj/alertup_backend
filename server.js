@@ -1,5 +1,6 @@
 import cors from 'cors'
 import express from 'express'
+import compression from 'compression'
 import bparser from 'body-parser'
 import cparser from 'cookie-parser'
 import { pathToFileURL } from 'url'
@@ -93,6 +94,27 @@ app.use(cors({
   },
   credentials: true // important for cookies
 }))
+
+/* Compression.
+   Route and graph payloads are the biggest thing this API sends — a scan
+   response carries every node on the floor, and the editor's graph endpoint
+   carries the whole building. That JSON is highly repetitive, so gzip cuts it
+   by roughly 80%, which is the difference between a fast and a slow map on a
+   phone inside a building with poor signal.
+
+   SSE streams are excluded: compression buffers, and a buffered event stream
+   is a broken event stream — the whole point is that the emergency broadcast
+   arrives immediately. */
+app.use(
+  compression({
+    filter: (req, res) => {
+      if (res.getHeader('Content-Type')?.toString().includes('text/event-stream')) {
+        return false;
+      }
+      return compression.filter(req, res);
+    },
+  })
+)
 
 app.use(bparser.json())
 
