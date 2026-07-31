@@ -78,6 +78,8 @@ export async function uploadBuffer({ key, buffer, contentType, cacheControl }) {
 export const keys = {
   floorMap: (buildingId, floorId, ext) =>
     `buildings/${buildingId}/floors/${floorId}/map-${Date.now()}-${randomBytes(4).toString('hex')}.${ext}`,
+  shopLogo: (buildingId, ext) =>
+    `buildings/${buildingId}/logos/${Date.now()}-${randomBytes(4).toString('hex')}.${ext}`,
   nodeQr: (buildingId, nodeId, ext) => `buildings/${buildingId}/qr/${nodeId}.${ext}`,
   floorQr: (buildingId, floorId) => `buildings/${buildingId}/qr/floor-${floorId}.png`,
   conversion: (ext) =>

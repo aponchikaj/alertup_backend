@@ -11,7 +11,7 @@ dotenv.config();
 
 if (!process.env.TEST_DATABASE_URL) {
   throw new Error(
-    'TEST_DATABASE_URL is not set. Start the test database (docker compose -f docker-compose.test.yml up -d, or a local instance) first.'
+    'TEST_DATABASE_URL is not set. Start a local PostgreSQL instance with a test database first.'
   );
 }
 const testHost = new URL(process.env.TEST_DATABASE_URL).hostname;

@@ -178,6 +178,12 @@ model Floor {
   mapImageUrl         String?
   qrCodeUrl           String?
   svgContent          String?  @db.Text
+  // Hand-drawn floor plan: { version, shapes[] } as authored in the map editor.
+  // Rendered underneath the node graph in place of an uploaded plan image, and
+  // shipped to visitors so a drawn floor looks the same in wayfinding. Shapes
+  // are presentation only — routing still runs on Node/Edge, which is why a
+  // stamped lift also creates a TRANSIT node rather than being inferred here.
+  drawing             Json?
   width               Int?
   height              Int?
   scalePixelsPerMeter Float?

@@ -19,6 +19,7 @@ export async function loadBuildingGraph(buildingId) {
         name: true,
         mapImageUrl: true,
         svgContent: true,
+        drawing: true,
         width: true,
         height: true,
         scalePixelsPerMeter: true,

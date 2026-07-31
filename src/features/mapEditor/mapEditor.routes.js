@@ -11,6 +11,8 @@ import { uploadBuffer, deleteByUrl, keys, contentTypeFor } from '../../services/
 import { invalidate } from '../wayfinding/graphCache.js';
 import { getGraph } from '../wayfinding/graphCache.js';
 import { validateGraph } from './graphValidation.js';
+import { normalizeDrawing } from './drawingSchema.js';
+import { buildQrSlug } from '../qr/qrPayload.js';
 import { createEdge, recomputeEdgesForNode, normalizePair, computeEdgeGeometry } from './edgeService.js';
 
 const router = Router();
@@ -29,6 +31,35 @@ const imageUpload = multer({
     cb(new Error('Only SVG, PNG, JPEG or WebP files are allowed'));
   },
 });
+
+/** Canvas bounds. The editor works in these units; metres are converted client
+ *  side against scalePixelsPerMeter, so the server only guards sanity. */
+const MIN_FLOOR_SIDE = 100;
+const MAX_FLOOR_SIDE = 20000;
+
+/**
+ * Read the optional width/height pair off a floor body.
+ *
+ * Returns `{ width, height }` as `undefined` when absent so a PATCH that does
+ * not mention them leaves the stored values alone.
+ *
+ * @param {Record<string, unknown>} body
+ * @returns {{width?: number, height?: number, error?: string}}
+ */
+const readDimensions = (body) => {
+  const out = {};
+  for (const key of ['width', 'height']) {
+    if (body[key] === undefined || body[key] === '') continue;
+    const n = Number(body[key]);
+    if (!Number.isFinite(n) || n < MIN_FLOOR_SIDE || n > MAX_FLOOR_SIDE) {
+      return {
+        error: `${key} must be between ${MIN_FLOOR_SIDE} and ${MAX_FLOOR_SIDE}.`,
+      };
+    }
+    out[key] = Math.round(n);
+  }
+  return out;
+};
 
 // ---------------------------------------------------------------- floors ----
 
@@ -51,12 +82,23 @@ router.post(
         return fail(res, 422, 'scalePixelsPerMeter must be a positive number.');
       }
 
+      // Drawn floors carry their own canvas size (derived from the room
+      // dimensions the user typed); uploaded ones inherit the default space.
+      const dims = readDimensions(req.body);
+      if (dims.error) return fail(res, 422, dims.error);
+
+      const drawing = normalizeDrawing(req.body.drawing);
+      if (!drawing.ok) return fail(res, 422, drawing.error);
+
       const floor = await prisma.floor.create({
         data: {
           buildingId: req.building.id,
           floorNumber,
           name: name || `Floor ${floorNumber}`,
           scalePixelsPerMeter: scale,
+          width: dims.width,
+          height: dims.height,
+          drawing: drawing.drawing ?? undefined,
         },
       });
 
@@ -135,6 +177,19 @@ router.patch(
       if (typeof req.body.svgContent === 'string') {
         data.svgContent = req.body.svgContent;
       }
+
+      const dims = readDimensions(req.body);
+      if (dims.error) return fail(res, 422, dims.error);
+      if (dims.width !== undefined) data.width = dims.width;
+      if (dims.height !== undefined) data.height = dims.height;
+
+      // Absent means "not part of this PATCH"; an explicit null clears it.
+      if (req.body.drawing !== undefined) {
+        const drawing = normalizeDrawing(req.body.drawing);
+        if (!drawing.ok) return fail(res, 422, drawing.error);
+        data.drawing = drawing.drawing;
+      }
+
       if (req.file) {
         const ext = req.file.mimetype === 'image/svg+xml' ? 'svg' : req.file.originalname.split('.').pop();
         data.mapImageUrl = await uploadBuffer({
@@ -181,6 +236,44 @@ router.delete(
   }
 );
 
+// ------------------------------------------------------------ shop logos ----
+
+/**
+ * POST /api/map-editor/buildings/:buildingId/logos
+ *
+ * Stores a shop logo and hands back its public URL, which the editor then
+ * writes into the shape's `logoUrl`. Kept building-scoped (rather than on the
+ * generic /api/upload router) so it inherits CAN_EDIT_MAP and the per-building
+ * key prefix instead of letting any authenticated user fill the bucket.
+ */
+router.post(
+  '/api/map-editor/buildings/:buildingId/logos',
+  ...canEditMap,
+  editorWriteLimiter,
+  imageUpload.single('logo'),
+  async (req, res) => {
+    try {
+      if (!req.file) return fail(res, 400, 'No logo uploaded.');
+
+      const ext =
+        req.file.mimetype === 'image/svg+xml'
+          ? 'svg'
+          : (req.file.originalname.split('.').pop() || 'png').toLowerCase();
+
+      const url = await uploadBuffer({
+        key: keys.shopLogo(req.building.id, ext),
+        buffer: req.file.buffer,
+        contentType: req.file.mimetype,
+      });
+
+      return ok(res, { status: 201, message: 'Logo uploaded.', data: { url } });
+    } catch (err) {
+      console.error('Upload logo error:', err);
+      return fail(res, 500, 'Server error.');
+    }
+  }
+);
+
 // ----------------------------------------------------------------- nodes ----
 
 router.post(
@@ -202,7 +295,7 @@ router.post(
         return fail(res, 422, `type must be one of ${NODE_TYPES.join(', ')}.`);
       }
 
-      const node = await prisma.node.create({
+      const created = await prisma.node.create({
         data: {
           buildingId: req.building.id,
           floorId: floor.id,
@@ -212,6 +305,26 @@ router.post(
           label: typeof label === 'string' ? label.trim().slice(0, 120) || null : null,
         },
       });
+
+      // Every node is scannable from the moment it exists.
+      //
+      // The slug is a pure function of (building, floor, node), but it used to
+      // be written only when someone opened the QR dialog — so a node could
+      // sit in the graph with no printable identity, and the editor had no way
+      // to show which points were ready to label. It needs the generated id,
+      // hence the follow-up update rather than a value passed to create().
+      let node = created;
+      try {
+        node = await prisma.node.update({
+          where: { id: created.id },
+          data: { qrSlug: buildQrSlug(req.building.id, floor.floorNumber, created.id) },
+        });
+      } catch (slugErr) {
+        // A node without a slug still routes; the QR route regenerates it on
+        // demand. Losing the whole node over this would be the worse trade.
+        console.error('Node qrSlug assignment failed:', slugErr);
+      }
+
       invalidate(req.building.id);
       return ok(res, { status: 201, message: 'Node created.', data: { node } });
     } catch (err) {

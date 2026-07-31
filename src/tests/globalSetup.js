@@ -10,7 +10,7 @@ export default async function globalSetup() {
   const url = process.env.TEST_DATABASE_URL;
   if (!url) {
     throw new Error(
-      'TEST_DATABASE_URL is not set. Start the test database (docker compose -f docker-compose.test.yml up -d, or a local instance) and set TEST_DATABASE_URL.'
+      'TEST_DATABASE_URL is not set. Start a local PostgreSQL instance with a test database and set TEST_DATABASE_URL.'
     );
   }
 

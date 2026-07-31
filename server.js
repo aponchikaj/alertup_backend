@@ -8,6 +8,7 @@ import { pathToFileURL } from 'url'
 import config from './src/config/index.js'
 import prisma from './src/db/prisma.js'
 import { closeAll as closeRealtime } from './src/features/realtime/broadcaster.js'
+import { initCollab, closeCollab } from './src/features/collab/collab.js'
 import { startSweeper } from './src/jobs/sweeper.js'
 
 import adminRoutes from './src/routes/admin/admin.js'
@@ -278,11 +279,17 @@ const startServer = async () => {
     console.log(`📍 Health check: http://localhost:${PORT}/health`);
   });
 
+  // Collaborative map editing rides the same HTTP server and the same origin
+  // allowlist the REST routes use. Initialized here, not at module scope, so
+  // importing server.js (supertest) never opens a socket listener.
+  initCollab(server, { allowedOrigins, allowAll: isAllowAll });
+
   // Render sends SIGTERM on deploy. Open SSE streams would otherwise stall
   // the drain until the kill timeout.
   const shutdown = async () => {
     console.log('SIGTERM received: closing realtime streams and server.');
     closeRealtime();
+    closeCollab();
     server.close(async () => {
       await prisma.$disconnect().catch(() => {});
       process.exit(0);

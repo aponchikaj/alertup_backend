@@ -49,6 +49,11 @@ describe('map editor API', () => {
     const a = nodeA.body.data.node;
     const b = nodeB.body.data.node;
 
+    // Every node is printable the moment it exists — the slug is not deferred
+    // until someone opens the QR dialog.
+    expect(a.qrSlug).toBe(`qr_${building.id}_1_${a.id}`);
+    expect(b.qrSlug).toBe(`qr_${building.id}_1_${b.id}`);
+
     // Edge
     const edgeRes = await request(app)
       .post('/api/map-editor/edges')
@@ -135,6 +140,89 @@ describe('map editor API', () => {
     const codes = validation.body.data.issues.map((i) => i.code);
     expect(codes).toContain('NO_EXIT');
     expect(codes).toContain('ORPHAN_NODE'); // t1b has no edges
+  });
+
+  test('a hand-drawn floor plan round-trips through create, patch and clear', async () => {
+    const { cookie, building } = await createOwnerWithBuilding();
+
+    // A floor drawn rather than uploaded carries its own canvas size, derived
+    // from the room dimensions the user typed.
+    const created = await request(app)
+      .post(`/api/map-editor/buildings/${building.id}/floors`)
+      .set('Cookie', cookie)
+      .field('floorNumber', '1')
+      .field('width', '1000')
+      .field('height', '800')
+      .field('scalePixelsPerMeter', '50');
+    expect(created.status).toBe(201);
+    const floor = created.body.data.floor;
+    expect(floor.width).toBe(1000);
+    expect(floor.height).toBe(800);
+
+    // Drawings travel as a JSON string in a multipart field.
+    const drawing = {
+      version: 1,
+      shapes: [
+        { id: 'a', kind: 'room', x: 0, y: 0, width: 100, height: 50, name: 'Lobby' },
+        {
+          id: 'b',
+          kind: 'shop',
+          x: 200,
+          y: 0,
+          width: 80,
+          height: 60,
+          name: 'Cafe',
+          logoUrl: 'javascript:alert(1)', // must not survive
+        },
+        { id: 'c', kind: 'icon', x: 40, y: 40, icon: 'ELEVATOR' },
+        { id: 'd', kind: 'nonsense', x: 0, y: 0 }, // unknown kind, dropped
+      ],
+    };
+
+    const patched = await request(app)
+      .patch(`/api/map-editor/floors/${floor.id}`)
+      .set('Cookie', cookie)
+      .field('drawing', JSON.stringify(drawing));
+    expect(patched.status).toBe(200);
+
+    const saved = patched.body.data.floor.drawing;
+    expect(saved.shapes.map((s) => s.id)).toEqual(['a', 'b', 'c']);
+    // The dangerous URL is stripped rather than the whole save being rejected.
+    expect(saved.shapes[1].logoUrl).toBeUndefined();
+    expect(saved.shapes[1].name).toBe('Cafe');
+
+    // The graph endpoint the editor loads from hands the drawing back.
+    const graph = await request(app)
+      .get(`/api/map-editor/buildings/${building.id}/graph`)
+      .set('Cookie', cookie);
+    expect(graph.status).toBe(200);
+    expect(graph.body.data.floors[0].drawing.shapes).toHaveLength(3);
+
+    // An empty field clears the drawing without touching anything else.
+    const cleared = await request(app)
+      .patch(`/api/map-editor/floors/${floor.id}`)
+      .set('Cookie', cookie)
+      .field('drawing', '');
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.data.floor.drawing).toBeNull();
+    expect(cleared.body.data.floor.width).toBe(1000); // untouched
+
+    // An oversized shape list is refused outright.
+    const tooMany = await request(app)
+      .patch(`/api/map-editor/floors/${floor.id}`)
+      .set('Cookie', cookie)
+      .field(
+        'drawing',
+        JSON.stringify({
+          shapes: Array.from({ length: 2001 }, () => ({
+            kind: 'icon',
+            x: 0,
+            y: 0,
+            icon: 'WC',
+          })),
+        }),
+      );
+    expect(tooMany.status).toBe(422);
   });
 });
 

@@ -15,6 +15,11 @@ const floorSummary = (floor) =>
         floorNumber: floor.floorNumber,
         name: floor.name || null,
         mapImageUrl: floor.mapImageUrl || null,
+        // Hand-drawn plans travel with the segment for the same reason the
+        // image URL does: the visitor map must render the floor without a
+        // second request. Bounded by the editor's shape/byte caps, and a route
+        // crosses any given floor once, so the repetition stays cheap.
+        drawing: floor.drawing || null,
         width: floor.width || null,
         height: floor.height || null,
         scalePixelsPerMeter: floor.scalePixelsPerMeter || null,
