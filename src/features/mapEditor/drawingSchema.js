@@ -34,7 +34,7 @@ const MAX_ID_LENGTH = 64;
 const MAX_NAME_LENGTH = 120;
 const MAX_TEXT_LENGTH = 500;
 
-const SHAPE_KINDS = ['wall', 'room', 'shop', 'icon', 'text'];
+const SHAPE_KINDS = ['wall', 'room', 'shop', 'icon', 'text', 'outline'];
 
 /** Stamped markers. Kept in sync with the frontend ICON_KINDS. */
 const ICON_KINDS = [
@@ -140,6 +140,13 @@ const normalizeShape = (raw, index) => {
     if (!pts) return null;
     const thickness = size(raw.thickness);
     return { ...base, points: pts, thickness: thickness ?? 4 };
+  }
+
+  if (kind === 'outline') {
+    // The floor footprint: a closed polygon, at least three corners.
+    const pts = points(raw.points);
+    if (!pts || pts.length < 6) return null;
+    return { ...base, points: pts };
   }
 
   if (kind === 'text') {

@@ -16,14 +16,17 @@ function groq() {
 export const FIRST_TOKEN_TIMEOUT_MS = 10000;
 
 /**
- * @param {{system: string, messages: Array<{role, content}>, signal?: AbortSignal}} params
+ * @param {{system: string, messages: Array<{role, content}>, signal?: AbortSignal,
+ *          maxTokens?: number}} params — maxTokens overrides the configured
+ *          cap; the visitor concierge stays terse (default ~300) while the
+ *          floor designer needs room for a whole drawing.
  * @returns {AsyncGenerator<string>} text deltas
  */
-export async function* streamChat({ system, messages, signal }) {
+export async function* streamChat({ system, messages, signal, maxTokens }) {
   const stream = await groq().chat.completions.create(
     {
       model: config.groq.model,
-      max_tokens: config.groq.maxTokens,
+      max_tokens: maxTokens || config.groq.maxTokens,
       temperature: 0.3,
       stream: true,
       messages: [{ role: 'system', content: system }, ...messages],

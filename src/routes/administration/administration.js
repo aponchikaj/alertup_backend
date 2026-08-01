@@ -11,6 +11,7 @@ import {
   triggerEmergency,
   resolveEmergency,
 } from '../../features/emergency/emergencyService.js';
+import { verifyChallenge } from '../../features/emergency/challenge.js';
 
 const router = express.Router();
 
@@ -66,6 +67,17 @@ router.post(
   requirePermission(PERMISSIONS.CAN_TRIGGER_EMERGENCY),
   async (req, res) => {
     try {
+      // Same arming challenge as the v2 trigger/resolve routes: flipping a
+      // whole building into evacuation mode must survive a mis-tap. 428 tells
+      // the client to run the challenge flow; 403 means the answer was wrong.
+      const challenge = req.body?.challenge;
+      if (!challenge?.token) {
+        return res.status(428).send({ Success: false, Message: 'CHALLENGE_REQUIRED' });
+      }
+      if (!verifyChallenge(challenge.token, challenge.answer)) {
+        return res.status(403).send({ Success: false, Message: 'CHALLENGE_FAILED' });
+      }
+
       if (req.building.emergencyMode === false) {
         await triggerEmergency(req.building.id, {
           userId: req.user.id,

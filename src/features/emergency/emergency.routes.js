@@ -12,8 +12,33 @@ import {
   resolveEmergency,
   recordAction,
 } from './emergencyService.js';
+import { createChallenge, verifyChallenge } from './challenge.js';
 
 const router = Router();
+
+/**
+ * The arming challenge gate. 428 (precondition required) so the client can
+ * tell "you forgot the challenge" apart from "you are not allowed" — the
+ * first is a UI flow, the second is a permissions problem.
+ */
+const requireChallenge = (req, res) => {
+  const challenge = req.body?.challenge;
+  if (!challenge?.token) {
+    fail(res, 428, 'CHALLENGE_REQUIRED');
+    return false;
+  }
+  if (!verifyChallenge(challenge.token, challenge.answer)) {
+    fail(res, 403, 'CHALLENGE_FAILED');
+    return false;
+  }
+  return true;
+};
+
+// Issued per attempt; auth-only (any signed-in user may fetch one — the
+// question itself is worthless without CAN_TRIGGER_EMERGENCY on the POST).
+router.get('/api/emergency/challenge', whoami, (req, res) => {
+  return ok(res, { data: createChallenge() });
+});
 
 router.post(
   '/api/emergency/buildings/:buildingId/trigger',
@@ -21,6 +46,7 @@ router.post(
   requirePermission(PERMISSIONS.CAN_TRIGGER_EMERGENCY),
   async (req, res) => {
     try {
+      if (!requireChallenge(req, res)) return;
       let { message } = req.body || {};
       if (message !== undefined && message !== null) {
         if (typeof message !== 'string') return fail(res, 422, 'message must be a string.');
@@ -56,6 +82,7 @@ router.post(
   requirePermission(PERMISSIONS.CAN_TRIGGER_EMERGENCY),
   async (req, res) => {
     try {
+      if (!requireChallenge(req, res)) return;
       const result = await resolveEmergency(req.building.id);
       return ok(res, {
         message: result.alreadyResolved

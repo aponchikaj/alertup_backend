@@ -17,6 +17,14 @@ enum UserType {
   COMPANY
 }
 
+// Subscription tier. Gates capacity (buildings, floors per building), not
+// features — safety features are never paywalled in evacuation software.
+enum Plan {
+  FREE
+  STARTER
+  BUSINESS
+}
+
 enum InviteStatus {
   PENDING
   ACCEPTED
@@ -72,6 +80,9 @@ model User {
   phone            String?
   verified         Boolean   @default(false)
   userType         UserType?
+  // New accounts start FREE; rows that existed before the FREE tier keep the
+  // STARTER default they were migrated with (grandfathering, not generosity).
+  plan             Plan      @default(FREE)
   twoFactorEnabled Boolean   @default(false)
   trustedIps       String[]  @default([])
   createdAt        DateTime  @default(now())

@@ -13,7 +13,9 @@ import { getGraph } from '../wayfinding/graphCache.js';
 import { validateGraph } from './graphValidation.js';
 import { normalizeDrawing } from './drawingSchema.js';
 import { buildQrSlug } from '../qr/qrPayload.js';
+import { floorLimitFor } from '../../services/plans.js';
 import { createEdge, recomputeEdgesForNode, normalizePair, computeEdgeGeometry } from './edgeService.js';
+import { planAutoConnect } from './autoConnect.js';
 
 const router = Router();
 
@@ -89,6 +91,27 @@ router.post(
 
       const drawing = normalizeDrawing(req.body.drawing);
       if (!drawing.ok) return fail(res, 422, drawing.error);
+
+      // Floor capacity follows the OWNER's plan, not the editor's — a member
+      // with edit rights must not be able to outgrow the plan the owner pays
+      // for. Checked at creation only; over-limit floors from a downgrade
+      // keep working (data is never held hostage), the building just cannot
+      // grow further.
+      const [floorCount, owner] = await Promise.all([
+        prisma.floor.count({ where: { buildingId: req.building.id } }),
+        prisma.user.findUnique({
+          where: { id: req.building.ownerId },
+          select: { plan: true },
+        }),
+      ]);
+      const limit = floorLimitFor(owner?.plan);
+      if (floorCount >= limit) {
+        return fail(
+          res,
+          403,
+          `This building has reached its plan's limit of ${limit} floors. Upgrade the plan to add more.`
+        );
+      }
 
       const floor = await prisma.floor.create({
         data: {
@@ -231,6 +254,65 @@ router.delete(
       return ok(res, { message: 'Floor deleted.' });
     } catch (err) {
       console.error('Delete floor error:', err);
+      return fail(res, 500, 'Server error.');
+    }
+  }
+);
+
+/**
+ * POST /api/map-editor/floors/:floorId/auto-connect
+ *
+ * Wire every node on the floor into one walkable graph in a single click:
+ * MST for connectivity seeded with existing edges, nearest-neighbour
+ * shortcuts, and drawn walls treated as hard blockers. Idempotent — running
+ * it twice creates nothing new.
+ */
+router.post(
+  '/api/map-editor/floors/:floorId/auto-connect',
+  ...canEditMap,
+  editorWriteLimiter,
+  async (req, res) => {
+    try {
+      const floor = await prisma.floor.findFirst({
+        where: { id: req.params.floorId, buildingId: req.building.id },
+      });
+      if (!floor) return fail(res, 404, 'Floor not found.');
+
+      const nodes = await prisma.node.findMany({
+        where: { floorId: floor.id },
+        select: { id: true, x: true, y: true },
+      });
+      if (nodes.length > 500) {
+        return fail(res, 422, 'Too many nodes for auto-connect (max 500).');
+      }
+      const nodeIds = nodes.map((n) => n.id);
+      const existing = await prisma.edge.findMany({
+        where: { sourceNodeId: { in: nodeIds }, targetNodeId: { in: nodeIds } },
+        select: { sourceNodeId: true, targetNodeId: true },
+      });
+
+      const planned = planAutoConnect(nodes, existing, floor.drawing);
+
+      const created = [];
+      for (const [a, b] of planned) {
+        try {
+          created.push(await createEdge({ sourceNodeId: a, targetNodeId: b }));
+        } catch (err) {
+          // A collaborator racing us to the same pair is fine; anything else
+          // still must not abort the remaining plan.
+          if (err?.code !== 'P2002') console.error('auto-connect edge error:', err);
+        }
+      }
+
+      invalidate(req.building.id);
+      return ok(res, {
+        message: created.length
+          ? `Connected ${created.length} pair(s).`
+          : 'Everything is already connected.',
+        data: { edges: created },
+      });
+    } catch (err) {
+      console.error('Auto-connect error:', err);
       return fail(res, 500, 'Server error.');
     }
   }

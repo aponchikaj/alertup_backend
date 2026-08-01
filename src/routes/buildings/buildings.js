@@ -1,4 +1,5 @@
 import express from 'express';
+import { buildingLimitFor, floorLimitFor } from '../../services/plans.js';
 import QRCode from 'qrcode';
 import jwt from 'jsonwebtoken';
 import { Filter } from 'bad-words';
@@ -114,6 +115,22 @@ router.post('/api/building/new', whoami, upload.array('maps'), async (req, res) 
     if (req.user.verified === false)
       return res.send({ Success: false, Message: 'Verify account first.' });
 
+    // Capacity per plan: the free tier maps one building end to end; paid
+    // tiers scale out. Floors are capped separately at floor creation.
+    const [ownedCount, planLimits] = await Promise.all([
+      prisma.building.count({ where: { ownerId: req.user.id } }),
+      Promise.resolve(buildingLimitFor(req.user.plan)),
+    ]);
+    if (ownedCount >= planLimits) {
+      return res.send({
+        Success: false,
+        Message: `Your plan allows up to ${planLimits} building${planLimits === 1 ? '' : 's'}. Upgrade to add more.`,
+      });
+    }
+
+    // Plan floor cap applies to the floors created with the building too.
+    const floorCap = floorLimitFor(req.user.plan);
+
     const { buildingName } = req.body;
     if (!buildingName || typeof buildingName !== 'string')
       return res.send({ Success: false, Message: 'Invalid building name.' });
@@ -121,6 +138,13 @@ router.post('/api/building/new', whoami, upload.array('maps'), async (req, res) 
     const floorNames = normalizeFloorNames(req.body.floorNames);
     if (floorNames.length === 0)
       return res.send({ Success: false, Message: 'Invalid floor names.' });
+
+    if (floorNames.length > floorCap) {
+      return res.send({
+        Success: false,
+        Message: `Your plan allows up to ${floorCap} floors per building. Upgrade to add more.`,
+      });
+    }
 
     const normalizedFloors = floorNames.map((f) => f.toLowerCase());
     if (new Set(normalizedFloors).size !== normalizedFloors.length)

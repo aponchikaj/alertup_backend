@@ -9,6 +9,166 @@ import { assembleRoute } from './routeAssembler.js';
 
 const router = Router();
 
+/**
+ * GET /api/wayfinding/buildings/:buildingId/directory
+ *
+ * The building's full directory: every POI, every named drawn room or shop
+ * on the floor plans, and every labeled node (exits, lifts, entrances) —
+ * minus doors, which are navigation furniture rather than destinations. This
+ * is the first thing a visitor sees after scanning — a browsable list,
+ * searched client-side — where the /pois endpoint answers incremental typing
+ * with a capped match set.
+ *
+ * Anonymous by design, same as every scan-page surface: names and floor
+ * numbers of public places carry no more than the signage on the wall.
+ */
+router.get(
+  '/api/wayfinding/buildings/:buildingId/directory',
+  publicReadLimiter,
+  async (req, res) => {
+    try {
+      const { buildingId } = req.params;
+      if (!isId(buildingId)) return fail(res, 400, 'Invalid building id.');
+
+      // Hard cap keeps the payload bounded for a building someone has filled
+      // with junk; a real venue directory sits far below it.
+      const CAP = 300;
+
+      /** A named drawn room routes to the nearest node within this range —
+       *  8 m at the default scale. Farther than that and the route would end
+       *  somewhere that just is not the place the visitor asked for. */
+      const SHAPE_NODE_RADIUS = 400;
+
+      const floorSelect = { select: { id: true, floorNumber: true, name: true } };
+
+      const [pois, nodes, floors] = await Promise.all([
+        prisma.poi.findMany({
+          where: { node: { buildingId } },
+          take: CAP,
+          orderBy: { name: 'asc' },
+          include: {
+            node: { select: { id: true, type: true, floor: floorSelect } },
+          },
+        }),
+        prisma.node.findMany({
+          where: { buildingId },
+          select: {
+            id: true,
+            x: true,
+            y: true,
+            label: true,
+            type: true,
+            floorId: true,
+            floor: floorSelect,
+          },
+        }),
+        prisma.floor.findMany({
+          where: { buildingId },
+          select: { id: true, floorNumber: true, name: true, drawing: true },
+        }),
+      ]);
+
+      const nodeById = new Map(nodes.map((n) => [n.id, n]));
+
+      // Doors are navigation furniture, not destinations: nobody searches for
+      // "door", and listing twelve of them buries the shops. Their linked
+      // nodes stay in the routing graph — they just stay out of the list.
+      const doorNodeIds = new Set();
+      for (const floor of floors) {
+        for (const shape of floor.drawing?.shapes ?? []) {
+          if (shape.kind === 'icon' && shape.icon === 'DOOR' && shape.nodeId) {
+            doorNodeIds.add(shape.nodeId);
+          }
+        }
+      }
+
+      const entries = [];
+      const seenNames = new Set();
+      const push = (entry) => {
+        const key = entry.name.trim().toLowerCase();
+        if (!key || seenNames.has(key) || entries.length >= CAP) return;
+        seenNames.add(key);
+        entries.push(entry);
+      };
+
+      for (const poi of pois) {
+        push({
+          kind: 'poi',
+          poiId: poi.id,
+          nodeId: poi.node.id,
+          name: poi.name,
+          category: poi.category || null,
+          nodeType: poi.node.type,
+          floorId: poi.node.floor?.id ?? null,
+          floorNumber: poi.node.floor?.floorNumber ?? null,
+          floorName: poi.node.floor?.name ?? null,
+        });
+      }
+
+      // Named drawn rooms and shops. An owner who names a room on the plan
+      // has published a destination, whether or not they also wired a POI —
+      // it routes via its linked node, or the nearest node inside range.
+      for (const floor of floors) {
+        for (const shape of floor.drawing?.shapes ?? []) {
+          if (shape.kind !== 'room' && shape.kind !== 'shop') continue;
+          if (typeof shape.name !== 'string' || !shape.name.trim()) continue;
+
+          let target = shape.nodeId ? nodeById.get(shape.nodeId) : null;
+          if (!target) {
+            const cx = shape.x + shape.width / 2;
+            const cy = shape.y + shape.height / 2;
+            let best = null;
+            for (const node of nodes) {
+              if (node.floorId !== floor.id) continue;
+              const d = Math.hypot(node.x - cx, node.y - cy);
+              if (d <= SHAPE_NODE_RADIUS && (!best || d < best.d)) {
+                best = { node, d };
+              }
+            }
+            target = best?.node ?? null;
+          }
+          // Unroutable rooms are omitted: a directory row that dead-ends in
+          // "no route" teaches visitors the list cannot be trusted.
+          if (!target) continue;
+
+          push({
+            kind: 'shape',
+            poiId: null,
+            nodeId: target.id,
+            name: shape.name.trim(),
+            category: null,
+            nodeType: target.type,
+            floorId: floor.id,
+            floorNumber: floor.floorNumber,
+            floorName: floor.name ?? null,
+          });
+        }
+      }
+
+      for (const node of nodes) {
+        if (!node.label || doorNodeIds.has(node.id)) continue;
+        push({
+          kind: 'node',
+          poiId: null,
+          nodeId: node.id,
+          name: node.label,
+          category: null,
+          nodeType: node.type,
+          floorId: node.floor?.id ?? null,
+          floorNumber: node.floor?.floorNumber ?? null,
+          floorName: node.floor?.name ?? null,
+        });
+      }
+
+      entries.sort((a, b) => a.name.localeCompare(b.name));
+      return ok(res, { data: { entries } });
+    } catch (err) {
+      console.error('Directory error:', err);
+      return fail(res, 500, 'Server error.');
+    }
+  }
+);
+
 // POI destination search: "LC Waikiki", "coffee", "restroom"…
 router.get(
   '/api/wayfinding/buildings/:buildingId/pois',

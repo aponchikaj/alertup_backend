@@ -95,6 +95,12 @@ describe('GET /api/qr/scan/route/:qrId — legacy envelope contract', () => {
       imageUrl: 'https://assets.example/f1.svg',
     });
 
+    // A floor with no drawing sends an explicit null, not a missing key —
+    // the scan page branches on it. Canvas size mirrors the row.
+    expect(data.floorMap.drawing).toBeNull();
+    expect(data.floorMap.width).toBe(floor1.width ?? null);
+    expect(data.floorMap.height).toBe(floor1.height ?? null);
+
     // Additions for the redesigned viewer (must not replace legacy fields)
     expect(data.emergency).toEqual({ active: false, message: null, emergencyId: null });
     expect(data.route).toMatchObject({ mode: 'EVACUATION' });
@@ -103,6 +109,33 @@ describe('GET /api/qr/scan/route/:qrId — legacy envelope contract', () => {
       mid.id,
       exit.id,
     ]);
+  });
+
+  test('a hand-drawn floor plan travels in floorMap with its canvas size', async () => {
+    const { building } = await createOwnerWithBuilding();
+    const drawing = {
+      version: 1,
+      shapes: [{ id: 'a', kind: 'room', x: 0, y: 0, width: 100, height: 50, name: 'Lobby' }],
+    };
+    const floor = await createFloor(building.id, {
+      floorNumber: 1,
+      name: 'Drawn',
+      drawing,
+      width: 500,
+      height: 400,
+    });
+    const node = await createNode(building.id, floor.id, { x: 10, y: 10, type: 'NORMAL' });
+
+    const res = await request(app).get(
+      `/api/qr/scan/route/${qrIdFor(node, floor.floorNumber)}`,
+    );
+    expect(res.status).toBe(200);
+
+    // The drawn plan and its canvas size ride along, so the scan page can
+    // render exactly what the owner drew — there is no image to fall back on.
+    expect(res.body.data.floorMap.drawing).toEqual(drawing);
+    expect(res.body.data.floorMap.width).toBe(500);
+    expect(res.body.data.floorMap.height).toBe(400);
   });
 
   test('multi-floor route reports transitions and requiresFloorChange', async () => {

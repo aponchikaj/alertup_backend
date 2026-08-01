@@ -139,6 +139,22 @@ describe('normalizeDrawing', () => {
     });
   });
 
+  describe('outline', () => {
+    it('keeps a valid floor footprint polygon', () => {
+      const result = normalizeDrawing(
+        drawingOf({ id: 'o', kind: 'outline', points: [0, 0, 500, 0, 500, 400, 250, 400, 250, 800, 0, 800] })
+      );
+      expect(result.drawing.shapes[0]).toMatchObject({ kind: 'outline' });
+      expect(result.drawing.shapes[0].points).toHaveLength(12);
+    });
+
+    it('drops a degenerate outline with fewer than three corners', () => {
+      expect(
+        normalizeDrawing(drawingOf({ kind: 'outline', points: [0, 0, 10, 10] })).drawing.shapes
+      ).toHaveLength(0);
+    });
+  });
+
   describe('icons', () => {
     it('rejects an unknown icon kind', () => {
       expect(

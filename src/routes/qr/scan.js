@@ -38,6 +38,12 @@ const buildFloorMapData = (floor) => {
     qrCode: floor.qrCodeUrl,
     imageUrl: floor.mapImageUrl,
     svgContent: floor.svgContent || null,
+    // Hand-drawn plan + its canvas size. Drawn floors have no image at all,
+    // so without these the scan page showed an empty grid where the owner
+    // had drawn a whole floor.
+    drawing: floor.drawing || null,
+    width: floor.width || null,
+    height: floor.height || null,
     createdAt: floor.createdAt,
   };
 };

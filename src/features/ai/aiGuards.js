@@ -22,10 +22,16 @@ export function sanitizeText(text) {
 
 /**
  * @param {unknown} body
+ * @param {{maxMessageChars?: number, maxTotalChars?: number}} caps —
+ *   overrides for authenticated endpoints. The strict defaults protect the
+ *   ANONYMOUS concierge; the editor assistant is behind login + permissions
+ *   and its assistant turns (design summaries) legitimately run longer.
  * @returns {{ok: true, messages: Array<{role, content}>, locale: 'en'|'ka'}
  *          |{ok: false, error: string}}
  */
-export function validateChatBody(body) {
+export function validateChatBody(body, caps = {}) {
+  const maxMessageChars = caps.maxMessageChars ?? MAX_MESSAGE_CHARS;
+  const maxTotalChars = caps.maxTotalChars ?? MAX_TOTAL_CHARS;
   if (!body || typeof body !== 'object') {
     return { ok: false, error: 'Invalid request body.' };
   }
@@ -56,17 +62,17 @@ export function validateChatBody(body) {
     if (content.length === 0) {
       return { ok: false, error: 'Messages cannot be empty.' };
     }
-    if (content.length > MAX_MESSAGE_CHARS) {
+    if (content.length > maxMessageChars) {
       return {
         ok: false,
-        error: `Messages are limited to ${MAX_MESSAGE_CHARS} characters.`,
+        error: `Messages are limited to ${maxMessageChars} characters.`,
       };
     }
     totalChars += content.length;
     messages.push({ role: entry.role, content });
   }
 
-  if (totalChars > MAX_TOTAL_CHARS) {
+  if (totalChars > maxTotalChars) {
     return { ok: false, error: 'Conversation is too long.' };
   }
   if (messages[messages.length - 1].role !== 'user') {

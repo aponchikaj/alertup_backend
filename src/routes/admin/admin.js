@@ -323,6 +323,15 @@ router.put('/api/admin/user/:id', isAdmin, async (req, res) => {
     if (countryCode !== undefined) updates.countryCode = countryCode;
     if (phoneNumber !== undefined) updates.phone = phoneNumber;
     if (verified !== undefined) updates.verified = verified;
+    // Plan changes are an ADMIN-ONLY write: no user-facing endpoint accepts
+    // this field, so a tampered client cannot upgrade itself. This is the one
+    // legitimate path (used after a payment lands).
+    if (plan !== undefined) {
+      if (!['FREE', 'STARTER', 'BUSINESS'].includes(plan)) {
+        return fail(res, 422, 'plan must be FREE, STARTER or BUSINESS.');
+      }
+      updates.plan = plan;
+    }
 
     const result = await prisma.user.updateMany({
       where: { id: userID },
