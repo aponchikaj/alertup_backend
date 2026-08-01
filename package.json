@@ -1,7 +1,7 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "description": "AlertUp API — indoor wayfinding and emergency evacuation. Serves searchable building maps, multi-floor routing, QR scan resolution, realtime emergency broadcast and an AI concierge.",
+  "description": "AlertUp API \u2014 indoor wayfinding and emergency evacuation. Serves searchable building maps, multi-floor routing, QR scan resolution, realtime emergency broadcast and an AI concierge.",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -13,7 +13,8 @@
     "postinstall": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "start:prod": "prisma migrate deploy && node server.js"
   },
   "keywords": [
     "Emergency",
