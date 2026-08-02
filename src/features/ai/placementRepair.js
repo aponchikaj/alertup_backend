@@ -44,6 +44,33 @@ const ICON_DUPLICATE_RADIUS = 40;
 
 const snap = (v) => Math.round(v / GRID) * GRID;
 
+/** Corridor-ish names in both UI languages. Deliberately NOT plain "hall" —
+ *  a dining hall or town hall is a real room, not circulation. */
+const CORRIDOR_NAME = /corridor|hallway|walkway|passage|aisle|დერეფ/i;
+
+/**
+ * Drop room/shop boxes that are really corridors or open walking space.
+ *
+ * On an AlertUp floor the circulation space IS the empty background between
+ * rooms — visitors walk on it and routes are drawn over it. A box named
+ * "Corridor" just paints the open floor grey and reads as a wall of rooms.
+ * The prompt tells the model not to draw them; models love them anyway, so
+ * they are stripped here.
+ */
+export function stripCorridorBoxes(shapes) {
+  const kept = [];
+  let stripped = 0;
+  for (const shape of shapes) {
+    const isBox = shape.kind === 'room' || shape.kind === 'shop';
+    if (isBox && shape.name && CORRIDOR_NAME.test(shape.name)) {
+      stripped += 1;
+      continue;
+    }
+    kept.push(shape);
+  }
+  return { shapes: kept, stripped };
+}
+
 const rectOf = (s) => ({ x: s.x, y: s.y, w: s.width, h: s.height });
 
 const contains = (inner, outer) =>

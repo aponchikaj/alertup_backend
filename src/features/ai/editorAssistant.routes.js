@@ -11,7 +11,7 @@ import { validateChatBody } from './aiGuards.js';
 import { fenceUserContent } from './promptBuilder.js';
 import { streamChat, chatOnce, aiAvailable } from './groqClient.js';
 import { analyzeFloor, describeFloorForPrompt } from './floorAnalysis.js';
-import { repairAdditions } from './placementRepair.js';
+import { repairAdditions, stripCorridorBoxes } from './placementRepair.js';
 import { normalizeDrawing } from '../mapEditor/drawingSchema.js';
 import { getGraph } from '../wayfinding/graphCache.js';
 import { validateGraph } from '../mapEditor/graphValidation.js';
@@ -66,16 +66,18 @@ const FALLBACKS = {
 
 /** Reported when the placement repair had to intervene — the user should know
  *  the plan they see is the repaired one, not exactly what the model drew. */
-const adjustedNote = (locale, { moved, dropped }) => {
+const adjustedNote = (locale, { moved, dropped, stripped = 0 }) => {
   const parts = [];
   if (locale === 'ka') {
     if (moved) parts.push(`${moved} ფიგურა გადავიდა თავისუფალ ადგილზე`);
     if (dropped) parts.push(`${dropped} გამოტოვდა (დუბლიკატი ან ადგილი არ ჰქონდა)`);
+    if (stripped) parts.push(`${stripped} დერეფნის ყუთი წაიშალა (სასეირნო სივრცე ღია რჩება)`);
     return `განთავსების შემოწმება: ${parts.join(', ')} — შენი დახატული გეგმა უცვლელი რჩება.`;
   }
   if (moved) parts.push(`moved ${moved} shape(s) into free space`);
   if (dropped) parts.push(`skipped ${dropped} (duplicates or nowhere to fit)`);
-  return `Placement check: ${parts.join(' and ')} so nothing overlaps your existing plan.`;
+  if (stripped) parts.push(`removed ${stripped} corridor box(es) — walking space stays open floor`);
+  return `Placement check: ${parts.join(', ')} so the plan stays clean.`;
 };
 
 /**
@@ -297,16 +299,17 @@ export const designerSystemPrompt = ({
       : '',
     '',
     'ARCHITECTURE RULES — sizes at 50 units = 1 metre:',
-    '- Doors ~50 units wide. Corridors at least 100 units (2 m); main corridors 150-200. Typical office/room 200x150; shop 200-400 wide; WC 100x150; stair core ~150x150.',
-    '- Structure: one continuous corridor spine links the ENTRANCE to every EXIT; every room and shop opens onto a corridor with a DOOR icon on the shared edge; never make a room reachable only through another room.',
+    '- Doors ~50 units wide. Typical office/room 200x150; shop 200-400 wide; WC 100x150; stair core ~150x150.',
+    '- CIRCULATION IS OPEN FLOOR, NOT A SHAPE: the empty background between rooms IS the corridor — visitors walk on it and routes are drawn over it. NEVER output a room or shop box named "Corridor", "Hall", "Walkway" or similar (the server deletes them). Instead LEAVE a continuous band of empty floor at least 100 units (2 m) wide — 150-200 for main circulation — linking the ENTRANCE to every EXIT and touching every room.',
+    '- Every room and shop gets a DOOR icon on the edge facing the open floor; never make a room reachable only through another room.',
     '- Evacuation: at least one ENTRANCE and one EXIT per floor; two EXITs on opposite sides once a floor is wider than 1000 units; keep every point within ~2000 units (40 m) of an exit; STAIRS near the core on multi-floor buildings; elevators are never evacuation routes.',
     '- Geometry: every coordinate inside 0..' + canvasW + ' x 0..' + canvasH + '; align positions and sizes to the 25-unit grid; rooms and shops must NOT partially overlap each other (a small kiosk fully inside a much larger hall is the only exception); leave open walking space — do not tile every free unit.',
     '',
     'DESIGN PROCEDURE — run through this silently before answering:',
     '1. Read the MAP ANALYSIS: what already exists, where the FREE AREAS are.',
     '2. Choose the smallest set of shapes that fulfils the request — do not redesign what was not asked about.',
-    '3. Place corridors first, then large rooms, then small rooms, then DOOR/ENTRANCE/EXIT and other icons, then text labels.',
-    '4. Self-check every shape: inside the canvas? inside a FREE AREA when the floor has existing work? no partial overlaps? corridors >= 100 wide? every room on a corridor? entrance and exit present?',
+    '3. Reserve the open walking space first (do NOT draw it — it stays empty), then place large rooms, then small rooms, then DOOR/ENTRANCE/EXIT and other icons, then text labels.',
+    '4. Self-check every shape: inside the canvas? inside a FREE AREA when the floor has existing work? no partial overlaps? no box named corridor/hall? open walking space >= 100 units wide everywhere? every room facing open floor? entrance and exit present?',
     'Only then write your answer.',
     '',
     hasExistingWork
@@ -315,7 +318,7 @@ export const designerSystemPrompt = ({
     'When you design, output the shapes as ONE fenced ```json block:',
     '{"version":1,"shapes":[...]} where each shape is one of:',
     `- {"kind":"wall","points":[x1,y1,x2,y2,...],"thickness":6} — outer walls and partitions (coordinates within 0..${canvasW} x 0..${canvasH})`,
-    '- {"kind":"room","x","y","width","height","name"} — rooms/corridors; name what matters (corridors named "Corridor")',
+    '- {"kind":"room","x","y","width","height","name"} — enclosed functional rooms ONLY (office, WC, kitchen, storage, meeting room…); never corridors or open space',
     '- {"kind":"shop","x","y","width","height","name"} — tenant units',
     '- {"kind":"icon","x","y","icon"} — icon one of ELEVATOR|ESCALATOR|STAIRS|DOOR|ENTRANCE|EXIT|WC|INFO',
     '- {"kind":"text","x","y","text","fontSize"} — freestanding labels',
@@ -464,14 +467,16 @@ router.post(
       // produced: in improve mode its output is merged as pure additions.
       let repairStats = null;
       if (drawing) {
+        // Corridor boxes never survive: the open floor IS the walking space.
+        const decorridored = stripCorridorBoxes(drawing.shapes);
         const repaired = repairAdditions({
           existingShapes: hasExistingWork ? floor.drawing.shapes : [],
-          additions: drawing.shapes,
+          additions: decorridored.shapes,
           canvasW,
           canvasH,
           freeRects: analysis?.freeRects ?? [],
         });
-        repairStats = repaired;
+        repairStats = { ...repaired, stripped: decorridored.stripped };
         const candidate = hasExistingWork
           ? mergeImprovement(floor.drawing, { shapes: repaired.shapes })
           : { version: 1, shapes: repaired.shapes };
@@ -493,7 +498,11 @@ router.post(
       }
       // Repairs happened: tell the user their plan is protected, not pretend
       // the model placed everything itself.
-      if (drawing && repairStats && (repairStats.moved || repairStats.dropped)) {
+      if (
+        drawing &&
+        repairStats &&
+        (repairStats.moved || repairStats.dropped || repairStats.stripped)
+      ) {
         reply = [reply, adjustedNote(locale, repairStats)].filter(Boolean).join('\n\n');
       }
 

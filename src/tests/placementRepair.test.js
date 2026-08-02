@@ -1,4 +1,9 @@
-import { repairAdditions, rectsCollide, rectIoU } from '../features/ai/placementRepair.js';
+import {
+  repairAdditions,
+  rectsCollide,
+  rectIoU,
+  stripCorridorBoxes,
+} from '../features/ai/placementRepair.js';
 
 /* The repair pass is the hard guarantee behind "AI additions cannot land on
    my work" — the prompt asks, this enforces. */
@@ -130,6 +135,25 @@ describe('repairAdditions', () => {
     expect(dropped).toBe(1);
     expect(shapes).toHaveLength(1);
     expect(shapes[0].icon).toBe('ENTRANCE');
+  });
+
+  test('corridor boxes are stripped — walking space stays open floor', () => {
+    const { shapes, stripped } = stripCorridorBoxes([
+      room(0, 0, 800, 150, { id: 'c1', name: 'Main Corridor' }),
+      room(0, 200, 200, 150, { id: 'r1', name: 'Office' }),
+      room(0, 400, 800, 100, { id: 'c2', name: 'Hallway' }),
+      room(0, 550, 800, 100, { id: 'c3', name: 'დერეფანი' }),
+      { id: 'i1', kind: 'icon', x: 10, y: 10, icon: 'EXIT' },
+      // "Hall" inside a longer real name must not be a false positive… but a
+      // room literally named Hall is circulation.
+      room(0, 700, 300, 100, { id: 'r2', name: 'Town Hall Records' }),
+    ]);
+    expect(stripped).toBe(3);
+    expect(shapes.map((s) => s.name ?? s.kind)).toEqual([
+      'Office',
+      'icon',
+      'Town Hall Records',
+    ]);
   });
 
   test('rectIoU is 1 for identical rects and 0 for disjoint ones', () => {
