@@ -10,6 +10,7 @@ import prisma from './src/db/prisma.js'
 import { closeAll as closeRealtime } from './src/features/realtime/broadcaster.js'
 import { initCollab, closeCollab } from './src/features/collab/collab.js'
 import editorAssistantRouter from './src/features/ai/editorAssistant.routes.js'
+import publicAssistantRouter from './src/features/ai/publicAssistant.routes.js'
 import { startSweeper } from './src/jobs/sweeper.js'
 
 import adminRoutes from './src/routes/admin/admin.js'
@@ -191,6 +192,7 @@ app.use(emergencyRouter)
 app.use(realtimeRouter)
 app.use(aiRouter)
 app.use(editorAssistantRouter)
+app.use(publicAssistantRouter)
 
 // Health check endpoint
 app.get('/health', async (req, res) => {

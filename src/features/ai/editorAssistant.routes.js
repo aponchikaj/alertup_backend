@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import prisma from '../../db/prisma.js';
+import config from '../../config/index.js';
 import whoami from '../../middlewares/whoami.js';
 import { requirePermission } from '../../middlewares/requireBuildingPermission.js';
 import { PERMISSIONS } from '../../auth/permissions.js';
@@ -8,7 +9,9 @@ import { aiChatLimiter, aiDailyLimiter } from '../../services/rateLimiter.js';
 import { aiDesignerAllowed } from '../../services/plans.js';
 import { validateChatBody } from './aiGuards.js';
 import { fenceUserContent } from './promptBuilder.js';
-import { streamChat, aiAvailable } from './groqClient.js';
+import { streamChat, chatOnce, aiAvailable } from './groqClient.js';
+import { analyzeFloor, describeFloorForPrompt } from './floorAnalysis.js';
+import { repairAdditions } from './placementRepair.js';
 import { normalizeDrawing } from '../mapEditor/drawingSchema.js';
 import { getGraph } from '../wayfinding/graphCache.js';
 import { validateGraph } from '../mapEditor/graphValidation.js';
@@ -24,6 +27,14 @@ import { validateGraph } from '../mapEditor/graphValidation.js';
         returns a complete drawing JSON; it is run through the same
         normalizeDrawing validator as every human-drawn plan, and the editor
         applies it through the normal undo-able edit path.
+
+   The model is given real spatial understanding, not just raw JSON:
+   floorAnalysis.js turns the current drawing into an inventory plus a
+   free-space map, and (when an underlay image exists) a vision model reads
+   the uploaded plan into words. On the way out, placementRepair.js snaps,
+   de-duplicates and relocates generated shapes so additions physically cannot
+   land on top of existing work — the prompt asks nicely, the repair pass
+   enforces.
 
    The designer half is a paid-plan feature — enforced HERE, not in the
    prompt. The prompt only tells the model to decline politely; the server
@@ -51,6 +62,20 @@ const DESIGN_FAILED = {
 const FALLBACKS = {
   en: 'The design assistant is unavailable right now. Draw with the wall, room and marker tools — everything on the plan stays editable by hand.',
   ka: 'დიზაინის ასისტენტი ამჟამად მიუწვდომელია. გამოიყენე კედლის, ოთახისა და ნიშნის ხელსაწყოები — გეგმაზე ყველაფერი ხელით რედაქტირებადი რჩება.',
+};
+
+/** Reported when the placement repair had to intervene — the user should know
+ *  the plan they see is the repaired one, not exactly what the model drew. */
+const adjustedNote = (locale, { moved, dropped }) => {
+  const parts = [];
+  if (locale === 'ka') {
+    if (moved) parts.push(`${moved} ფიგურა გადავიდა თავისუფალ ადგილზე`);
+    if (dropped) parts.push(`${dropped} გამოტოვდა (დუბლიკატი ან ადგილი არ ჰქონდა)`);
+    return `განთავსების შემოწმება: ${parts.join(', ')} — შენი დახატული გეგმა უცვლელი რჩება.`;
+  }
+  if (moved) parts.push(`moved ${moved} shape(s) into free space`);
+  if (dropped) parts.push(`skipped ${dropped} (duplicates or nowhere to fit)`);
+  return `Placement check: ${parts.join(' and ')} so nothing overlaps your existing plan.`;
 };
 
 /**
@@ -192,7 +217,57 @@ export function mergeImprovement(existing, generated) {
   return { version: 1, shapes: [...existingShapes, ...additions] };
 }
 
-const designerSystemPrompt = ({
+/* ----------------------------------------------------------------------------
+   Underlay image analysis — the assistant "sees" the uploaded plan.
+   A one-shot vision call describes the floor-plan image in canvas
+   coordinates; the result is cached per image URL so chatting stays cheap.
+   A failure here silently degrades to text-only — never blocks the chat.
+--------------------------------------------------------------------------- */
+
+const imageAnalysisCache = new Map();
+const IMAGE_ANALYSIS_CACHE_MAX = 100;
+
+export async function analyzeUnderlayImage(floor, canvasW, canvasH) {
+  if (!floor?.mapImageUrl || !config.groq.visionModel || !aiAvailable()) return '';
+  const key = `${floor.id}:${floor.mapImageUrl}`;
+  if (imageAnalysisCache.has(key)) return imageAnalysisCache.get(key);
+  try {
+    const text = await chatOnce({
+      model: config.groq.visionModel,
+      maxTokens: 700,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text:
+                `This image is the background underlay of an indoor floor-plan editor whose canvas is ${canvasW}x${canvasH} units (the image spans the whole canvas; 50 units = 1 metre). ` +
+                'Describe the layout so a designer can recreate it: list rooms, shops, corridors, halls with their approximate position and size in canvas units, plus entrances, exits, stairs, elevators and toilets. ' +
+                'Format: one item per line, e.g. `room "Kitchen" at (x,y) size WxH` or `entrance at (x,y)`. Maximum 25 lines. If the image is not a floor plan, reply exactly: NOT A FLOOR PLAN.',
+            },
+            { type: 'image_url', image_url: { url: floor.mapImageUrl } },
+          ],
+        },
+      ],
+    });
+    const cleaned = String(text || '').trim();
+    const block =
+      cleaned && !/^NOT A FLOOR PLAN/i.test(cleaned)
+        ? `UPLOADED PLAN IMAGE ANALYSIS (what the floor's background image shows, in canvas units):\n${cleaned.slice(0, 3000)}`
+        : '';
+    if (imageAnalysisCache.size >= IMAGE_ANALYSIS_CACHE_MAX) {
+      imageAnalysisCache.delete(imageAnalysisCache.keys().next().value);
+    }
+    imageAnalysisCache.set(key, block);
+    return block;
+  } catch {
+    // Transient vision failures are not cached, so a later message retries.
+    return '';
+  }
+}
+
+export const designerSystemPrompt = ({
   buildingName,
   floor,
   counts,
@@ -200,37 +275,54 @@ const designerSystemPrompt = ({
   locale,
   hasExistingWork,
   validationIssues,
+  mapAnalysisText,
+  imageAnalysisText,
+  canvasW,
+  canvasH,
 }) => {
-  const canvasW = floor?.width || 1000;
-  const canvasH = floor?.height || 800;
   const lines = [
-    'You are the AlertUp floor-plan design assistant, embedded in the building map editor.',
-    'AlertUp is indoor wayfinding with an emergency evacuation layer; owners draw floor plans and lay a routing graph over them.',
+    'You are the AlertUp floor-plan architect, embedded in the building map editor.',
+    'AlertUp is indoor wayfinding with an emergency evacuation layer; owners draw floor plans and lay a routing graph over them. Your designs must be realistic architecture AND safe to evacuate.',
     `Building: "${buildingName}". Active floor: ${floor ? `#${floor.floorNumber} "${floor.name || ''}" — canvas ${canvasW}x${canvasH} units, 50 units = 1 metre` : 'none selected'}.`,
     counts
       ? `Current floor contents: ${counts.shapes} drawn shapes, ${counts.nodes} routing nodes (${counts.exits} exits).`
       : '',
     '',
+    mapAnalysisText || '',
+    '',
+    imageAnalysisText || '',
+    '',
     validationIssues && validationIssues.length
       ? `Validator findings for this building (address these first): ${validationIssues.join('; ')}.`
       : '',
     '',
-    'THINK before you design, in this order: (1) inventory what already exists on the floor; (2) judge evacuation safety — is every area within reach of an EXIT, do rooms have DOORs onto corridors, are corridors continuous and >= 100 units wide; (3) choose the SMALLEST set of additions that fixes the gaps; (4) only then produce shapes.',
+    'ARCHITECTURE RULES — sizes at 50 units = 1 metre:',
+    '- Doors ~50 units wide. Corridors at least 100 units (2 m); main corridors 150-200. Typical office/room 200x150; shop 200-400 wide; WC 100x150; stair core ~150x150.',
+    '- Structure: one continuous corridor spine links the ENTRANCE to every EXIT; every room and shop opens onto a corridor with a DOOR icon on the shared edge; never make a room reachable only through another room.',
+    '- Evacuation: at least one ENTRANCE and one EXIT per floor; two EXITs on opposite sides once a floor is wider than 1000 units; keep every point within ~2000 units (40 m) of an exit; STAIRS near the core on multi-floor buildings; elevators are never evacuation routes.',
+    '- Geometry: every coordinate inside 0..' + canvasW + ' x 0..' + canvasH + '; align positions and sizes to the 25-unit grid; rooms and shops must NOT partially overlap each other (a small kiosk fully inside a much larger hall is the only exception); leave open walking space — do not tile every free unit.',
+    '',
+    'DESIGN PROCEDURE — run through this silently before answering:',
+    '1. Read the MAP ANALYSIS: what already exists, where the FREE AREAS are.',
+    '2. Choose the smallest set of shapes that fulfils the request — do not redesign what was not asked about.',
+    '3. Place corridors first, then large rooms, then small rooms, then DOOR/ENTRANCE/EXIT and other icons, then text labels.',
+    '4. Self-check every shape: inside the canvas? inside a FREE AREA when the floor has existing work? no partial overlaps? corridors >= 100 wide? every room on a corridor? entrance and exit present?',
+    'Only then write your answer.',
+    '',
     hasExistingWork
-      ? 'THE EXISTING SHAPES ARE LOCKED. The owner drew them by hand and the server will preserve them exactly — never re-emit, move, resize, rename or delete any existing shape. Output ONLY the NEW shapes you are adding (they will be merged in). If the user asks you to change or remove existing work, explain that hand-drawn shapes are only editable by hand, and design around them.'
+      ? 'THE EXISTING SHAPES ARE LOCKED. The owner drew them by hand and the server will preserve them exactly — never re-emit, move, resize, rename or delete any existing shape. Output ONLY the NEW shapes you are adding (they will be merged in), and place them ONLY inside the FREE AREAS listed in MAP ANALYSIS — the server relocates or discards anything that overlaps existing work. Match the scale, alignment and naming style of what is already drawn. If the user asks you to change or remove existing work, explain that hand-drawn shapes are only editable by hand, and design around them.'
       : 'The floor is empty: when asked to create a plan, output the complete drawing.',
     'When you design, output the shapes as ONE fenced ```json block:',
     '{"version":1,"shapes":[...]} where each shape is one of:',
     `- {"kind":"wall","points":[x1,y1,x2,y2,...],"thickness":6} — outer walls and partitions (coordinates within 0..${canvasW} x 0..${canvasH})`,
-    '- {"kind":"room","x","y","width","height","name"} — rooms/corridors; name what matters',
+    '- {"kind":"room","x","y","width","height","name"} — rooms/corridors; name what matters (corridors named "Corridor")',
     '- {"kind":"shop","x","y","width","height","name"} — tenant units',
     '- {"kind":"icon","x","y","icon"} — icon one of ELEVATOR|ESCALATOR|STAIRS|DOOR|ENTRANCE|EXIT|WC|INFO',
     '- {"kind":"text","x","y","text","fontSize"} — freestanding labels',
-    'Design rules: an outer wall around the floor; rooms aligned to a 25-unit grid; corridors at least 100 units (2 m) wide; at least one ENTRANCE and one EXIT icon; doors where rooms meet corridors; no overlapping rooms.',
     'Keep designs compact: at most 40 shapes, minified JSON (no pretty-printing) — long responses get cut off.',
     'Messages may include a SKETCH: block — the user drew their intended layout by hand, converted to floor coordinates. "region x y w h" gestures a room or shop there; "path x1 y1 x2 y2 ..." gestures a wall or corridor along that line. Treat the sketch as the desired ARRANGEMENT (relative positions and rough proportions matter, exact pixels do not) and design clean, grid-aligned shapes that realize it.',
     'You can also trigger editor actions by including a marker on its own line: [[action:auto-connect]] wires every routing node on the floor into one walkable graph (drawn walls block connections). Suggest it after a design is applied, or when the user asks to connect nodes. The user confirms actions with one tap; never claim an action already ran.',
-    'Keep any existing shapes the user asked to keep. Besides the JSON block, reply with a short summary of what you designed and remind them it applies as an editable draft (undo works).',
+    'Besides the JSON block, reply with a short summary of what you designed — mention WHERE you placed things and why it is safe to evacuate — and remind them it applies as an editable draft (undo works).',
     designAllowed
       ? ''
       : 'IMPORTANT: This account is on the Free plan, where the AI designer is not included. NEVER output a JSON drawing. Answer questions and give manual drawing advice, and mention that AI floor design is part of the Starter and Business plans.',
@@ -276,6 +368,9 @@ router.post(
         });
       }
 
+      const canvasW = floor?.width || 1000;
+      const canvasH = floor?.height || 800;
+
       let counts = null;
       if (floor) {
         const [nodes, exits] = await Promise.all([
@@ -303,6 +398,15 @@ router.post(
 
       const hasExistingWork = Boolean(floor?.drawing?.shapes?.length);
 
+      // Spatial understanding: inventory + free-space map for the prompt, and
+      // the same free rectangles later anchor the placement repair.
+      const analysis = floor ? analyzeFloor(floor.drawing, canvasW, canvasH) : null;
+      const mapAnalysisText = analysis ? describeFloorForPrompt(analysis, canvasW, canvasH) : '';
+
+      // If the floor has an uploaded plan image, let a vision model read it —
+      // "design what the photo shows" becomes possible. Cached per image.
+      const imageAnalysisText = await analyzeUnderlayImage(floor, canvasW, canvasH);
+
       const system = designerSystemPrompt({
         buildingName: req.building.name,
         floor,
@@ -311,11 +415,15 @@ router.post(
         locale,
         hasExistingWork,
         validationIssues,
+        mapAnalysisText,
+        imageAnalysisText,
+        canvasW,
+        canvasH,
       });
 
       // The current drawing rides along as fenced context so "redesign this"
       // has a this. Truncated: a plan too large to inline is summarized by
-      // its counts above.
+      // the MAP ANALYSIS block above.
       const drawingJson = floor?.drawing ? JSON.stringify(floor.drawing) : null;
       const contextMessage =
         drawingJson && drawingJson.length <= MAX_CONTEXT_DRAWING_CHARS
@@ -339,6 +447,7 @@ router.post(
         messages: chatMessages,
         signal: abort.signal,
         maxTokens: DESIGN_MAX_TOKENS,
+        model: config.groq.designModel,
       })) {
         raw += delta;
         if (raw.length > MAX_REPLY_CHARS) break;
@@ -347,14 +456,29 @@ router.post(
 
       const extracted = extractDrawing(raw);
       let { drawing } = extracted;
-      // Hand-drawn work survives no matter what the model produced: in
-      // improve mode its output is merged as pure additions, then re-run
-      // through the validator caps.
       const mode = hasExistingWork ? 'improve' : 'replace';
-      if (drawing && hasExistingWork) {
-        const merged = normalizeDrawing(mergeImprovement(floor.drawing, drawing));
-        drawing = merged.ok && merged.drawing?.shapes?.length ? merged.drawing : null;
+
+      // Placement repair: snap, de-duplicate and relocate generated shapes so
+      // they cannot overlap existing work (improve mode) or each other
+      // (both modes). Then hand-drawn work survives no matter what the model
+      // produced: in improve mode its output is merged as pure additions.
+      let repairStats = null;
+      if (drawing) {
+        const repaired = repairAdditions({
+          existingShapes: hasExistingWork ? floor.drawing.shapes : [],
+          additions: drawing.shapes,
+          canvasW,
+          canvasH,
+          freeRects: analysis?.freeRects ?? [],
+        });
+        repairStats = repaired;
+        const candidate = hasExistingWork
+          ? mergeImprovement(floor.drawing, { shapes: repaired.shapes })
+          : { version: 1, shapes: repaired.shapes };
+        const normalized = normalizeDrawing(candidate);
+        drawing = normalized.ok && normalized.drawing?.shapes?.length ? normalized.drawing : null;
       }
+
       const actionResult = extractActions(extracted.reply);
       let reply = actionResult.reply;
       // Hard gate, independent of the prompt: prompt injection can talk the
@@ -366,6 +490,11 @@ router.post(
       // received.
       if (extracted.hadJson && !drawing && designAllowed) {
         reply = [reply, DESIGN_FAILED[locale]].filter(Boolean).join('\n\n');
+      }
+      // Repairs happened: tell the user their plan is protected, not pretend
+      // the model placed everything itself.
+      if (drawing && repairStats && (repairStats.moved || repairStats.dropped)) {
+        reply = [reply, adjustedNote(locale, repairStats)].filter(Boolean).join('\n\n');
       }
 
       return ok(res, {

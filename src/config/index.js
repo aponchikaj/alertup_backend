@@ -43,6 +43,12 @@ const config = {
   groq: {
     apiKey: env.GROQ_API_KEY,
     model: env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    // The floor designer benefits from a stronger model than the concierge;
+    // defaults to the main model when unset.
+    designModel: env.GROQ_DESIGN_MODEL || env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    // Multimodal model used to read uploaded floor-plan images. Empty string
+    // disables image analysis without touching the rest of the assistant.
+    visionModel: env.GROQ_VISION_MODEL ?? 'meta-llama/llama-4-scout-17b-16e-instruct',
     maxTokens: Number(env.AI_MAX_TOKENS) || 300,
     disabled: env.AI_DISABLED === 'true',
   },
