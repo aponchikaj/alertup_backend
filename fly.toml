@@ -1,0 +1,68 @@
+# AlertUp backend — PRODUCTION (alertup.world)
+#
+# Deploy:  flyctl deploy
+# Secrets: flyctl secrets set KEY=value   (never put secrets in this file)
+
+app = 'alertup-backend'
+primary_region = 'lhr'   # London — the PROD Supabase pooler is aws-1-eu-west-2.
+                         # Prisma is chatty; co-locating app and database keeps
+                         # per-request round trips off the transatlantic path.
+
+[build]
+  dockerfile = 'Dockerfile'
+
+# Runs ONCE per deploy in a throwaway machine, before the new version takes
+# traffic. Keeping migrations here rather than in the start command means two
+# machines can never race applying the same migration.
+[deploy]
+  release_command = 'npx prisma migrate deploy'
+  strategy = 'immediate'   # see the single-machine note below
+
+[env]
+  NODE_ENV = 'production'
+  PORT = '8080'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+
+  # ---------------------------------------------------------------------------
+  # DO NOT scale this app past one machine, and do not enable auto-stop.
+  #
+  # src/features/realtime/broadcaster.js is an in-process EventEmitter and
+  # socket.io rooms are per-process, so a second machine would silently serve
+  # half the emergency subscribers a feed that never fires. The module comment
+  # says as much: "Single-instance deployment today makes this authoritative."
+  #
+  # Cold starts are also unacceptable here — this backend drives evacuation
+  # broadcasts, so it stays warm.
+  #
+  # To scale out, first swap the broadcaster for Postgres LISTEN/NOTIFY (the
+  # publish/subscribe API is already shaped for it) and add a socket.io Redis
+  # adapter. Then raise min_machines_running.
+  # ---------------------------------------------------------------------------
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    # SSE holds a connection open for the life of an emergency, so the default
+    # hard_limit of 25 would shed load almost immediately. The app caps itself
+    # at MAX_SUBSCRIBERS_TOTAL = 1000 (see broadcaster.js); these sit above it
+    # so the app's own limiter is what refuses traffic, with a clear message.
+    type = 'connections'
+    soft_limit = 1000
+    hard_limit = 1200
+
+  [[http_service.checks]]
+    grace_period = '20s'
+    interval = '15s'
+    method = 'GET'
+    timeout = '5s'
+    path = '/health'
+    # /health returns 503 when Postgres is unreachable, so a machine that
+    # cannot serve real requests is pulled from rotation rather than left in.
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '1gb'

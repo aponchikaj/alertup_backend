@@ -1,15 +1,15 @@
 import express from 'express';
 import jwt from 'jsonwebtoken';
-import prisma from '../../db/prisma.js';
-import config from '../../config/index.js';
-import isAdmin from '../../middlewares/isAdmin.js';
-import sendMail from '../../services/sendEmail.js';
-import { authLimiter } from '../../services/rateLimiter.js';
-import { displayName } from '../../services/displayName.js';
-import { escapeHtml } from '../../services/escapeHtml.js';
-import { ok, fail } from '../../utils/respond.js';
-import { isId } from '../../utils/ids.js';
-import { legacyBuilding } from '../buildings/buildings.js';
+import prisma from '../db/prisma.js';
+import config from '../config/index.js';
+import isAdmin from '../middlewares/isAdmin.js';
+import sendMail from '../services/sendEmail.js';
+import { authLimiter } from '../services/rateLimiter.js';
+import { displayName } from '../services/displayName.js';
+import { escapeHtml } from '../services/escapeHtml.js';
+import { ok, fail } from '../utils/respond.js';
+import { isId } from '../utils/ids.js';
+import { legacyBuilding } from './buildings/buildings.js';
 
 /**
  * Normalize a search query: `?q=a&q=b` arrives as an array, and unbounded

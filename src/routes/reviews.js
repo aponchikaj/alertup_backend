@@ -1,8 +1,8 @@
 import express from "express";
-import prisma from "../../db/prisma.js";
-import whoami from "../../middlewares/whoami.js";
-import sendMail from "../../services/sendEmail.js";
-import { ok, fail } from "../../utils/respond.js";
+import prisma from "../db/prisma.js";
+import whoami from "../middlewares/whoami.js";
+import sendMail from "../services/sendEmail.js";
+import { ok, fail } from "../utils/respond.js";
 
 const router = express.Router();
 

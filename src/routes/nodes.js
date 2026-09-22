@@ -1,11 +1,11 @@
 import express from 'express';
-import prisma from '../../db/prisma.js';
-import whoami from '../../middlewares/whoami.js';
-import { requirePermission } from '../../middlewares/requireBuildingPermission.js';
-import { PERMISSIONS } from '../../auth/permissions.js';
-import { isId } from '../../utils/ids.js';
-import { createEdge, recomputeEdgesForNode, normalizePair } from '../../features/mapEditor/edgeService.js';
-import { invalidate } from '../../features/wayfinding/graphCache.js';
+import prisma from '../db/prisma.js';
+import whoami from '../middlewares/whoami.js';
+import { requirePermission } from '../middlewares/requireBuildingPermission.js';
+import { PERMISSIONS } from '../auth/permissions.js';
+import { isId } from '../utils/ids.js';
+import { createEdge, recomputeEdgesForNode, normalizePair } from '../features/mapEditor/edgeService.js';
+import { invalidate } from '../features/wayfinding/graphCache.js';
 
 const router = express.Router();
 

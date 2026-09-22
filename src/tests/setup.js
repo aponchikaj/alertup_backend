@@ -28,6 +28,11 @@ process.env.CLOUDINARY_API_KEY = '';
 process.env.CLOUDINARY_API_SECRET = '';
 process.env.AWS_ACCESS_KEY_ID = '';
 process.env.AWS_SECRET_ACCESS_KEY = '';
+// Same blanking for the canonical STORAGE_* names, or a machine configured
+// for R2 would let the suite reach a real bucket.
+process.env.STORAGE_ACCESS_KEY_ID = '';
+process.env.STORAGE_SECRET_ACCESS_KEY = '';
+process.env.STORAGE_ENDPOINT = '';
 process.env.GROQ_API_KEY = '';
 process.env.ADMIN_USER = process.env.ADMIN_USER || 'test-admin';
 process.env.ADMIN_PASS = process.env.ADMIN_PASS || 'test-admin-pass';

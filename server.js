@@ -13,7 +13,7 @@ import editorAssistantRouter from './src/features/ai/editorAssistant.routes.js'
 import publicAssistantRouter from './src/features/ai/publicAssistant.routes.js'
 import { startSweeper } from './src/jobs/sweeper.js'
 
-import adminRoutes from './src/routes/admin/admin.js'
+import adminRoutes from './src/routes/admin.js'
 import authRoutes from './src/routes/auth/auth.js'
 import resetRoutes from './src/routes/auth/reset.js'
 import buildingRoutes from './src/routes/buildings/buildings.js'
@@ -22,19 +22,19 @@ import membersRoutes from './src/routes/buildings/members.js'
 import invitesRoutes from './src/routes/buildings/invites.js'
 import contactRoutes from './src/routes/contact/contact.js'
 import reportRoutes from './src/routes/contact/report.js'
-import dashboardRoutes from './src/routes/dashboard/dashboard.js'
-import settingsRoutes from './src/routes/settings/settings.js'
-import userRoutes from './src/routes/user/user.js'
-import connectRouter from './src/routes/connect/connect.js'
+import dashboardRoutes from './src/routes/dashboard.js'
+import settingsRoutes from './src/routes/settings.js'
+import userRoutes from './src/routes/user.js'
+import connectRouter from './src/routes/connect.js'
 import debugRouter from './src/routes/debug.js'
-import routingRouter from './src/routes/routing/route.js'
-import nodesRouter from './src/routes/nodes/nodes.js'
-import uploadRouter from './src/routes/upload/upload.js'
+import routingRouter from './src/routes/routing.js'
+import nodesRouter from './src/routes/nodes.js'
+import uploadRouter from './src/routes/upload.js'
 import qrRouter from './src/routes/qr/qr.js'
 import qrScanRouter from './src/routes/qr/scan.js'
-import websitereview from './src/routes/reviews/reviews.js'
+import websitereview from './src/routes/reviews.js'
 import twoFaSystem from './src/routes/auth/2fa.js'
-import administrationRouter from './src/routes/administration/administration.js'
+import administrationRouter from './src/routes/administration.js'
 import wayfindingRouter from './src/features/wayfinding/wayfinding.routes.js'
 import mapEditorRouter from './src/features/mapEditor/mapEditor.routes.js'
 import emergencyRouter from './src/features/emergency/emergency.routes.js'
@@ -45,7 +45,7 @@ const app = express();
 const PORT = config.port;
 const isProduction = config.isProduction;
 
-// Single proxy hop (Render / Vercel). Must not be `true`, which would let a
+// Single proxy hop (Fly.io / Vercel). Must not be `true`, which would let a
 // client spoof its IP via X-Forwarded-For and defeat the rate limiters.
 app.set('trust proxy', 1);
 
@@ -81,7 +81,7 @@ app.use(cors({
     // let any *.vercel.app site (i.e. anyone with a free Vercel account) send
     // credentialed requests with the user's cookies attached.
     if (!isProduction) {
-      if (origin.endsWith('.vercel.app') || origin.endsWith('.onrender.com')) return callback(null, true);
+      if (origin.endsWith('.vercel.app')) return callback(null, true);
 
       // localhost and LAN, so the app can be tested from a phone on the same wifi
       try {
@@ -135,8 +135,8 @@ if (config.flags.maintenanceMode) {
   });
 }
 
-// Legacy local uploads (pre-S3). Harmless to keep serving until the cleanup
-// phase; new assets live on S3.
+// Legacy local uploads (pre-object-storage). Fly's filesystem is ephemeral,
+// so nothing new ever lands here; kept only so old rows still resolve.
 app.use('/uploads', express.static('uploads', {
   setHeaders: (res, path) => {
     if (path.endsWith('.svg')) {
@@ -194,7 +194,12 @@ app.use(aiRouter)
 app.use(editorAssistantRouter)
 app.use(publicAssistantRouter)
 
-// Health check endpoint
+// Health check endpoint.
+//
+// Deep, not shallow: a machine that cannot reach Postgres can serve no useful
+// request, so it reports 503 and the platform load balancer takes it out of
+// rotation. Returning 200 here regardless of database state is how a deploy
+// goes green while every request 500s.
 app.get('/health', async (req, res) => {
   let database = 'connected';
   try {
@@ -202,9 +207,10 @@ app.get('/health', async (req, res) => {
   } catch {
     database = 'disconnected';
   }
-  res.status(200).json({
-    status: 'ok',
-    message: 'Server is running',
+  const healthy = database === 'connected';
+  res.status(healthy ? 200 : 503).json({
+    status: healthy ? 'ok' : 'degraded',
+    message: healthy ? 'Server is running' : 'Database unreachable',
     timestamp: new Date().toISOString(),
     database,
   });
@@ -288,7 +294,7 @@ const startServer = async () => {
   // importing server.js (supertest) never opens a socket listener.
   initCollab(server, { allowedOrigins, allowAll: isAllowAll });
 
-  // Render sends SIGTERM on deploy. Open SSE streams would otherwise stall
+  // Fly sends SIGTERM on deploy. Open SSE streams would otherwise stall
   // the drain until the kill timeout.
   const shutdown = async () => {
     console.log('SIGTERM received: closing realtime streams and server.');

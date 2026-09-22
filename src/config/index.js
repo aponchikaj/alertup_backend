@@ -31,13 +31,31 @@ const config = {
     notifyRecipient: env.GMAIL_USER,
   },
 
-  aws: {
-    region: env.AWS_REGION || 'eu-central-1',
-    accessKeyId: env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
-    s3Bucket: env.S3_BUCKET || 'alertup-assets',
-    // Optional CDN/base override; defaults to the standard S3 URL form.
-    s3PublicBaseUrl: env.S3_PUBLIC_BASE_URL || null,
+  // Object storage. S3-compatible, so the same client drives AWS S3 or
+  // Cloudflare R2 — only `endpoint` and `region` differ:
+  //
+  //   AWS S3:  endpoint unset,                            region eu-central-1
+  //   R2:      https://<account>.r2.cloudflarestorage.com  region auto
+  //
+  // The STORAGE_* names are canonical; the AWS_*/S3_* names are still read so
+  // a half-migrated deploy keeps working. Drop the fallbacks once every
+  // environment sets STORAGE_*.
+  storage: {
+    endpoint: env.STORAGE_ENDPOINT || env.S3_ENDPOINT || null,
+    region: env.STORAGE_REGION || env.AWS_REGION || 'eu-central-1',
+    accessKeyId: env.STORAGE_ACCESS_KEY_ID || env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: env.STORAGE_SECRET_ACCESS_KEY || env.AWS_SECRET_ACCESS_KEY,
+    bucket: env.STORAGE_BUCKET || env.S3_BUCKET || 'alertup',
+    // Public base for generated URLs. On R2 this is REQUIRED — buckets are
+    // private by default and there is no predictable public host, so this
+    // points at the custom domain bound to the bucket (assets.alertup.world).
+    publicBaseUrl: env.STORAGE_PUBLIC_BASE_URL || env.S3_PUBLIC_BASE_URL || null,
+    // Hosts that served assets in an earlier era. Rows written then still hold
+    // absolute URLs, and delete has to recognise them as ours. Comma-separated.
+    legacyHosts: (env.STORAGE_LEGACY_HOSTS || '')
+      .split(',')
+      .map((h) => h.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, ''))
+      .filter(Boolean),
   },
 
   groq: {

@@ -1,13 +1,13 @@
 import express from 'express';
 import multer from 'multer';
 import path from 'path';
-import whoami from '../../middlewares/whoami.js';
+import whoami from '../middlewares/whoami.js';
 import {
   convertImageToSVG,
   createBasicSVG,
   processMultipleImages,
-} from '../../services/svgConverter.js';
-import { uploadBuffer, keys } from '../../services/storage.js';
+} from '../services/svgConverter.js';
+import { uploadBuffer, keys } from '../services/storage.js';
 
 const router = express.Router();
 
