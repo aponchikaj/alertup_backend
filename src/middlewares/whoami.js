@@ -20,7 +20,7 @@ const whoami = async (req, res, next) => {
   try {
     const data = jwt.verify(userToken, config.jwt.secret);
 
-    // The admin token minted in routes/admin/admin.js carries only
+    // The admin token minted in routes/admin.js carries only
     // {isAdmin:true} and is signed with this same secret, so it reaches here
     // with no userID. Reject explicitly so the guarantee is local.
     if (!data || !data.userID) {

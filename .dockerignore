@@ -1,0 +1,25 @@
+node_modules
+npm-debug.log
+.git
+.gitignore
+
+# Secrets never enter the image — Fly injects them as env vars at runtime.
+.env
+.env.*
+!.env.example
+
+# Legacy local upload target. Render's disk was ephemeral and Fly's is too;
+# assets live in object storage. Shipping 21MB of dev uploads would only slow
+# every build down.
+uploads
+
+coverage
+src/tests
+**/*.test.js
+scripts
+
+fly.toml
+fly.stage.toml
+Dockerfile
+.dockerignore
+README.md

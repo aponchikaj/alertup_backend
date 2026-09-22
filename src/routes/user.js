@@ -1,8 +1,8 @@
 import express from 'express';
 const router = express.Router();
 
-import whoami from '../../middlewares/whoami.js';
-import { ok, fail } from '../../utils/respond.js';
+import whoami from '../middlewares/whoami.js';
+import { ok, fail } from '../utils/respond.js';
 
 router.get('/api/me', whoami, async (req, res) => {
     try {

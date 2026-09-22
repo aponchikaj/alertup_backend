@@ -3,25 +3,25 @@ const router = express.Router();
 
 import bcrypt from 'bcrypt';
 
-import prisma from '../../db/prisma.js';
-import whoami from '../../middlewares/whoami.js';
-import sendMail from '../../services/sendEmail.js';
-import { displayName } from '../../services/displayName.js';
-import { checkNames } from '../../services/validation.js';
-import { emailLimiter, authLimiter } from '../../services/rateLimiter.js';
-import { ok, fail } from '../../utils/respond.js';
+import prisma from '../db/prisma.js';
+import whoami from '../middlewares/whoami.js';
+import sendMail from '../services/sendEmail.js';
+import { displayName } from '../services/displayName.js';
+import { checkNames } from '../services/validation.js';
+import { emailLimiter, authLimiter } from '../services/rateLimiter.js';
+import { ok, fail } from '../utils/respond.js';
 import {
   issueVerification,
   findActiveVerification,
   compareCode,
   recordFailedAttempt,
   LONG_CODE_TTL_MS,
-} from '../../services/verificationCodes.js';
+} from '../services/verificationCodes.js';
 import {
   signSessionToken,
   setSessionCookie,
   clearSessionCookie,
-} from '../../utils/session.js';
+} from '../utils/session.js';
 
 // GET /api/settings
 router.get('/api/settings', whoami, async (req, res) => {

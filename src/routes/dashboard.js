@@ -1,6 +1,6 @@
 import express from 'express';
-import prisma from '../../db/prisma.js';
-import whoami from '../../middlewares/whoami.js';
+import prisma from '../db/prisma.js';
+import whoami from '../middlewares/whoami.js';
 
 const router = express.Router();
 

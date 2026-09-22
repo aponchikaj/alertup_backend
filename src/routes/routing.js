@@ -1,7 +1,7 @@
 import express from 'express';
-import prisma from '../../db/prisma.js';
-import { isId } from '../../utils/ids.js';
-import { publicReadLimiter } from '../../services/rateLimiter.js';
+import prisma from '../db/prisma.js';
+import { isId } from '../utils/ids.js';
+import { publicReadLimiter } from '../services/rateLimiter.js';
 
 const router = express.Router();
 

@@ -1,17 +1,17 @@
 import express from 'express';
-import prisma from '../../db/prisma.js';
-import whoami from '../../middlewares/whoami.js';
+import prisma from '../db/prisma.js';
+import whoami from '../middlewares/whoami.js';
 import {
   requirePermission,
   requireMembership,
-} from '../../middlewares/requireBuildingPermission.js';
-import { PERMISSIONS } from '../../auth/permissions.js';
-import { isId } from '../../utils/ids.js';
+} from '../middlewares/requireBuildingPermission.js';
+import { PERMISSIONS } from '../auth/permissions.js';
+import { isId } from '../utils/ids.js';
 import {
   triggerEmergency,
   resolveEmergency,
-} from '../../features/emergency/emergencyService.js';
-import { verifyChallenge } from '../../features/emergency/challenge.js';
+} from '../features/emergency/emergencyService.js';
+import { verifyChallenge } from '../features/emergency/challenge.js';
 
 const router = express.Router();
 

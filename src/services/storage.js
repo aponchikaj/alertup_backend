@@ -2,9 +2,13 @@ import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client
 import { randomBytes } from 'node:crypto';
 import config from '../config/index.js';
 
-// S3-backed asset storage, replacing Cloudinary. Maps, QR images and SVGs are
-// public by bucket policy on these prefixes — scan pages are anonymous and
-// emergency-critical, so no expiring presigned URLs.
+// S3-compatible asset storage. Maps, QR images and SVGs are public on these
+// prefixes — scan pages are anonymous and emergency-critical, so no expiring
+// presigned URLs.
+//
+// Works against AWS S3 or Cloudflare R2 unchanged; `STORAGE_ENDPOINT` is what
+// switches them. On R2 the bucket is private and served through a custom
+// domain, so STORAGE_PUBLIC_BASE_URL is mandatory there (see publicUrl).
 
 const ALLOWED_PREFIXES = ['buildings/', 'conversions/'];
 
@@ -12,12 +16,14 @@ let client = null;
 function s3() {
   if (!client) {
     client = new S3Client({
-      region: config.aws.region,
+      region: config.storage.region,
+      // Unset for AWS; for R2 this is https://<account>.r2.cloudflarestorage.com.
+      ...(config.storage.endpoint ? { endpoint: config.storage.endpoint } : {}),
       credentials:
-        config.aws.accessKeyId && config.aws.secretAccessKey
+        config.storage.accessKeyId && config.storage.secretAccessKey
           ? {
-              accessKeyId: config.aws.accessKeyId,
-              secretAccessKey: config.aws.secretAccessKey,
+              accessKeyId: config.storage.accessKeyId,
+              secretAccessKey: config.storage.secretAccessKey,
             }
           : undefined,
     });
@@ -25,11 +31,33 @@ function s3() {
   return client;
 }
 
-export function publicUrl(key) {
-  if (config.aws.s3PublicBaseUrl) {
-    return `${config.aws.s3PublicBaseUrl.replace(/\/+$/, '')}/${key}`;
+/** Host that `publicUrl` builds from, or null when no base is configured. */
+function publicHost() {
+  if (config.storage.publicBaseUrl) {
+    try {
+      return new URL(config.storage.publicBaseUrl).hostname;
+    } catch {
+      return null;
+    }
   }
-  return `https://${config.aws.s3Bucket}.s3.${config.aws.region}.amazonaws.com/${key}`;
+  if (config.storage.endpoint) return null; // R2 has no predictable public host
+  return `${config.storage.bucket}.s3.${config.storage.region}.amazonaws.com`;
+}
+
+export function publicUrl(key) {
+  if (config.storage.publicBaseUrl) {
+    return `${config.storage.publicBaseUrl.replace(/\/+$/, '')}/${key}`;
+  }
+  // R2 buckets are private by default and the r2.dev subdomain is rate-limited
+  // and unsupported for production traffic. Failing loudly here beats writing
+  // a row whose URL 404s for every visitor who scans that QR code.
+  if (config.storage.endpoint) {
+    throw new Error(
+      'STORAGE_PUBLIC_BASE_URL is required when STORAGE_ENDPOINT is set — ' +
+        'bind a custom domain to the R2 bucket and point this at it.'
+    );
+  }
+  return `https://${config.storage.bucket}.s3.${config.storage.region}.amazonaws.com/${key}`;
 }
 
 const CONTENT_TYPES = {
@@ -58,12 +86,12 @@ export async function uploadBuffer({ key, buffer, contentType, cacheControl }) {
   // a real bucket. Return a deterministic fake URL instead of calling S3 —
   // deleteByUrl treats this host as foreign and skips it, so cleanup paths
   // stay no-ops too.
-  if (process.env.NODE_ENV === 'test' && !process.env.AWS_ACCESS_KEY_ID) {
+  if (process.env.NODE_ENV === 'test' && !config.storage.accessKeyId) {
     return `https://test-assets.local/${key}`;
   }
   await s3().send(
     new PutObjectCommand({
-      Bucket: config.aws.s3Bucket,
+      Bucket: config.storage.bucket,
       Key: key,
       Body: buffer,
       ContentType: contentType,
@@ -99,7 +127,7 @@ export async function deleteByUrl(url) {
     throw new Error(`Refusing to delete outside known prefixes: ${key}`);
   }
   await s3().send(
-    new DeleteObjectCommand({ Bucket: config.aws.s3Bucket, Key: key })
+    new DeleteObjectCommand({ Bucket: config.storage.bucket, Key: key })
   );
   return 'deleted';
 }
@@ -107,14 +135,21 @@ export async function deleteByUrl(url) {
 export function keyFromUrl(url) {
   try {
     const u = new URL(url);
-    const bucketHost = `${config.aws.s3Bucket}.s3.${config.aws.region}.amazonaws.com`;
-    if (config.aws.s3PublicBaseUrl) {
-      const base = new URL(config.aws.s3PublicBaseUrl);
-      if (u.hostname === base.hostname) {
-        return decodeURIComponent(u.pathname.replace(/^\/+/, ''));
-      }
-    }
-    if (u.hostname === bucketHost) {
+
+    // Every host that has ever served our assets. Rows outlive migrations, so
+    // a URL written in the S3 era must still be recognised as ours after the
+    // move to R2 — otherwise deleting a building silently orphans its files.
+    const ours = new Set(
+      [
+        publicHost(),
+        // The raw S3 host stays claimable even after STORAGE_PUBLIC_BASE_URL
+        // starts pointing at a CDN or R2 custom domain.
+        `${config.storage.bucket}.s3.${config.storage.region}.amazonaws.com`,
+        ...config.storage.legacyHosts,
+      ].filter(Boolean)
+    );
+
+    if (ours.has(u.hostname)) {
       return decodeURIComponent(u.pathname.replace(/^\/+/, ''));
     }
     return null; // foreign URL (e.g. legacy Cloudinary) — not ours to delete

@@ -120,3 +120,12 @@ export const aiDailyLimiter = rateLimit({
   limit: 150,
   message: deny('Daily assistant limit reached. Please try again tomorrow.'),
 });
+
+/** The anonymous home-page design demo. A full design burns 10-20x the
+ *  tokens of a chat answer, so its daily budget is much tighter. */
+export const aiDemoDailyLimiter = rateLimit({
+  ...baseOptions,
+  windowMs: 24 * 60 * 60 * 1000,
+  limit: 10,
+  message: deny('Daily demo limit reached. Sign up to keep designing.'),
+});
