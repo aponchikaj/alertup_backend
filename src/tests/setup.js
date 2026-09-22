@@ -23,6 +23,11 @@ process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 process.env.NODE_ENV = 'test';
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-not-used-in-production';
 process.env.SENDGRID_API_KEY = '';
+// Same for Resend, or the suite would reach a real mailbox.
+process.env.RESEND_API_KEY = '';
+// Gemini is the primary AI provider; blank it alongside GROQ_API_KEY so
+// aiAvailable() stays false and tests exercise the degraded path.
+process.env.GEMINI_API_KEY = '';
 process.env.CLOUDINARY_CLOUD_NAME = '';
 process.env.CLOUDINARY_API_KEY = '';
 process.env.CLOUDINARY_API_SECRET = '';

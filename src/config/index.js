@@ -24,6 +24,10 @@ const config = {
   },
 
   email: {
+    // Resend primary, SendGrid fallback — see services/sendEmail.js. SendGrid
+    // stays wired until Resend's domain verification has been live for a while.
+    provider: env.EMAIL_PROVIDER || 'resend',
+    resendApiKey: env.RESEND_API_KEY,
     sendgridApiKey: env.SENDGRID_API_KEY,
     from: env.EMAIL_FROM || 'lazaremirziashvili@alertup.world',
     replyTo: env.EMAIL_REPLY_TO || 'lazaremirziashvili8@gmail.com',
@@ -56,6 +60,27 @@ const config = {
       .split(',')
       .map((h) => h.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, ''))
       .filter(Boolean),
+  },
+
+  // Provider-independent AI settings. `provider` names the primary; the other
+  // one becomes the fallback (see features/ai/aiClient.js).
+  ai: {
+    provider: env.AI_PROVIDER || 'gemini',
+    disabled: env.AI_DISABLED === 'true',
+  },
+
+  // Gemini (Google AI Studio). Model names move quickly — override per
+  // environment rather than editing these defaults.
+  gemini: {
+    apiKey: env.GEMINI_API_KEY,
+    // Terse visitor concierge: the cheapest, fastest tier is the right fit.
+    model: env.GEMINI_MODEL || 'gemini-3.5-flash-lite',
+    // The floor designer emits a whole drawing and benefits from more headroom.
+    designModel: env.GEMINI_DESIGN_MODEL || env.GEMINI_MODEL || 'gemini-3.8-flash',
+    // Reads uploaded floor-plan images. Empty string disables image analysis
+    // without touching the rest of the assistant.
+    visionModel: env.GEMINI_VISION_MODEL ?? 'gemini-3.8-flash',
+    maxTokens: Number(env.AI_MAX_TOKENS) || 300,
   },
 
   groq: {
@@ -94,7 +119,10 @@ const config = {
 const REQUIRED_IN_PRODUCTION = [
   ['DATABASE_URL', config.db.url],
   ['JWT_SECRET', config.jwt.secret],
-  ['SENDGRID_API_KEY', config.email.sendgridApiKey],
+  // Any working transport will do — naming SENDGRID_API_KEY specifically would
+  // refuse to boot a Resend-only production, and password resets and invites
+  // are load-bearing enough that booting with neither must stay fatal.
+  ['RESEND_API_KEY or SENDGRID_API_KEY', config.email.resendApiKey || config.email.sendgridApiKey],
 ];
 
 if (config.isProduction) {

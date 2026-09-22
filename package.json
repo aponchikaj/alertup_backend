@@ -1,7 +1,7 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "description": "AlertUp API \u2014 indoor wayfinding and emergency evacuation. Serves searchable building maps, multi-floor routing, QR scan resolution, realtime emergency broadcast and an AI concierge.",
+  "description": "AlertUp API — indoor wayfinding and emergency evacuation. Serves searchable building maps, multi-floor routing, QR scan resolution, realtime emergency broadcast and an AI concierge.",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -27,6 +27,7 @@
   "license": "ISC",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1100.0",
+    "@google/genai": "^2.24.0",
     "@prisma/client": "^6.19.3",
     "@sendgrid/mail": "^8.1.6",
     "bad-words": "^4.0.0",
@@ -47,6 +48,7 @@
     "multer-storage-cloudinary": "^4.0.0",
     "nodemon": "^3.1.11",
     "qrcode": "^1.5.4",
+    "resend": "^6.28.1",
     "socket.io": "^4.8.3"
   },
   "devDependencies": {

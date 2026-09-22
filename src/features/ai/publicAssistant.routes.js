@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import config from '../../config/index.js';
 import {
   aiChatLimiter,
   aiDailyLimiter,
@@ -9,7 +8,7 @@ import { ok, fail } from '../../utils/respond.js';
 import { initSse, sendData } from '../realtime/sseHelpers.js';
 import { validateChatBody, sanitizeText } from './aiGuards.js';
 import { fenceUserContent } from './promptBuilder.js';
-import { streamChat, aiAvailable } from './groqClient.js';
+import { streamChat, aiAvailable } from './aiClient.js';
 import { extractDrawing } from './editorAssistant.routes.js';
 import { repairAdditions, stripCorridorBoxes } from './placementRepair.js';
 import { normalizeDrawing } from '../mapEditor/drawingSchema.js';
@@ -180,7 +179,7 @@ router.post(
         messages: [{ role: 'user', content: fenceUserContent(prompt) }],
         signal: abort.signal,
         maxTokens: DEMO_MAX_TOKENS,
-        model: config.groq.designModel,
+        role: 'design',
       })) {
         raw += delta;
       }
