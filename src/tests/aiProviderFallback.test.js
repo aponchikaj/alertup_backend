@@ -114,6 +114,29 @@ describe('streaming fallback', () => {
     groqStream.mockImplementation(generator(['still works']));
     expect(await collect(streamChat({ system: 's', messages: [] }))).toEqual(['still works']);
   });
+
+  test.each([
+    [402, 'depleted prepay credits'],
+    [404, 'a retired model id'],
+    [429, 'a free-tier rate limit'],
+    [503, 'a provider outage'],
+  ])('status %i (%s) falls through to the other provider', async (status) => {
+    // 402 and 404 are not hypothetical: Gemini returned 402 with credits
+    // depleted, and Groq returned 404 after retiring the Llama family. Both
+    // would otherwise take the assistant down with a live fallback sitting idle.
+    geminiStream.mockImplementation(generator([], httpError(status)));
+    groqStream.mockImplementation(generator(['fallback answered']));
+    expect(await collect(streamChat({ system: 's', messages: [] }))).toEqual([
+      'fallback answered',
+    ]);
+  });
+
+  test('a 400 does NOT fall through — the request is malformed either way', async () => {
+    geminiStream.mockImplementation(generator([], httpError(400)));
+    groqStream.mockImplementation(generator(['never reached']));
+    await expect(collect(streamChat({ system: 's', messages: [] }))).rejects.toThrow('HTTP 400');
+    expect(groqStream).not.toHaveBeenCalled();
+  });
 });
 
 describe('chatOnce fallback', () => {
