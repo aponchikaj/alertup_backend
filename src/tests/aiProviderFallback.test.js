@@ -128,10 +128,18 @@ describe('chatOnce fallback', () => {
     // 400 on every fallback.
     geminiOnce.mockRejectedValue(httpError(500));
     groqOnce.mockResolvedValue('ok');
-    await chatOnce({ messages: [], role: 'vision' });
-    const geminiModel = geminiOnce.mock.calls[0][0].model;
-    const groqModel = groqOnce.mock.calls[0][0].model;
-    expect(geminiModel).toMatch(/gemini/);
-    expect(groqModel).not.toMatch(/gemini/);
+    await chatOnce({ messages: [], role: 'design' });
+    expect(geminiOnce.mock.calls[0][0].model).toMatch(/gemini/);
+    expect(groqOnce.mock.calls[0][0].model).not.toMatch(/gemini/);
+  });
+
+  test('a provider with no model for the role is skipped, not called blind', async () => {
+    // Groq lost its multimodal model when the Llama family was retired, so
+    // vision is Gemini-only. Falling through to Groq with model=undefined
+    // would send a plan image to a text model and get a 400 back.
+    geminiOnce.mockRejectedValue(httpError(500));
+    groqOnce.mockResolvedValue('should never be reached');
+    await expect(chatOnce({ messages: [], role: 'vision' })).rejects.toThrow('HTTP 500');
+    expect(groqOnce).not.toHaveBeenCalled();
   });
 });

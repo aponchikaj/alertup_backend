@@ -85,13 +85,17 @@ const config = {
 
   groq: {
     apiKey: env.GROQ_API_KEY,
-    model: env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    // Groq retired the Llama family: llama-3.3-70b-versatile now 404s with
+    // model_not_found, which is why the assistant was answering with its
+    // "unavailable" fallback. These are the current chat models on the account.
+    model: env.GROQ_MODEL || 'openai/gpt-oss-20b',
     // The floor designer benefits from a stronger model than the concierge;
     // defaults to the main model when unset.
-    designModel: env.GROQ_DESIGN_MODEL || env.GROQ_MODEL || 'llama-3.3-70b-versatile',
-    // Multimodal model used to read uploaded floor-plan images. Empty string
-    // disables image analysis without touching the rest of the assistant.
-    visionModel: env.GROQ_VISION_MODEL ?? 'meta-llama/llama-4-scout-17b-16e-instruct',
+    designModel: env.GROQ_DESIGN_MODEL || env.GROQ_MODEL || 'openai/gpt-oss-120b',
+    // Empty by default: Groq no longer offers a multimodal model (llama-4-scout
+    // went with the Llama retirement), so reading uploaded plan images is
+    // Gemini-only. Setting this re-enables the path if Groq ships one again.
+    visionModel: env.GROQ_VISION_MODEL ?? '',
     maxTokens: Number(env.AI_MAX_TOKENS) || 300,
     disabled: env.AI_DISABLED === 'true',
   },
