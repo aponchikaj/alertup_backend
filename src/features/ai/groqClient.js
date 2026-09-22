@@ -61,5 +61,5 @@ export async function chatOnce({ system, messages, model, maxTokens = 800, signa
 }
 
 export function aiAvailable() {
-  return Boolean(config.groq.apiKey) && !config.groq.disabled;
+  return Boolean(config.groq.apiKey) && !config.ai.disabled;
 }

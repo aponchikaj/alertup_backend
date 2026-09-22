@@ -5,7 +5,7 @@ import { initSse, sendData } from '../realtime/sseHelpers.js';
 import { validateChatBody } from './aiGuards.js';
 import { buildSystemPrompt, fenceUserContent } from './promptBuilder.js';
 import { fetchChatContext } from './contextFetcher.js';
-import { streamChat, aiAvailable } from './groqClient.js';
+import { streamChat, aiAvailable } from './aiClient.js';
 
 const router = Router();
 

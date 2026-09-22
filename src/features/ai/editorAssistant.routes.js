@@ -9,7 +9,7 @@ import { aiChatLimiter, aiDailyLimiter } from '../../services/rateLimiter.js';
 import { aiDesignerAllowed } from '../../services/plans.js';
 import { validateChatBody } from './aiGuards.js';
 import { fenceUserContent } from './promptBuilder.js';
-import { streamChat, chatOnce, aiAvailable } from './groqClient.js';
+import { streamChat, chatOnce, aiAvailable, visionAvailable } from './aiClient.js';
 import { analyzeFloor, describeFloorForPrompt } from './floorAnalysis.js';
 import { repairAdditions, stripCorridorBoxes } from './placementRepair.js';
 import { normalizeDrawing } from '../mapEditor/drawingSchema.js';
@@ -230,12 +230,12 @@ const imageAnalysisCache = new Map();
 const IMAGE_ANALYSIS_CACHE_MAX = 100;
 
 export async function analyzeUnderlayImage(floor, canvasW, canvasH) {
-  if (!floor?.mapImageUrl || !config.groq.visionModel || !aiAvailable()) return '';
+  if (!floor?.mapImageUrl || !visionAvailable() || !aiAvailable()) return '';
   const key = `${floor.id}:${floor.mapImageUrl}`;
   if (imageAnalysisCache.has(key)) return imageAnalysisCache.get(key);
   try {
     const text = await chatOnce({
-      model: config.groq.visionModel,
+      role: 'vision',
       maxTokens: 700,
       messages: [
         {
@@ -450,7 +450,7 @@ router.post(
         messages: chatMessages,
         signal: abort.signal,
         maxTokens: DESIGN_MAX_TOKENS,
-        model: config.groq.designModel,
+        role: 'design',
       })) {
         raw += delta;
         if (raw.length > MAX_REPLY_CHARS) break;
