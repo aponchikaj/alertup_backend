@@ -65,9 +65,21 @@ function isRetryable(error) {
   if (error?.name === 'AbortError') return false;
 
   const status = error?.status ?? error?.response?.status;
-  if (status === 429) return true; // rate limited — the whole point of this
   if (typeof status === 'number' && status >= 500) return true;
-  if (status === 401 || status === 403) return true; // bad/expired key
+
+  // The 4xx codes that mean "this provider cannot serve you" rather than
+  // "your request is malformed". Each of these has actually happened here:
+  //
+  //   402  Gemini prepay credits depleted — the key authenticates and lists
+  //        models, but every generateContent is refused.
+  //   404  model_not_found — Groq retired the whole Llama family and the
+  //        configured model simply stopped existing.
+  //   429  free-tier rate limit, the reason this fallback exists at all.
+  //   401/403  key revoked, expired, or missing a scope.
+  //
+  // A 400 is deliberately NOT here: a malformed request fails identically on
+  // the fallback, so retrying only doubles the latency before the same error.
+  if ([401, 402, 403, 404, 429].includes(status)) return true;
 
   // Network-level failures surface without a status.
   return status === undefined;
