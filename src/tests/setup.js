@@ -22,7 +22,6 @@ if (!['localhost', '127.0.0.1', '::1'].includes(testHost)) {
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 process.env.NODE_ENV = 'test';
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-not-used-in-production';
-process.env.SENDGRID_API_KEY = '';
 // Same for Resend, or the suite would reach a real mailbox.
 process.env.RESEND_API_KEY = '';
 // Gemini is the primary AI provider; blank it alongside GROQ_API_KEY so

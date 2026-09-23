@@ -1,6 +1,6 @@
 import { jest } from '@jest/globals';
 
-// Mock the mailer before anything imports it: SendGrid keys are blanked in
+// Mock the mailer before anything imports it: mail keys are blanked in
 // tests, and the invite service deliberately rolls invites back when the
 // email cannot be handed off.
 const sendMailMock = jest.fn().mockResolvedValue({ Success: true });
@@ -179,7 +179,7 @@ describe('invites flow', () => {
 
   test('email failure rolls the invite back', async () => {
     const { cookie, building, roles } = await createOwnerWithBuilding();
-    sendMailMock.mockRejectedValueOnce(new Error('SendGrid down'));
+    sendMailMock.mockRejectedValueOnce(new Error('Resend down'));
 
     const res = await request(app)
       .post(`/api/buildings/${building.id}/invites`)

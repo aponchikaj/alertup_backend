@@ -22,7 +22,7 @@ export function acceptUrlFor(token) {
 
 /**
  * Create (or replace) a PENDING invite and email the recipient. If the email
- * cannot be handed to SendGrid the invite row is rolled back — an invite whose
+ * cannot be handed to the mail provider the invite row is rolled back — an invite whose
  * link never arrives is a stuck state for that address.
  */
 export async function createAndSendInvite({ building, role, email, invitedBy }) {
