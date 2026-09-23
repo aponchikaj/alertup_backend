@@ -24,11 +24,9 @@ const config = {
   },
 
   email: {
-    // Resend primary, SendGrid fallback — see services/sendEmail.js. SendGrid
-    // stays wired until Resend's domain verification has been live for a while.
-    provider: env.EMAIL_PROVIDER || 'resend',
+    // Resend is the only transport — see services/sendEmail.js. `from` must sit
+    // on a domain verified in Resend or every send is rejected.
     resendApiKey: env.RESEND_API_KEY,
-    sendgridApiKey: env.SENDGRID_API_KEY,
     from: env.EMAIL_FROM || 'lazaremirziashvili@alertup.world',
     replyTo: env.EMAIL_REPLY_TO || 'lazaremirziashvili8@gmail.com',
     // contact-form + admin-login notification recipient
@@ -123,10 +121,9 @@ const config = {
 const REQUIRED_IN_PRODUCTION = [
   ['DATABASE_URL', config.db.url],
   ['JWT_SECRET', config.jwt.secret],
-  // Any working transport will do — naming SENDGRID_API_KEY specifically would
-  // refuse to boot a Resend-only production, and password resets and invites
-  // are load-bearing enough that booting with neither must stay fatal.
-  ['RESEND_API_KEY or SENDGRID_API_KEY', config.email.resendApiKey || config.email.sendgridApiKey],
+  // Password resets, 2FA codes and invites all depend on this, so booting
+  // production without a mail transport must stay fatal.
+  ['RESEND_API_KEY', config.email.resendApiKey],
 ];
 
 if (config.isProduction) {
