@@ -13,7 +13,7 @@ import {
 /**
  * Settings + /api/me + 2FA flows against the Prisma-backed routes.
  *
- * SENDGRID_API_KEY is blanked by setup.js, so every real send attempt fails;
+ * RESEND_API_KEY is blanked by setup.js, so every real send attempt fails;
  * routes that respond before emailing still succeed, and routes that gate on
  * the email (2FA activation) answer "Couldn't sent email." while still having
  * created the verification row — which is what these tests lean on.
@@ -113,7 +113,7 @@ describe('2FA activation flow', () => {
   it('activate creates a hashed 5-minute code, verify enables 2FA and clears trustedIps', async () => {
     const { user, cookie } = await createUser({ trustedIps: ['203.0.113.7'] });
 
-    // With no SendGrid key the activation email fails, but the verification
+    // With no Resend key the activation email fails, but the verification
     // row must already exist by then (same ordering the old route had).
     const activateRes = await request(app)
       .post('/api/2fa/activate')
