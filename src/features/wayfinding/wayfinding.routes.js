@@ -5,6 +5,8 @@ import { isId } from '../../utils/ids.js';
 import { publicReadLimiter } from '../../services/rateLimiter.js';
 import { getGraph } from './graphCache.js';
 import { findRoute, findEvacuationRoute } from './dijkstra.js';
+import { getSafetyField, pathFromField } from './safetyField.js';
+import { alternativeExits } from './alternatives.js';
 import { assembleRoute } from './routeAssembler.js';
 import { parseRoutingQuery, composeFilters, makeOverlayCostFn } from './profiles.js';
 import {
@@ -37,12 +39,25 @@ const router = Router();
  *                 edgeFilter:Function|null, costFn:Function}>} fallbackAttempts
  *   ordered strictest-relaxation-first
  * @param {(edgeFilter:Function|null, costFn:Function) => object|null} search
- * @returns {{result:object|null, tagConstraintsRelaxed:boolean, accessibleRouteUnavailable:boolean}}
+ * @returns {{result:object|null, tagConstraintsRelaxed:boolean,
+ *            accessibleRouteUnavailable:boolean, edgeFilter:Function|null,
+ *            costFn:Function}}
+ *   `edgeFilter`/`costFn` are the WINNING attempt's, so a follow-up search
+ *   for the same request (alternative exits) runs under the constraints the
+ *   route was actually found under — searching an alternative under stricter
+ *   rules than the primary would offer a door the primary already proved
+ *   unreachable under those rules.
  */
 function searchWithFallbacks(strictAttempt, fallbackAttempts, search) {
   const strictResult = search(strictAttempt.edgeFilter, strictAttempt.costFn);
   if (strictResult) {
-    return { result: strictResult, tagConstraintsRelaxed: false, accessibleRouteUnavailable: false };
+    return {
+      result: strictResult,
+      tagConstraintsRelaxed: false,
+      accessibleRouteUnavailable: false,
+      edgeFilter: strictAttempt.edgeFilter,
+      costFn: strictAttempt.costFn,
+    };
   }
 
   let tagConstraintsRelaxed = false;
@@ -51,9 +66,23 @@ function searchWithFallbacks(strictAttempt, fallbackAttempts, search) {
     if (attempt.label === 'tagConstraintsRelaxed') tagConstraintsRelaxed = true;
     if (attempt.label === 'accessibleRouteUnavailable') accessibleRouteUnavailable = true;
     const result = search(attempt.edgeFilter, attempt.costFn);
-    if (result) return { result, tagConstraintsRelaxed, accessibleRouteUnavailable };
+    if (result) {
+      return {
+        result,
+        tagConstraintsRelaxed,
+        accessibleRouteUnavailable,
+        edgeFilter: attempt.edgeFilter,
+        costFn: attempt.costFn,
+      };
+    }
   }
-  return { result: null, tagConstraintsRelaxed: false, accessibleRouteUnavailable: false };
+  return {
+    result: null,
+    tagConstraintsRelaxed: false,
+    accessibleRouteUnavailable: false,
+    edgeFilter: strictAttempt.edgeFilter,
+    costFn: strictAttempt.costFn,
+  };
 }
 
 /**
@@ -559,17 +588,69 @@ router.get('/api/wayfinding/evacuate', publicReadLimiter, async (req, res) => {
       : context.strictEdgeFilter;
     const fallbacks = [...tagRelaxedFallbacks, ...accessibilityDroppedFallback];
 
-    const { result, tagConstraintsRelaxed, accessibleRouteUnavailable } = searchWithFallbacks(
-      { edgeFilter: strictEdgeFilter, costFn: effectiveCostFn },
-      fallbacks,
-      (edgeFilter, costFn) =>
-        findEvacuationRoute(graph, from, {
-          accessible: false, // relaxation is driven by the fallback chain above
-          profile: effectiveProfile,
-          costFn,
-          edgeFilter,
-        })
-    );
+    // B9: the primary route comes from the distance-to-safety field — ONE
+    // reverse Dijkstra from the virtual super-exit, cached per (graph object,
+    // variant, closure fingerprint), after which every occupant's route is a
+    // pointer walk. During a real incident hundreds of people ask this
+    // question within seconds over the same graph; the field turns that from
+    // N searches into one.
+    //
+    // Two cases still go through the forward Dijkstra chain:
+    //   - `wheelchair`, whose strict attempt and accessibility-drop fallback
+    //     are a relaxation LADDER, not a single cost function — a field per
+    //     rung would build (and cache) searches most requests never need;
+    //   - an origin whose own node is closed. `applyOverlay` lifts that block
+    //     for this occupant only, which changes the edge filter WITHOUT
+    //     changing `buildOverlay`'s fingerprint (it is derived from the
+    //     closures, not from who is asking). Sharing the cache key would hand
+    //     the next occupant a field built under an exemption that is not
+    //     theirs, so this one occupant gets their own search instead.
+    const originExempted = Boolean(overlay?.blockedNodeIds?.has(from));
+    const useField = !wheelchairRequested && !originExempted;
+    // Everything that changes the field: the emergency profile, any layered
+    // cost preference, and the tag constraints folded into the strict filter.
+    const fieldVariant = [
+      'emergency',
+      costOverlayName ?? '',
+      parsed.includeTags.join(','),
+      parsed.excludeTags.join(','),
+    ].join('#');
+
+    let result = useField
+      ? pathFromField(
+          getSafetyField(
+            graph,
+            { name: fieldVariant, costFn: effectiveCostFn, edgeFilter: strictEdgeFilter },
+            { fingerprint: context.overlay?.fingerprint ?? '' }
+          ),
+          from
+        )
+      : null;
+    // A field hit IS the strict attempt: same cost function, same filter, so
+    // nothing was relaxed to find it.
+    let tagConstraintsRelaxed = false;
+    let accessibleRouteUnavailable = false;
+    let searchEdgeFilter = strictEdgeFilter;
+    let searchCostFn = effectiveCostFn;
+
+    if (!result) {
+      const attempt = searchWithFallbacks(
+        { edgeFilter: strictEdgeFilter, costFn: effectiveCostFn },
+        fallbacks,
+        (edgeFilter, costFn) =>
+          findEvacuationRoute(graph, from, {
+            accessible: false, // relaxation is driven by the fallback chain above
+            profile: effectiveProfile,
+            costFn,
+            edgeFilter,
+          })
+      );
+      result = attempt.result;
+      tagConstraintsRelaxed = attempt.tagConstraintsRelaxed;
+      accessibleRouteUnavailable = attempt.accessibleRouteUnavailable;
+      searchEdgeFilter = attempt.edgeFilter;
+      searchCostFn = attempt.costFn;
+    }
     if (!result) {
       return fail(res, 404, 'No exit route found from this location.');
     }
@@ -589,6 +670,35 @@ router.get('/api/wayfinding/evacuate', publicReadLimiter, async (req, res) => {
       overlay: context.overlay,
     });
     route.closures = closures;
+
+    // B9: "if that door is blocked, try these". Searched under the SAME
+    // constraints that found the primary (the winning attempt's filter and
+    // cost), so an alternative can never be a door the primary was already
+    // told it could not use. Lean routes: `floor.drawing` is the one
+    // unbounded field, and three copies of a floor plan per evacuation
+    // response is exactly the payload a phone on a congested cell cannot
+    // afford. Always an array, so the client never branches on undefined.
+    route.alternatives = alternativeExits(
+      graph,
+      from,
+      {
+        profile: effectiveProfile,
+        profileName: wheelchairRequested ? 'wheelchair' : 'emergency',
+        preference: costOverlayName,
+        costFn: searchCostFn,
+        edgeFilter: searchEdgeFilter,
+        overlay: context.overlay,
+        accessible: wheelchairRequested,
+        accessibleRouteUnavailable,
+        tagConstraintsRelaxed,
+      },
+      { primaryExitId: result.exitNodeId, max: 2 }
+    );
+    // An embedded route travels alone — the frontend normalizes each one on
+    // its own, so it carries the same closure list the primary does.
+    for (const alternative of route.alternatives) {
+      alternative.route.closures = closures;
+    }
 
     // B13: recordRouteRequest({ buildingId: origin.buildingId, profile: route.profile, src: parsed.src, ... })
 

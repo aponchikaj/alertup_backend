@@ -15,6 +15,14 @@ export const DEFAULT_TRANSIT_COST = Object.freeze({
 /** Guard against pathological graphs. */
 export const MAX_NODES = 20000;
 
+/**
+ * What every evacuation searches for. One definition, because the forward
+ * search here and the reverse distance-to-safety field in `safetyField.js`
+ * have to agree on what counts as a way out — two copies of this predicate
+ * would let the field answer a question the router never asked.
+ */
+export const isEmergencyExit = (node) => node?.type === 'EMERGENCY_EXIT';
+
 export const calculateDistance = (x1, y1, x2, y2) =>
   Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
 
@@ -155,7 +163,7 @@ export function findEvacuationRoute(
   const resolved = normalizeProfile(profile);
   const weight = costFn || (resolved ? makeCostFn(resolved) : null);
   const skipped = new Set(excludeExitIds || []);
-  const isExit = targetPredicate || ((node) => node.type === 'EMERGENCY_EXIT');
+  const isExit = targetPredicate || isEmergencyExit;
   const wanted = (node) => isExit(node) && !skipped.has(node.id);
 
   const search = (filter) =>

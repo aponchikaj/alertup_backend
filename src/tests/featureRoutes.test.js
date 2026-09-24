@@ -831,6 +831,51 @@ describe('wayfinding API', () => {
     expect(route.mode).toBe('EVACUATION');
     expect(route.destination.nodeId).toBe(exit1.id);
     expect(route.segments).toHaveLength(1);
+    // One exit in the building: nothing to offer, but the field is always
+    // present so the client never has to branch on undefined.
+    expect(route.alternatives).toEqual([]);
+  });
+
+  test('/evacuate offers two alternative exits, different doors, ordered by durationSec', async () => {
+    const { building } = await createOwnerWithBuilding();
+    const f1 = await createFloor(building.id, { floorNumber: 1, scalePixelsPerMeter: 10 });
+    const entrance = await createNode(building.id, f1.id, { x: 0, y: 0, type: 'NORMAL' });
+    // Three doors at increasing walking distance from the same spot.
+    const near = await createNode(building.id, f1.id, {
+      x: 100, y: 0, type: 'EMERGENCY_EXIT', label: 'North exit',
+    });
+    const mid = await createNode(building.id, f1.id, {
+      x: 300, y: 0, type: 'EMERGENCY_EXIT', label: 'East exit',
+    });
+    const far = await createNode(building.id, f1.id, {
+      x: 600, y: 0, type: 'EMERGENCY_EXIT', label: 'South exit',
+    });
+    await connectNodes(entrance, near);
+    await connectNodes(entrance, mid);
+    await connectNodes(entrance, far);
+
+    const res = await request(app).get(`/api/wayfinding/evacuate?from=${entrance.id}`);
+    expect(res.status).toBe(200);
+    const route = res.body.data.route;
+    expect(route.destination.nodeId).toBe(near.id);
+
+    const alternatives = route.alternatives;
+    expect(alternatives).toHaveLength(2);
+    // Different doors, and never the one the primary route already leads to.
+    expect(alternatives.map((a) => a.exitNodeId)).toEqual([mid.id, far.id]);
+    expect(alternatives[0].durationSec).toBeLessThan(alternatives[1].durationSec);
+    expect(alternatives[0].label).toBe('East exit');
+    expect(alternatives[0].floorNumber).toBe(1);
+    expect(alternatives[0].distanceM).toBe(30);
+    expect(alternatives[0].route.destination.nodeId).toBe(mid.id);
+    // Lean: the hand-drawn plan is not repeated once per alternative.
+    for (const alt of alternatives) {
+      for (const segment of alt.route.segments) {
+        expect(Object.hasOwn(segment.floor, 'drawing')).toBe(false);
+      }
+    }
+    // …while the primary route keeps it.
+    expect(Object.hasOwn(route.segments[0].floor, 'drawing')).toBe(true);
   });
 
   test('profile=min_floor_changes prefers a same-floor exit over an upstairs one, keeping emergency visibility', async () => {

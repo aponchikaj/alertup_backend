@@ -758,6 +758,45 @@ describe('closures change the route', () => {
     expect(after.body.data.closures).toHaveLength(1);
   });
 
+  test('a blocked origin node lets THAT occupant evacuate without opening the node to anyone else', async () => {
+    // B9's safety field is cached per (graph object, variant, closure
+    // fingerprint). `overlayForOrigin` lifts the origin's own block for ONE
+    // occupant without changing the fingerprint, so a field built under that
+    // exemption must never reach the cache — otherwise the next occupant is
+    // routed straight through a node the closure shut.
+    //
+    //   a —— b(closed) —— exit        b is the only way through.
+    const { building } = await createOwnerWithBuilding();
+    const floor = await createFloor(building.id, { floorNumber: 1, scalePixelsPerMeter: 10 });
+    const a = await createNode(building.id, floor.id, { x: 0, y: 0, label: 'A' });
+    const b = await createNode(building.id, floor.id, { x: 100, y: 0, label: 'B' });
+    const exit = await createNode(building.id, floor.id, {
+      x: 200,
+      y: 0,
+      type: 'EMERGENCY_EXIT',
+      label: 'Exit',
+    });
+    await connectNodes(a, b);
+    await connectNodes(b, exit);
+    await prisma.closure.create({
+      data: { buildingId: building.id, nodeIds: [b.id], reason: 'Ceiling collapse' },
+    });
+    clearAllClosures();
+
+    const evacuate = (from) => request(app).get(`/api/wayfinding/evacuate?from=${from}`);
+
+    // The exempted occupant goes FIRST, so that if their exemption ever
+    // leaked into the cache it would already be sitting there when the
+    // second occupant asks.
+    const fromB = await evacuate(b.id);
+    expect(fromB.status).toBe(200);
+    expect(routeNodeIds(fromB.body.data.route)).toEqual([b.id, exit.id]);
+
+    // …and the person routed PAST b still cannot be sent through it.
+    const fromA = await evacuate(a.id);
+    expect(fromA.status).toBe(404);
+  });
+
   test('a blocked evacuation edge is never traversed', async () => {
     const { building } = await createOwnerWithBuilding();
     const floor = await createFloor(building.id, { floorNumber: 1, scalePixelsPerMeter: 10 });
