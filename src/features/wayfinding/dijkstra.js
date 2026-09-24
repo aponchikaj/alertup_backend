@@ -1,5 +1,5 @@
 import MinHeap from './minHeap.js';
-import { makeCostFn, resolveProfile } from './costModel.js';
+import { makeCostFn, normalizeProfile } from './costModel.js';
 
 // Fixed traversal costs (in SVG coordinate units) for cross-floor edges,
 // which have no meaningful Euclidean length. STAIRS keeps the historical
@@ -123,14 +123,6 @@ export function shortestPath(graph, startId, opts = {}) {
 
   return null;
 }
-
-/**
- * A `profile` option may be a resolved profile object (the normal case, from
- * `resolveProfile`) or a bare profile name, which is resolved with building
- * defaults. Returns null when no profile was asked for.
- */
-const normalizeProfile = (profile) =>
-  typeof profile === 'string' ? resolveProfile(null, profile) : profile || null;
 
 /**
  * Accessibility is an additional constraint on top of whatever the caller

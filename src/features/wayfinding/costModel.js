@@ -48,6 +48,12 @@ const POSITIVE_KEYS = new Set([
   'secondaryRankMultiplier',
 ]);
 
+// Keys allowed to go negative. Only northOffsetDeg: it is a signed compass
+// angle offset (e.g. -15 to correct a building drawn slightly off true
+// north), not a speed or a duration, so the general "cannot be negative"
+// rule below must not apply to it.
+const SIGNED_KEYS = new Set(['northOffsetDeg']);
+
 /**
  * Validate a building's stored `routingProfile` JSON.
  *
@@ -83,7 +89,7 @@ export function validateRoutingProfile(json) {
       errors.push(`"${key}" must be a finite number.`);
       continue;
     }
-    if (POSITIVE_KEYS.has(key) ? raw <= 0 : raw < 0) {
+    if (POSITIVE_KEYS.has(key) ? raw <= 0 : !SIGNED_KEYS.has(key) && raw < 0) {
       errors.push(
         POSITIVE_KEYS.has(key)
           ? `"${key}" must be greater than 0.`
@@ -163,8 +169,15 @@ export function edgeDurationSec(edge, from, to, profile = resolveProfile(null)) 
   const crossFloor = Boolean(from && to && from.floorId !== to.floorId);
   const delta = floorDelta(from, to);
 
+  // A cross-floor WALKWAY is a legacy row — there is no such thing as a flat
+  // walkway between floors, and the map editor rejects creating new ones —
+  // so price it like the stairs it almost certainly is instead of costing
+  // 0 s (an unmeasured WALKWAY's lengthM defaults to 0, which would make a
+  // floor change free).
+  const pricedAs = crossFloor && transitType === 'WALKWAY' ? 'STAIRS' : transitType;
+
   let seconds;
-  switch (transitType) {
+  switch (pricedAs) {
     case 'STAIRS':
       seconds = (profile.stairsRunMPerFloor * delta) / profile.stairsSpeedMps;
       break;
@@ -177,8 +190,8 @@ export function edgeDurationSec(edge, from, to, profile = resolveProfile(null)) 
       seconds = profile.elevatorWaitSec + profile.elevatorPerFloorSec * delta;
       break;
     default: {
-      // Cross-floor edges carry no meaningful length, so an unmeasured walkway
-      // is free rather than NaN.
+      // Same-floor edges carry a real length; an unmeasured one is free
+      // rather than NaN.
       const lengthM = Number.isFinite(edge?.lengthM) ? edge.lengthM : 0;
       seconds = lengthM / profile.walkSpeedMps;
       break;
@@ -187,10 +200,47 @@ export function edgeDurationSec(edge, from, to, profile = resolveProfile(null)) 
 
   if (crossFloor) seconds += profile.floorChangePenaltySec || 0;
 
-  const multiplier = profile.transitMultiplier?.[transitType];
+  const multiplier = profile.transitMultiplier?.[pricedAs];
   if (Number.isFinite(multiplier)) seconds *= multiplier;
 
   return seconds;
+}
+
+/**
+ * Normalise whatever a caller hands in as a `profile` option.
+ *
+ * A profile may arrive as:
+ *  - a profile name (string) — resolved with no building overrides;
+ *  - a resolved profile object (the normal case, produced by `resolveProfile`);
+ *  - an arbitrary plain object from an API boundary (e.g. a stale/garbage
+ *    cache entry, or `{}`).
+ *
+ * The third case is the dangerous one: a plain object missing the numeric
+ * keys `edgeDurationSec` reads (`stairsSpeedMps`, `walkSpeedMps`, …) produces
+ * `undefined` arithmetic, which becomes `NaN`, which `shortestPath` treats
+ * exactly like `Infinity` — every edge is silently pruned and routing fails
+ * with no error. Round-tripping the object through `resolveProfile` (which
+ * already keeps only recognised, valid, positive/signed keys and fills in
+ * every default) makes that impossible: the worst case is a plain `walk`
+ * profile, never `NaN`.
+ *
+ * Anything that isn't a string, a plain object, or null/undefined (an array,
+ * a number, a function, …) is an unambiguous misuse and throws rather than
+ * being coerced into something that looks safe.
+ *
+ * @param {string|object|null|undefined} profile
+ * @returns {object|null}
+ */
+export function normalizeProfile(profile) {
+  if (profile === null || profile === undefined) return null;
+  if (typeof profile === 'string') return resolveProfile(null, profile);
+  if (typeof profile !== 'object' || Array.isArray(profile)) {
+    const kind = Array.isArray(profile) ? 'an array' : typeof profile;
+    throw new Error(
+      `Invalid routing profile: expected a profile name (string), a resolved profile object, or null/undefined; got ${kind}.`
+    );
+  }
+  return resolveProfile(profile, profile.name);
 }
 
 /**

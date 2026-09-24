@@ -6,6 +6,7 @@ import {
   edgeDurationSec,
   makeCostFn,
   floorDelta,
+  normalizeProfile,
 } from './costModel.js';
 
 const nodeOn = (level, floorId = `f${level}`) => ({
@@ -170,5 +171,92 @@ describe('costModel', () => {
     const a = nodeOn(2, 'f2');
     expect(floorDelta(a, { ...a, id: 'b' })).toBe(1);
     expect(floorDelta(nodeOn(-1, 'b1'), nodeOn(2, 'f2'))).toBe(3);
+  });
+
+  // Carried fix #1: northOffsetDeg is a signed compass angle, not a duration
+  // or speed, so it must accept negative values while the speed/time keys
+  // stay positive-only.
+  test('northOffsetDeg accepts negative values while speed and time keys stay positive-only', () => {
+    expect(validateRoutingProfile({ northOffsetDeg: -15 })).toEqual({
+      ok: true,
+      errors: [],
+      value: { northOffsetDeg: -15 },
+    });
+    expect(resolveProfile({ northOffsetDeg: -90 }, 'walk').northOffsetDeg).toBe(-90);
+
+    // Speed/time keys are unaffected: still rejected below zero.
+    expect(validateRoutingProfile({ elevatorWaitSec: -5 }).ok).toBe(false);
+    expect(validateRoutingProfile({ walkSpeedMps: -1 }).ok).toBe(false);
+    expect(validateRoutingProfile({ escalatorEntrySec: -1 }).ok).toBe(false);
+  });
+
+  // Carried fix #3: a cross-floor WALKWAY is a legacy row (the map editor
+  // rejects new ones), so it must be priced like the stairs it almost
+  // certainly is instead of costing 0 s.
+  test('a cross-floor legacy WALKWAY edge is priced as STAIRS, not free', () => {
+    const profile = resolveProfile(null, 'walk');
+    const from = nodeOn(1, 'f1');
+    const to = nodeOn(2, 'f2');
+    const walkwayEdge = { transitType: 'WALKWAY', lengthM: null, rank: 'PRIMARY' };
+    const stairsEdge = { transitType: 'STAIRS', rank: 'PRIMARY' };
+
+    const walkwayCost = edgeDurationSec(walkwayEdge, from, to, profile);
+    expect(walkwayCost).toBeGreaterThan(0);
+    expect(walkwayCost).toBeCloseTo(edgeDurationSec(stairsEdge, from, to, profile), 6);
+
+    // elevator_first's STAIRS multiplier applies too, since it is now priced
+    // as stairs.
+    const elevatorFirst = resolveProfile(null, 'elevator_first');
+    expect(edgeDurationSec(walkwayEdge, from, to, elevatorFirst)).toBeCloseTo(
+      edgeDurationSec(stairsEdge, from, to, elevatorFirst),
+      6
+    );
+
+    // A same-floor WALKWAY is untouched by this fix.
+    const sameFloorTo = { ...from, id: 'other' };
+    expect(edgeDurationSec({ transitType: 'WALKWAY', lengthM: 14 }, from, sameFloorTo, profile))
+      .toBeCloseTo(10, 6);
+  });
+
+  // Carried fix #2: a `profile` option passed as an arbitrary object must be
+  // validated by round-tripping through resolveProfile, so a garbage/partial
+  // object cannot silently prune every edge with NaN costs.
+  describe('normalizeProfile', () => {
+    test('round-trips a resolved profile unchanged', () => {
+      const resolved = resolveProfile(null, 'wheelchair');
+      expect(normalizeProfile(resolved)).toEqual(resolved);
+    });
+
+    test('resolves a profile name string', () => {
+      expect(normalizeProfile('emergency')).toEqual(resolveProfile(null, 'emergency'));
+    });
+
+    test('null/undefined pass through as null', () => {
+      expect(normalizeProfile(null)).toBeNull();
+      expect(normalizeProfile(undefined)).toBeNull();
+    });
+
+    test('an empty object round-trips to safe numeric defaults instead of NaN', () => {
+      const normalized = normalizeProfile({});
+      expect(normalized.name).toBe('walk');
+      expect(normalized.walkSpeedMps).toBe(DEFAULT_ROUTING_PROFILE.walkSpeedMps);
+
+      const from = nodeOn(1, 'f1');
+      const to = { ...from, id: 'other' };
+      const seconds = edgeDurationSec(
+        { transitType: 'WALKWAY', lengthM: 14 },
+        from,
+        to,
+        normalized
+      );
+      expect(Number.isFinite(seconds)).toBe(true);
+      expect(Number.isNaN(seconds)).toBe(false);
+    });
+
+    test('an array or a primitive is an unambiguous misuse and throws', () => {
+      expect(() => normalizeProfile([1, 2, 3])).toThrow();
+      expect(() => normalizeProfile(42)).toThrow();
+      expect(() => normalizeProfile('not-a-real-profile-name')).not.toThrow();
+    });
   });
 });

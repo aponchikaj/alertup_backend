@@ -437,4 +437,36 @@ describe('profile-driven routing', () => {
       findEvacuationRoute(graph, 'start', { profile: rated }).path
     ).toContain('liftB');
   });
+
+  // Carried B2 fix: a `profile` option passed as an arbitrary object is
+  // validated by round-tripping through resolveProfile — an empty/garbage
+  // object must never silently prune every edge with NaN costs, and a
+  // fundamentally invalid shape (array, primitive) must throw a clear error
+  // rather than corrupt routing quietly.
+  test('an empty profile object round-trips to safe defaults instead of pruning every edge', () => {
+    const graph = buildGraph({
+      nodes: [
+        { id: 'start', x: 0, y: 0 },
+        { id: 'goal', x: 140, y: 0, type: 'POI' },
+      ],
+      edges: [['start', 'goal']],
+    });
+
+    const result = findRoute(graph, 'start', 'goal', { profile: {} });
+    expect(result).not.toBeNull();
+    expect(Number.isFinite(result.cost)).toBe(true);
+  });
+
+  test('an invalid profile shape throws instead of silently corrupting routing', () => {
+    const graph = buildGraph({
+      nodes: [{ id: 'a' }, { id: 'b' }],
+      edges: [['a', 'b']],
+    });
+
+    expect(() => findRoute(graph, 'a', 'b', { profile: 42 })).toThrow();
+    expect(() => findRoute(graph, 'a', 'b', { profile: [1, 2, 3] })).toThrow();
+    expect(() =>
+      findEvacuationRoute(graph, 'a', { profile: 'not-a-real-profile-name' })
+    ).not.toThrow();
+  });
 });
