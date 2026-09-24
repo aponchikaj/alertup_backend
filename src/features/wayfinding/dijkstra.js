@@ -1,4 +1,5 @@
 import MinHeap from './minHeap.js';
+import { makeCostFn, resolveProfile } from './costModel.js';
 
 // Fixed traversal costs (in SVG coordinate units) for cross-floor edges,
 // which have no meaningful Euclidean length. STAIRS keeps the historical
@@ -27,26 +28,50 @@ export const calculateDistance = (x1, y1, x2, y2) =>
  * small enough that A* buys nothing for point-to-point routes.
  *
  * @param {{nodes: Map, adj: Map}} graph
- *   nodes: Map<id, {id, x, y, type, label, floorId, floorNumber}>
- *   adj:   Map<id, Array<{to, cost, transitType, accessible}>>
+ *   nodes: Map<id, {id, x, y, type, label, floorId, floorNumber, level}>
+ *   adj:   Map<id, Array<{edgeId, to, cost, transitType, accessible, ...}>>
  * @param {string} startId
  * @param {object} opts
  *   - targetId:        route to one specific node (Mode A wayfinding)
  *   - targetPredicate: node => bool; first settled match wins (Mode B: nearest
  *                      EMERGENCY_EXIT)
  *   - edgeFilter:      edge => bool; e.g. accessibility filtering
+ *   - costFn:          (edge, fromNode, toNode) => number. Defaults to the
+ *                      stored pixel weight, which is what every pre-profile
+ *                      caller expects. Infinity or NaN skips the edge, so a
+ *                      profile can forbid a transit type without a second
+ *                      filter pass.
+ *   - excludeNodeIds:  Set|Array of ids that are neither expanded nor accepted
+ *                      as a target (closures, alternative-route generation).
+ *                      The start is exempt — never strand the traveller.
  * @returns {{path: string[], cost: number} | null} null when unreachable
  */
 export function shortestPath(graph, startId, opts = {}) {
-  const { targetId = null, targetPredicate = null, edgeFilter = null } = opts;
+  const {
+    targetId = null,
+    targetPredicate = null,
+    edgeFilter = null,
+    costFn = null,
+    excludeNodeIds = null,
+  } = opts;
   const { nodes, adj } = graph;
 
   const start = nodes.get(startId);
   if (!start) return null;
 
-  const isTarget = targetId
+  const weightOf = costFn || ((edge) => edge.cost);
+  const excluded =
+    excludeNodeIds instanceof Set
+      ? excludeNodeIds
+      : Array.isArray(excludeNodeIds) && excludeNodeIds.length > 0
+        ? new Set(excludeNodeIds)
+        : null;
+  const isExcluded = (id) => Boolean(excluded) && id !== startId && excluded.has(id);
+
+  const matchesTarget = targetId
     ? (node) => node.id === targetId
     : targetPredicate || (() => false);
+  const isTarget = (node) => !isExcluded(node.id) && matchesTarget(node);
 
   if (isTarget(start)) {
     return { path: [startId], cost: 0 };
@@ -79,10 +104,15 @@ export function shortestPath(graph, startId, opts = {}) {
     const edges = adj.get(currentId) || [];
     for (const edge of edges) {
       if (settled.has(edge.to)) continue;
-      if (edgeFilter && !edgeFilter(edge)) continue;
-      if (!nodes.has(edge.to)) continue;
+      if (isExcluded(edge.to)) continue;
+      const next = nodes.get(edge.to);
+      if (!next) continue; // dangling reference
+      if (edgeFilter && !edgeFilter(edge, current, next)) continue;
 
-      const candidate = priority + edge.cost;
+      const weight = weightOf(edge, current, next);
+      if (!Number.isFinite(weight)) continue; // Infinity/NaN: edge is forbidden
+
+      const candidate = priority + weight;
       if (candidate < (dist.get(edge.to) ?? Infinity)) {
         dist.set(edge.to, candidate);
         prev.set(edge.to, currentId);
@@ -95,41 +125,104 @@ export function shortestPath(graph, startId, opts = {}) {
 }
 
 /**
+ * A `profile` option may be a resolved profile object (the normal case, from
+ * `resolveProfile`) or a bare profile name, which is resolved with building
+ * defaults. Returns null when no profile was asked for.
+ */
+const normalizeProfile = (profile) =>
+  typeof profile === 'string' ? resolveProfile(null, profile) : profile || null;
+
+/**
+ * Accessibility is an additional constraint on top of whatever the caller
+ * already asked for (tag rules, closures), so the two filters compose.
+ */
+const withAccessibility = (edgeFilter) => (edge, from, to) =>
+  edge.accessible !== false && (!edgeFilter || edgeFilter(edge, from, to));
+
+/**
  * Evacuation route: nearest EMERGENCY_EXIT. When accessible routing is
  * requested but no accessible route exists, falls back to the unrestricted
  * graph and flags it — never strand someone during an emergency.
+ *
+ * `excludeExitIds` removes exits from the *target* set without making their
+ * nodes untraversable, which is how alternative routes are generated: the
+ * second-nearest exit may well be reached by walking past the nearest one.
  */
-export function findEvacuationRoute(graph, startId, { accessible = false } = {}) {
-  const targetPredicate = (node) => node.type === 'EMERGENCY_EXIT';
+export function findEvacuationRoute(
+  graph,
+  startId,
+  {
+    accessible = false,
+    profile = null,
+    costFn = null,
+    edgeFilter = null,
+    excludeExitIds = [],
+    targetPredicate = null,
+  } = {}
+) {
+  const resolved = normalizeProfile(profile);
+  const weight = costFn || (resolved ? makeCostFn(resolved) : null);
+  const skipped = new Set(excludeExitIds || []);
+  const isExit = targetPredicate || ((node) => node.type === 'EMERGENCY_EXIT');
+  const wanted = (node) => isExit(node) && !skipped.has(node.id);
+
+  const search = (filter) =>
+    shortestPath(graph, startId, {
+      targetPredicate: wanted,
+      costFn: weight,
+      edgeFilter: filter,
+    });
+
+  const finish = (result, accessibleRouteUnavailable) =>
+    result
+      ? {
+          ...result,
+          accessibleRouteUnavailable,
+          exitNodeId: result.path[result.path.length - 1],
+        }
+      : null;
 
   if (accessible) {
-    const filtered = shortestPath(graph, startId, {
-      targetPredicate,
-      edgeFilter: (edge) => edge.accessible !== false,
-    });
-    if (filtered) return { ...filtered, accessibleRouteUnavailable: false };
-
-    const fallback = shortestPath(graph, startId, { targetPredicate });
-    return fallback ? { ...fallback, accessibleRouteUnavailable: true } : null;
+    const filtered = search(withAccessibility(edgeFilter));
+    if (filtered) return finish(filtered, false);
+    return finish(search(edgeFilter), true);
   }
 
-  const result = shortestPath(graph, startId, { targetPredicate });
-  return result ? { ...result, accessibleRouteUnavailable: false } : null;
+  return finish(search(edgeFilter), false);
 }
 
 /** Point-to-point route with the same accessibility fallback semantics. */
-export function findRoute(graph, startId, targetId, { accessible = false } = {}) {
-  if (accessible) {
-    const filtered = shortestPath(graph, startId, {
+export function findRoute(
+  graph,
+  startId,
+  targetId,
+  {
+    accessible = false,
+    profile = null,
+    costFn = null,
+    edgeFilter = null,
+    excludeNodeIds = null,
+  } = {}
+) {
+  const resolved = normalizeProfile(profile);
+  const weight = costFn || (resolved ? makeCostFn(resolved) : null);
+
+  const search = (filter) =>
+    shortestPath(graph, startId, {
       targetId,
-      edgeFilter: (edge) => edge.accessible !== false,
+      costFn: weight,
+      edgeFilter: filter,
+      excludeNodeIds,
     });
+
+  if (accessible) {
+    const filtered = search(withAccessibility(edgeFilter));
     if (filtered) return { ...filtered, accessibleRouteUnavailable: false };
 
-    const fallback = shortestPath(graph, startId, { targetId });
+    const fallback = search(edgeFilter);
     return fallback ? { ...fallback, accessibleRouteUnavailable: true } : null;
   }
 
-  const result = shortestPath(graph, startId, { targetId });
+  const result = search(edgeFilter);
   return result ? { ...result, accessibleRouteUnavailable: false } : null;
 }

@@ -87,6 +87,8 @@ export const createFloor = async (buildingId, overrides = {}) =>
     },
   });
 
+/** `overrides` is spread last, so `visibility`, `externalId`, `label`, `qrSlug`
+ *  and friends pass straight through to the row. */
 export const createNode = async (buildingId, floorId, overrides = {}) =>
   prisma.node.create({
     data: {
@@ -99,6 +101,12 @@ export const createNode = async (buildingId, floorId, overrides = {}) =>
     },
   });
 
+/**
+ * Edge fixture. The pair is normalized (source < target) the way
+ * `edgeService.createEdge` does, so `direction: 'FORWARD'` means
+ * "from the lower id to the higher one" — read `edge.sourceNodeId` back when a
+ * test needs to know which end is which.
+ */
 export const connectNodes = async (a, b, overrides = {}) => {
   const [sourceNodeId, targetNodeId] = a.id < b.id ? [a.id, b.id] : [b.id, a.id];
   const distance = overrides.distance ?? Math.hypot(a.x - b.x, a.y - b.y);
@@ -111,6 +119,11 @@ export const connectNodes = async (a, b, overrides = {}) => {
       weight: overrides.weight ?? distance,
       accessible: overrides.accessible ?? true,
       transitType: overrides.transitType || 'WALKWAY',
+      ...(overrides.direction ? { direction: overrides.direction } : {}),
+      ...(overrides.tags ? { tags: overrides.tags } : {}),
+      ...(overrides.rank ? { rank: overrides.rank } : {}),
+      ...(overrides.visibility ? { visibility: overrides.visibility } : {}),
+      ...(overrides.lengthM !== undefined ? { lengthM: overrides.lengthM } : {}),
     },
   });
 };
