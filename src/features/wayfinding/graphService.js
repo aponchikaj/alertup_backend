@@ -1,13 +1,10 @@
 import prisma from '../../db/prisma.js';
 import { MAX_NODES } from './dijkstra.js';
+import { ASSUMED_PIXELS_PER_METER } from './costModel.js';
 
-/**
- * Pixels per metre assumed for a floor whose owner never calibrated a scale.
- * Matches the assumption `autoConnect.js` and the wayfinding routes already
- * document, so a route on an unscaled floor still reports metres and minutes —
- * flagged, never silently precise.
- */
-export const ASSUMED_PIXELS_PER_METER = 50;
+// The assumed scale now lives in the pure cost model, next to the speeds it is
+// used with. Re-exported here so every existing importer stays unchanged.
+export { ASSUMED_PIXELS_PER_METER };
 
 /** A weight that no longer tracks the on-canvas distance was set by hand. */
 const isManualWeight = (edge) => Math.abs(edge.weight - edge.distance) > 1e-6;

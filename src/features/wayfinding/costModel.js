@@ -11,6 +11,18 @@
  * testable and safe to call inside the Dijkstra inner loop.
  */
 
+/**
+ * Pixels per metre assumed for a floor whose owner never calibrated a scale.
+ * Matches the assumption `autoConnect.js` and the wayfinding routes already
+ * document, so a route on an unscaled floor still reports metres and minutes —
+ * flagged, never silently precise.
+ *
+ * It lives here, in the pure model, because both the graph loader and the
+ * route assembler need it and neither should have to reach through the other
+ * (`graphService.js` re-exports it for its existing importers).
+ */
+export const ASSUMED_PIXELS_PER_METER = 50;
+
 /** Tuning knobs a building may override. Anything not listed here is rejected. */
 export const DEFAULT_ROUTING_PROFILE = Object.freeze({
   walkSpeedMps: 1.4,

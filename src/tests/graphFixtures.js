@@ -2,6 +2,7 @@ import {
   calculateDistance,
   DEFAULT_TRANSIT_COST,
 } from '../features/wayfinding/dijkstra.js';
+import { ASSUMED_PIXELS_PER_METER } from '../features/wayfinding/costModel.js';
 
 /**
  * In-memory graph fixtures shaped exactly like `graphService.loadBuildingGraph`
@@ -20,8 +21,13 @@ import {
  * target→source) and every `adj[a]→b` push is mirrored into `radj[b]`.
  */
 
-/** Same fallback graphService uses for floors with no scale. */
-export const FIXTURE_ASSUMED_PIXELS_PER_METER = 50;
+/**
+ * The assumed scale for uncalibrated floors, re-exported so a test can assert
+ * against it without a second import. It is the cost model's constant, not a
+ * fixture-local copy — a duplicate here would let the fixture and the code it
+ * stands in for drift apart.
+ */
+export { ASSUMED_PIXELS_PER_METER };
 
 let edgeSeq = 0;
 
@@ -79,7 +85,7 @@ export function buildGraph({ nodes, edges }) {
     let lengthM = opts.lengthM ?? null;
     let lengthMAssumed = false;
     if (lengthM === null && !crossFloor) {
-      lengthM = cost / (scale ?? FIXTURE_ASSUMED_PIXELS_PER_METER);
+      lengthM = cost / (scale ?? ASSUMED_PIXELS_PER_METER);
       lengthMAssumed = scale === null;
     }
 
