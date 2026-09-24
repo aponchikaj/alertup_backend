@@ -8,6 +8,13 @@ import { parseQrSlug } from '../../features/qr/qrPayload.js';
 import { getGraph } from '../../features/wayfinding/graphCache.js';
 import { findEvacuationRoute } from '../../features/wayfinding/dijkstra.js';
 import { assembleRoute } from '../../features/wayfinding/routeAssembler.js';
+import { makeOverlayFilter, makeOverlayCostFn } from '../../features/wayfinding/profiles.js';
+import {
+  getActiveClosures,
+  buildOverlay,
+  overlayForOrigin,
+  publicClosure,
+} from '../../features/wayfinding/closures.js';
 import { calculateDistance } from '../../features/wayfinding/dijkstra.js';
 import { publish } from '../../features/realtime/broadcaster.js';
 
@@ -92,8 +99,22 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
       connections: neighbourIds(n.id),
     });
 
-    // Evacuation route to the nearest exit, across floors where necessary.
-    const evac = findEvacuationRoute(graph, node.id);
+    // Active closures, folded into the search. This route is what someone
+    // standing in the building follows during an incident, so a closed
+    // corridor has to be closed here too — with the scanned node itself
+    // exempt, or the person reading the sticker on the closed area's wall is
+    // told there is no way out at all.
+    //
+    // The cost function stays the pixel-distance default this legacy route
+    // has always used; `makeOverlayCostFn` only layers the closures'
+    // multipliers on top, and both helpers are inert when nothing is closed.
+    const activeClosures = await getActiveClosures(buildingId);
+    const closures = activeClosures.map(publicClosure);
+    const overlay = overlayForOrigin(buildOverlay(activeClosures, graph), node.id);
+    const evac = findEvacuationRoute(graph, node.id, {
+      edgeFilter: makeOverlayFilter(overlay),
+      costFn: makeOverlayCostFn((edge) => edge.cost, overlay),
+    });
     const found = Boolean(evac);
     const pathNodes = found
       ? evac.path.map((id) => graph.nodes.get(id)).filter(Boolean)
@@ -143,8 +164,9 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
 
     // New stepper-shaped route for the redesigned viewer.
     const route = found
-      ? assembleRoute(graph, evac.path, { mode: 'EVACUATION' })
+      ? assembleRoute(graph, evac.path, { mode: 'EVACUATION', overlay })
       : null;
+    if (route) route.closures = closures;
 
     let activeEmergencyId = null;
     if (building.emergencyMode) {
@@ -185,6 +207,7 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
       scanCount: (node.scanCount || 0) + 1,
       // ---- additions for the redesigned viewer ----
       route,
+      closures,
       emergency: {
         active: building.emergencyMode,
         message: building.emergencyMode ? building.emergencyMessage : null,

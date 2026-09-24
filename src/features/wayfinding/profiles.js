@@ -174,8 +174,14 @@ function makeAccessibilityFilter(profile) {
   return (edge) => edge.accessible !== false;
 }
 
-/** Closures (B7): block specific edges/nodes outright. `null` if no overlay. */
-function makeOverlayFilter(overlay) {
+/**
+ * Closures (B7): block specific edges/nodes outright. `null` if no overlay.
+ *
+ * Exported for the QR scan route, which predates named profiles and so has no
+ * routing context to fold this into — it still must not walk an occupant
+ * through a closed corridor.
+ */
+export function makeOverlayFilter(overlay) {
   const blockedEdgeIds = overlay?.blockedEdgeIds;
   const blockedNodeIds = overlay?.blockedNodeIds;
   const hasBlockedEdges = Boolean(blockedEdgeIds?.size);
@@ -190,8 +196,15 @@ function makeOverlayFilter(overlay) {
   };
 }
 
-/** Closures (B7): scale an edge's cost. Identity function if no overlay. */
-function makeOverlayCostFn(baseCostFn, overlay) {
+/**
+ * Closures (B7): scale an edge's cost. Identity function if no overlay.
+ *
+ * Exported because `/evacuate` layers a cost preference on top of the
+ * emergency profile by rebuilding the cost function from `makeCostFn` — it
+ * has to re-wrap the result here, or a closure's penalty silently stops
+ * applying the moment somebody passes `?profile=`.
+ */
+export function makeOverlayCostFn(baseCostFn, overlay) {
   const multipliers = overlay?.edgeMultiplier;
   if (!multipliers || multipliers.size === 0) return baseCostFn;
 

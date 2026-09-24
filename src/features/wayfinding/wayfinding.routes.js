@@ -6,7 +6,13 @@ import { publicReadLimiter } from '../../services/rateLimiter.js';
 import { getGraph } from './graphCache.js';
 import { findRoute, findEvacuationRoute } from './dijkstra.js';
 import { assembleRoute } from './routeAssembler.js';
-import { parseRoutingQuery, buildRoutingContext, composeFilters } from './profiles.js';
+import { parseRoutingQuery, composeFilters, makeOverlayCostFn } from './profiles.js';
+import {
+  getActiveClosures,
+  buildOverlay,
+  applyOverlay,
+  publicClosure,
+} from './closures.js';
 import { resolveDestination, parseDestinations } from './destinations.js';
 import { resolveProfile, makeCostFn } from './costModel.js';
 
@@ -228,6 +234,35 @@ router.get(
   }
 );
 
+/**
+ * GET /api/wayfinding/buildings/:buildingId/closures
+ *
+ * The restrictions in force RIGHT NOW, for the scan page's closure banner and
+ * for a client deciding whether a `closure_changed` frame it just received
+ * still applies. Anonymous, like every scan-page surface: "the east corridor
+ * is shut" is what the sign taped to the wall already says.
+ *
+ * Only the active subset, and only the public projection — which specific
+ * edges and nodes are involved is operational detail an anonymous caller
+ * cannot act on.
+ */
+router.get(
+  '/api/wayfinding/buildings/:buildingId/closures',
+  publicReadLimiter,
+  async (req, res) => {
+    try {
+      const { buildingId } = req.params;
+      if (!isId(buildingId)) return fail(res, 400, 'Invalid building id.');
+
+      const active = await getActiveClosures(buildingId);
+      return ok(res, { data: { closures: active.map(publicClosure) } });
+    } catch (err) {
+      console.error('Closure list error:', err);
+      return fail(res, 500, 'Server error.');
+    }
+  }
+);
+
 // POI destination search: "LC Waikiki", "coffee", "restroom"…
 router.get(
   '/api/wayfinding/buildings/:buildingId/pois',
@@ -353,14 +388,24 @@ router.get('/api/wayfinding/route', publicReadLimiter, async (req, res) => {
         : null;
     }
 
-    const closures = []; // B7: active closures land here as an overlay.
+    // Closures are read per request (15 s TTL, invalidated on every editor
+    // write) rather than baked into the cached graph: they change on an
+    // incident cadence and expire on the clock, with no write to hang an
+    // invalidation off.
+    const activeClosures = await getActiveClosures(origin.buildingId);
+    const closures = activeClosures.map(publicClosure);
+    const overlay = buildOverlay(activeClosures, graph);
 
-    const context = buildRoutingContext(graph, {
-      name: parsed.name,
-      includeTags: parsed.includeTags,
-      excludeTags: parsed.excludeTags,
-      overlay: null, // B7
-    });
+    const context = applyOverlay(
+      {
+        graph,
+        name: parsed.name,
+        includeTags: parsed.includeTags,
+        excludeTags: parsed.excludeTags,
+      },
+      overlay,
+      { originId: from }
+    );
     if (!context.ok) return fail(res, context.status, context.error);
 
     const accessible = context.name === 'wheelchair';
@@ -391,8 +436,13 @@ router.get('/api/wayfinding/route', publicReadLimiter, async (req, res) => {
       profile: context.profile,
       profileName: context.name,
       tagConstraintsRelaxed,
-      overlay: null, // B7
+      // The ORIGIN-ADJUSTED overlay, so the warnings describe the same
+      // restrictions the search actually ran under.
+      overlay: context.overlay,
     });
+    // Also on the route itself: the frontend normalizes `route.closures`, and
+    // a route handed to the AI or embedded as an alternative travels alone.
+    route.closures = closures;
 
     // B13: recordRouteRequest({ buildingId: origin.buildingId, profile: context.name, src: parsed.src, ... })
 
@@ -436,12 +486,20 @@ router.get('/api/wayfinding/evacuate', publicReadLimiter, async (req, res) => {
 
     // `contextName` is always 'emergency': visibility, blockedTransit and
     // the fallback chain all come from it, never from an explicit `profile=`.
-    const context = buildRoutingContext(graph, {
-      name: 'emergency',
-      includeTags: parsed.includeTags,
-      excludeTags: parsed.excludeTags,
-      overlay: null, // B7
-    });
+    const activeClosures = await getActiveClosures(origin.buildingId);
+    const closures = activeClosures.map(publicClosure);
+    const overlay = buildOverlay(activeClosures, graph);
+
+    const context = applyOverlay(
+      {
+        graph,
+        name: 'emergency',
+        includeTags: parsed.includeTags,
+        excludeTags: parsed.excludeTags,
+      },
+      overlay,
+      { originId: from }
+    );
     if (!context.ok) return fail(res, context.status, context.error);
 
     const wheelchairRequested = parsed.name === 'wheelchair';
@@ -464,13 +522,12 @@ router.get('/api/wayfinding/evacuate', publicReadLimiter, async (req, res) => {
         transitMultiplier: requestedProfile.transitMultiplier,
         floorChangePenaltySec: requestedProfile.floorChangePenaltySec,
       };
-      // B7: rebuilt directly with `makeCostFn`, bypassing `makeOverlayCostFn`
-      // — fine while `overlay` is hardcoded null above, but once closures
-      // land this will need to re-wrap with the overlay's edge-cost
-      // multiplier too, or a closure's cost penalty silently stops applying
-      // whenever a cost preference is layered on /evacuate (the closure's
-      // hard block still holds either way — that lives in the edge filter).
-      effectiveCostFn = makeCostFn(effectiveProfile);
+      // Rebuilt from the layered profile, then re-wrapped with the overlay:
+      // `makeCostFn` alone knows nothing about closures, so without the
+      // re-wrap a closure's penalty would silently stop applying the moment
+      // anyone passed `?profile=` to /evacuate. (Its hard block holds either
+      // way — that lives in the edge filter, not the cost.)
+      effectiveCostFn = makeOverlayCostFn(makeCostFn(effectiveProfile), context.overlay);
     }
 
     // Layered on top of `emergency`'s strict filter/fallbacks, strictest
@@ -517,8 +574,6 @@ router.get('/api/wayfinding/evacuate', publicReadLimiter, async (req, res) => {
       return fail(res, 404, 'No exit route found from this location.');
     }
 
-    const closures = []; // B7: active closures land here as an overlay.
-
     const route = assembleRoute(graph, result.path, {
       mode: 'EVACUATION',
       accessible: wheelchairRequested,
@@ -531,8 +586,9 @@ router.get('/api/wayfinding/evacuate', publicReadLimiter, async (req, res) => {
       profileName: wheelchairRequested ? 'wheelchair' : 'emergency',
       preference: costOverlayName,
       tagConstraintsRelaxed,
-      overlay: null, // B7
+      overlay: context.overlay,
     });
+    route.closures = closures;
 
     // B13: recordRouteRequest({ buildingId: origin.buildingId, profile: route.profile, src: parsed.src, ... })
 

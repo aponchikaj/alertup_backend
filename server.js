@@ -37,6 +37,7 @@ import twoFaSystem from './src/routes/auth/2fa.js'
 import administrationRouter from './src/routes/administration.js'
 import wayfindingRouter from './src/features/wayfinding/wayfinding.routes.js'
 import mapEditorRouter from './src/features/mapEditor/mapEditor.routes.js'
+import closureRouter from './src/features/mapEditor/closure.routes.js'
 import emergencyRouter from './src/features/emergency/emergency.routes.js'
 import realtimeRouter from './src/features/realtime/realtime.routes.js'
 import aiRouter from './src/features/ai/ai.routes.js'
@@ -190,6 +191,7 @@ app.use(twoFaSystem)
 app.use(administrationRouter)
 app.use(wayfindingRouter)
 app.use(mapEditorRouter)
+app.use(closureRouter)
 app.use(emergencyRouter)
 app.use(realtimeRouter)
 app.use(aiRouter)
