@@ -6,8 +6,49 @@ import { publicReadLimiter } from '../../services/rateLimiter.js';
 import { getGraph } from './graphCache.js';
 import { findRoute, findEvacuationRoute } from './dijkstra.js';
 import { assembleRoute } from './routeAssembler.js';
+import { parseRoutingQuery, buildRoutingContext, composeFilters } from './profiles.js';
+import { resolveDestination, parseDestinations } from './destinations.js';
+import { resolveProfile, makeCostFn } from './costModel.js';
 
 const router = Router();
+
+/**
+ * Try the strict attempt first, then each fallback attempt in order, until
+ * `search` finds a route.
+ *
+ * The chain relaxes CUMULATIVELY — the constraint order must go from
+ * strictest to most relaxed, tags before accessibility, so a fallback never
+ * re-imposes something an earlier one already dropped. Because of that, a
+ * route found at fallback N has had every constraint dropped by fallbacks
+ * 1..N, not just fallback N's own — so the returned flags are the union of
+ * every `label` seen at or before the winning attempt, not just the winning
+ * one's. Reporting only the winning label under-reports: a route that only
+ * succeeds once BOTH tags and accessibility are gone must say so on both
+ * flags, or the visitor is told a constraint held when it didn't.
+ *
+ * @param {{edgeFilter:Function|null, costFn:Function}} strictAttempt
+ * @param {Array<{label?:'tagConstraintsRelaxed'|'accessibleRouteUnavailable',
+ *                 edgeFilter:Function|null, costFn:Function}>} fallbackAttempts
+ *   ordered strictest-relaxation-first
+ * @param {(edgeFilter:Function|null, costFn:Function) => object|null} search
+ * @returns {{result:object|null, tagConstraintsRelaxed:boolean, accessibleRouteUnavailable:boolean}}
+ */
+function searchWithFallbacks(strictAttempt, fallbackAttempts, search) {
+  const strictResult = search(strictAttempt.edgeFilter, strictAttempt.costFn);
+  if (strictResult) {
+    return { result: strictResult, tagConstraintsRelaxed: false, accessibleRouteUnavailable: false };
+  }
+
+  let tagConstraintsRelaxed = false;
+  let accessibleRouteUnavailable = false;
+  for (const attempt of fallbackAttempts) {
+    if (attempt.label === 'tagConstraintsRelaxed') tagConstraintsRelaxed = true;
+    if (attempt.label === 'accessibleRouteUnavailable') accessibleRouteUnavailable = true;
+    const result = search(attempt.edgeFilter, attempt.costFn);
+    if (result) return { result, tagConstraintsRelaxed, accessibleRouteUnavailable };
+  }
+  return { result: null, tagConstraintsRelaxed: false, accessibleRouteUnavailable: false };
+}
 
 /**
  * GET /api/wayfinding/buildings/:buildingId/directory
@@ -39,7 +80,9 @@ router.get(
        *  somewhere that just is not the place the visitor asked for. */
       const SHAPE_NODE_RADIUS = 400;
 
-      const floorSelect = { select: { id: true, floorNumber: true, name: true } };
+      const floorSelect = {
+        select: { id: true, floorNumber: true, name: true, shortName: true, verticalOrder: true },
+      };
 
       const [pois, nodes, floors] = await Promise.all([
         prisma.poi.findMany({
@@ -64,7 +107,14 @@ router.get(
         }),
         prisma.floor.findMany({
           where: { buildingId },
-          select: { id: true, floorNumber: true, name: true, drawing: true },
+          select: {
+            id: true,
+            floorNumber: true,
+            name: true,
+            shortName: true,
+            verticalOrder: true,
+            drawing: true,
+          },
         }),
       ]);
 
@@ -98,10 +148,13 @@ router.get(
           nodeId: poi.node.id,
           name: poi.name,
           category: poi.category || null,
+          externalId: poi.externalId || null,
           nodeType: poi.node.type,
           floorId: poi.node.floor?.id ?? null,
           floorNumber: poi.node.floor?.floorNumber ?? null,
           floorName: poi.node.floor?.name ?? null,
+          floorShortName: poi.node.floor?.shortName ?? null,
+          floorVerticalOrder: poi.node.floor?.verticalOrder ?? null,
         });
       }
 
@@ -137,10 +190,13 @@ router.get(
             nodeId: target.id,
             name: shape.name.trim(),
             category: null,
+            externalId: null,
             nodeType: target.type,
             floorId: floor.id,
             floorNumber: floor.floorNumber,
             floorName: floor.name ?? null,
+            floorShortName: floor.shortName ?? null,
+            floorVerticalOrder: floor.verticalOrder ?? null,
           });
         }
       }
@@ -153,10 +209,13 @@ router.get(
           nodeId: node.id,
           name: node.label,
           category: null,
+          externalId: null,
           nodeType: node.type,
           floorId: node.floor?.id ?? null,
           floorNumber: node.floor?.floorNumber ?? null,
           floorName: node.floor?.name ?? null,
+          floorShortName: node.floor?.shortName ?? null,
+          floorVerticalOrder: node.floor?.verticalOrder ?? null,
         });
       }
 
@@ -208,7 +267,15 @@ router.get(
           node: {
             select: {
               id: true,
-              floor: { select: { id: true, floorNumber: true, name: true } },
+              floor: {
+                select: {
+                  id: true,
+                  floorNumber: true,
+                  name: true,
+                  shortName: true,
+                  verticalOrder: true,
+                },
+              },
             },
           },
         },
@@ -222,10 +289,13 @@ router.get(
           name: p.name,
           category: p.category,
           description: p.description,
+          externalId: p.externalId || null,
           nodeId: p.node.id,
           floorId: p.node.floor?.id ?? null,
           floorNumber: p.node.floor?.floorNumber ?? null,
           floorName: p.node.floor?.name ?? null,
+          floorShortName: p.node.floor?.shortName ?? null,
+          floorVerticalOrder: p.node.floor?.verticalOrder ?? null,
         }))
         .sort((a, b) => {
           if (lowered) {
@@ -244,29 +314,21 @@ router.get(
   }
 );
 
-// Mode A: point-to-point wayfinding. `to` accepts a node id or "poi:<poiId>".
+// Mode A: point-to-point wayfinding. `to` accepts a node id, "poi:<poiId>",
+// or "ext:<code>"; repeated `to` (multi-stop) is B12 — only the first is used.
 router.get('/api/wayfinding/route', publicReadLimiter, async (req, res) => {
   try {
     const from = String(req.query.from || '');
-    let to = String(req.query.to || '');
-    const accessible = req.query.accessible === 'true';
-
     if (!isId(from)) return fail(res, 400, 'Invalid origin node id.');
 
-    let destinationPoi = null;
-    if (to.startsWith('poi:')) {
-      const poiId = to.slice(4);
-      if (!isId(poiId)) return fail(res, 400, 'Invalid destination.');
-      const poi = await prisma.poi.findUnique({
-        where: { id: poiId },
-        select: { id: true, name: true, category: true, nodeId: true },
-      });
-      if (!poi) return fail(res, 404, 'Destination not found.');
-      destinationPoi = { id: poi.id, name: poi.name, category: poi.category };
-      to = poi.nodeId;
-    } else if (!isId(to)) {
+    const parsed = parseRoutingQuery(req.query);
+    if (!parsed.ok) return fail(res, 400, parsed.error);
+
+    const destinations = parseDestinations(req.query);
+    if (destinations.length === 0) {
       return fail(res, 400, 'Invalid destination node id.');
     }
+    const rawTo = destinations[0]; // B12: multi-stop routing uses the rest.
 
     const origin = await prisma.node.findUnique({
       where: { id: from },
@@ -274,11 +336,16 @@ router.get('/api/wayfinding/route', publicReadLimiter, async (req, res) => {
     });
     if (!origin) return fail(res, 404, 'Origin node not found.');
 
+    const resolved = await resolveDestination(origin.buildingId, rawTo);
+    if (!resolved.ok) return fail(res, resolved.status, resolved.message);
+    const to = resolved.nodeId;
+
     const graph = await getGraph(origin.buildingId);
     if (!graph.nodes.has(to)) {
       return fail(res, 404, 'Destination is not in this building.');
     }
 
+    let destinationPoi = resolved.poi;
     if (!destinationPoi) {
       const destNode = graph.nodes.get(to);
       destinationPoi = destNode?.poi
@@ -286,7 +353,32 @@ router.get('/api/wayfinding/route', publicReadLimiter, async (req, res) => {
         : null;
     }
 
-    const result = findRoute(graph, from, to, { accessible });
+    const closures = []; // B7: active closures land here as an overlay.
+
+    const context = buildRoutingContext(graph, {
+      name: parsed.name,
+      includeTags: parsed.includeTags,
+      excludeTags: parsed.excludeTags,
+      overlay: null, // B7
+    });
+    if (!context.ok) return fail(res, context.status, context.error);
+
+    const accessible = context.name === 'wheelchair';
+
+    // `context.fallbacks` is already ordered strictest-relaxation-first
+    // (tags before accessibility — see `buildRoutingContext`), which is
+    // exactly what cumulative flag tracking requires.
+    const { result, tagConstraintsRelaxed, accessibleRouteUnavailable } = searchWithFallbacks(
+      { edgeFilter: context.strictEdgeFilter, costFn: context.costFn },
+      context.fallbacks,
+      (edgeFilter, costFn) =>
+        findRoute(graph, from, to, {
+          accessible: false, // relaxation is driven by the fallback chain above
+          profile: context.profile,
+          costFn,
+          edgeFilter,
+        })
+    );
     if (!result) {
       return fail(res, 404, 'No route found between these points.');
     }
@@ -295,9 +387,16 @@ router.get('/api/wayfinding/route', publicReadLimiter, async (req, res) => {
       mode: 'WAYFINDING',
       destinationPoi,
       accessible,
-      accessibleRouteUnavailable: result.accessibleRouteUnavailable,
+      accessibleRouteUnavailable,
+      profile: context.profile,
+      profileName: context.name,
+      tagConstraintsRelaxed,
+      overlay: null, // B7
     });
-    return ok(res, { data: { route } });
+
+    // B13: recordRouteRequest({ buildingId: origin.buildingId, profile: context.name, src: parsed.src, ... })
+
+    return ok(res, { data: { route, closures } });
   } catch (err) {
     console.error('Wayfinding route error:', err);
     return fail(res, 500, 'Server error.');
@@ -305,11 +404,27 @@ router.get('/api/wayfinding/route', publicReadLimiter, async (req, res) => {
 });
 
 // Mode B: evacuation to the nearest emergency exit.
+//
+// LIFE-SAFETY RULE: `/evacuate` always searches under the `emergency`
+// profile's visibility (EMERGENCY_ONLY edges) and blocking (elevators,
+// unless the building says its cars are evacuation rated) — never an
+// explicit `profile=`. Letting a public, anonymous `?profile=walk` (or any
+// other named profile) replace the routing context outright would hide
+// EMERGENCY_ONLY edges and re-open elevators, which is not a preference, it
+// is a wrong answer during a fire. An explicit named profile other than
+// `wheelchair`/`emergency` may still contribute its *cost* preferences
+// (`transitMultiplier`, `floorChangePenaltySec`) layered on top of the
+// emergency-resolved profile — e.g. `profile=min_floor_changes` still avoids
+// extra floor changes when it can, it just can never route through a
+// blocked/hidden edge to do it. `wheelchair` (or `accessible=true`) layers
+// its accessibility requirement on top the same way.
 router.get('/api/wayfinding/evacuate', publicReadLimiter, async (req, res) => {
   try {
     const from = String(req.query.from || '');
-    const accessible = req.query.accessible === 'true';
     if (!isId(from)) return fail(res, 400, 'Invalid origin node id.');
+
+    const parsed = parseRoutingQuery(req.query);
+    if (!parsed.ok) return fail(res, 400, parsed.error);
 
     const origin = await prisma.node.findUnique({
       where: { id: from },
@@ -318,17 +433,110 @@ router.get('/api/wayfinding/evacuate', publicReadLimiter, async (req, res) => {
     if (!origin) return fail(res, 404, 'Origin node not found.');
 
     const graph = await getGraph(origin.buildingId);
-    const result = findEvacuationRoute(graph, from, { accessible });
+
+    // `contextName` is always 'emergency': visibility, blockedTransit and
+    // the fallback chain all come from it, never from an explicit `profile=`.
+    const context = buildRoutingContext(graph, {
+      name: 'emergency',
+      includeTags: parsed.includeTags,
+      excludeTags: parsed.excludeTags,
+      overlay: null, // B7
+    });
+    if (!context.ok) return fail(res, context.status, context.error);
+
+    const wheelchairRequested = parsed.name === 'wheelchair';
+    const explicitProfileName =
+      typeof req.query.profile === 'string' && req.query.profile ? parsed.name : null;
+    // Anything other than wheelchair/emergency contributes cost knobs only —
+    // never its own visibility or blockedTransit.
+    const costOverlayName =
+      explicitProfileName && explicitProfileName !== 'wheelchair' && explicitProfileName !== 'emergency'
+        ? explicitProfileName
+        : null;
+
+    let effectiveProfile = context.profile;
+    let effectiveCostFn = context.costFn;
+
+    if (costOverlayName) {
+      const requestedProfile = resolveProfile(graph.routingProfile, costOverlayName);
+      effectiveProfile = {
+        ...context.profile,
+        transitMultiplier: requestedProfile.transitMultiplier,
+        floorChangePenaltySec: requestedProfile.floorChangePenaltySec,
+      };
+      // B7: rebuilt directly with `makeCostFn`, bypassing `makeOverlayCostFn`
+      // — fine while `overlay` is hardcoded null above, but once closures
+      // land this will need to re-wrap with the overlay's edge-cost
+      // multiplier too, or a closure's cost penalty silently stops applying
+      // whenever a cost preference is layered on /evacuate (the closure's
+      // hard block still holds either way — that lives in the edge filter).
+      effectiveCostFn = makeCostFn(effectiveProfile);
+    }
+
+    // Layered on top of `emergency`'s strict filter/fallbacks, strictest
+    // relaxation first: tags before accessibility, so an evacuating
+    // wheelchair user only loses the accessibility requirement as an
+    // absolute last resort (never before a soft tag preference is relaxed).
+    // `context.fallbacks` alone (emergency has no accessibility filter of
+    // its own) only ever represents "tags dropped" here, so when wheelchair
+    // is requested it's composed with `requireAccessible` to keep
+    // accessibility in force through that step; the accessibility-drop step
+    // is appended strictly after it, built from whichever filter that step
+    // would have used (the last fallback's, or the strict filter itself when
+    // there were no tags to relax at all).
+    const requireAccessible = (edge) => edge.accessible !== false;
+    const tagRelaxedFallbacks = context.fallbacks.map((fb) => ({
+      label: fb.label,
+      edgeFilter: wheelchairRequested ? composeFilters(fb.edgeFilter, requireAccessible) : fb.edgeFilter,
+      costFn: effectiveCostFn,
+    }));
+    const bottomEdgeFilter =
+      context.fallbacks.length > 0
+        ? context.fallbacks[context.fallbacks.length - 1].edgeFilter
+        : context.strictEdgeFilter;
+    const accessibilityDroppedFallback = wheelchairRequested
+      ? [{ label: 'accessibleRouteUnavailable', edgeFilter: bottomEdgeFilter, costFn: effectiveCostFn }]
+      : [];
+    const strictEdgeFilter = wheelchairRequested
+      ? composeFilters(context.strictEdgeFilter, requireAccessible)
+      : context.strictEdgeFilter;
+    const fallbacks = [...tagRelaxedFallbacks, ...accessibilityDroppedFallback];
+
+    const { result, tagConstraintsRelaxed, accessibleRouteUnavailable } = searchWithFallbacks(
+      { edgeFilter: strictEdgeFilter, costFn: effectiveCostFn },
+      fallbacks,
+      (edgeFilter, costFn) =>
+        findEvacuationRoute(graph, from, {
+          accessible: false, // relaxation is driven by the fallback chain above
+          profile: effectiveProfile,
+          costFn,
+          edgeFilter,
+        })
+    );
     if (!result) {
       return fail(res, 404, 'No exit route found from this location.');
     }
 
+    const closures = []; // B7: active closures land here as an overlay.
+
     const route = assembleRoute(graph, result.path, {
       mode: 'EVACUATION',
-      accessible,
-      accessibleRouteUnavailable: result.accessibleRouteUnavailable,
+      accessible: wheelchairRequested,
+      accessibleRouteUnavailable,
+      profile: effectiveProfile,
+      // Stays inside the closed RouteProfile union the frontend switches on
+      // (e.g. the emergency banner's danger framing keys off
+      // `profile === 'emergency'`) — the layered cost preference rides the
+      // separate, additive `preference` field instead of a composite name.
+      profileName: wheelchairRequested ? 'wheelchair' : 'emergency',
+      preference: costOverlayName,
+      tagConstraintsRelaxed,
+      overlay: null, // B7
     });
-    return ok(res, { data: { route } });
+
+    // B13: recordRouteRequest({ buildingId: origin.buildingId, profile: route.profile, src: parsed.src, ... })
+
+    return ok(res, { data: { route, closures } });
   } catch (err) {
     console.error('Evacuation route error:', err);
     return fail(res, 500, 'Server error.');

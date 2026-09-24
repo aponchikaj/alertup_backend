@@ -329,6 +329,7 @@ describe('wayfinding API', () => {
     const poi = await prisma.poi.create({
       data: {
         nodeId: shopNode.id,
+        buildingId: building.id,
         name: 'LC Waikiki',
         category: 'Apparel',
         keywords: ['clothes', 'fashion'],
@@ -447,6 +448,11 @@ describe('wayfinding API', () => {
     expect(route.steps.map((s) => s.kind)).toEqual(['walk', 'transit', 'walk', 'arrive']);
     // meters via scalePixelsPerMeter=10: floor1 100px=10m, floor4 200px=20m
     expect(route.totalDistanceMeters).toBe(30);
+    // v2 additive fields ride along unchanged: ETA + profile name, and the
+    // legacy `totalDistanceMeters` promise above is untouched.
+    expect(route.profile).toBe('walk');
+    expect(typeof route.totalDurationSec).toBe('number');
+    expect(route.totalDurationSec).toBeGreaterThan(0);
   });
 
   test('accessible route falls back with a flag when only escalators exist', async () => {
@@ -458,6 +464,76 @@ describe('wayfinding API', () => {
     expect(res.body.data.route.accessibleRouteUnavailable).toBe(true);
   });
 
+  test('to=ext:<code> resolves inside the building only', async () => {
+    const { entrance, shopNode } = await seedMall();
+    await prisma.poi.update({
+      where: { nodeId: shopNode.id },
+      data: { externalId: 'SHOP-42' },
+    });
+
+    const res = await request(app).get(
+      `/api/wayfinding/route?from=${entrance.id}&to=ext:SHOP-42`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.data.route.destination.nodeId).toBe(shopNode.id);
+
+    // The same code registered in a *different* building must not resolve
+    // against this building's origin.
+    const other = await createOwnerWithBuilding();
+    const otherFloor = await createFloor(other.building.id, { floorNumber: 1 });
+    await createNode(other.building.id, otherFloor.id, {
+      x: 0,
+      y: 0,
+      type: 'POI',
+      externalId: 'ONLY-OTHER-BUILDING',
+    });
+
+    const cross = await request(app).get(
+      `/api/wayfinding/route?from=${entrance.id}&to=ext:ONLY-OTHER-BUILDING`
+    );
+    expect(cross.status).toBe(404);
+  });
+
+  test('excludeTags=service relaxes when it is the route\'s only connector', async () => {
+    const { entrance, poi } = await seedMall();
+    // Tag the only cross-floor connector as 'service'; excluding it leaves no
+    // route at all, so the router should relax the tag constraint rather
+    // than report failure.
+    const escalatorEdge = await prisma.edge.findFirst({ where: { transitType: 'ESCALATOR' } });
+    await prisma.edge.update({
+      where: { id: escalatorEdge.id },
+      data: { tags: ['service'] },
+    });
+
+    const res = await request(app).get(
+      `/api/wayfinding/route?from=${entrance.id}&to=poi:${poi.id}&excludeTags=service`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.data.route.tagConstraintsRelaxed).toBe(true);
+  });
+
+  test('accessible + excludeTags relax cumulatively: reports both flags when only the final fallback succeeds', async () => {
+    const { entrance, poi } = await seedMall();
+    // The only cross-floor connector is both 'service'-tagged AND
+    // inaccessible (seedMall already sets accessible:false on it), so a
+    // wheelchair request excluding 'service' can only succeed once BOTH
+    // constraints are gone — the final, most-relaxed fallback step. Both
+    // flags must say so; reporting only the winning step's own label would
+    // under-report that tags were dropped too along the way.
+    const escalatorEdge = await prisma.edge.findFirst({ where: { transitType: 'ESCALATOR' } });
+    await prisma.edge.update({
+      where: { id: escalatorEdge.id },
+      data: { tags: ['service'] },
+    });
+
+    const res = await request(app).get(
+      `/api/wayfinding/route?from=${entrance.id}&to=poi:${poi.id}&accessible=true&excludeTags=service`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.data.route.tagConstraintsRelaxed).toBe(true);
+    expect(res.body.data.route.accessibleRouteUnavailable).toBe(true);
+  });
+
   test('evacuation route finds nearest exit', async () => {
     const { entrance, exit1 } = await seedMall();
     const res = await request(app).get(`/api/wayfinding/evacuate?from=${entrance.id}`);
@@ -466,6 +542,162 @@ describe('wayfinding API', () => {
     expect(route.mode).toBe('EVACUATION');
     expect(route.destination.nodeId).toBe(exit1.id);
     expect(route.segments).toHaveLength(1);
+  });
+
+  test('profile=min_floor_changes prefers a same-floor exit over an upstairs one, keeping emergency visibility', async () => {
+    const { building } = await createOwnerWithBuilding();
+    const f1 = await createFloor(building.id, { floorNumber: 1, scalePixelsPerMeter: 10 });
+    const f2 = await createFloor(building.id, { floorNumber: 2, scalePixelsPerMeter: 10 });
+    const entrance = await createNode(building.id, f1.id, { x: 0, y: 0, type: 'NORMAL' });
+    // Far on the same floor: a long walk, but no floor change.
+    const exitSameFloor = await createNode(building.id, f1.id, {
+      x: 700, y: 0, type: 'EMERGENCY_EXIT',
+    });
+    const stairsBottom = await createNode(building.id, f1.id, { x: 5, y: 0, type: 'TRANSIT' });
+    const stairsTop = await createNode(building.id, f2.id, { x: 5, y: 0, type: 'TRANSIT' });
+    // Right by the stairs upstairs: a short walk, but one floor change.
+    const exitUpstairs = await createNode(building.id, f2.id, {
+      x: 10, y: 0, type: 'EMERGENCY_EXIT',
+    });
+    const sameFloorEdge = await connectNodes(entrance, exitSameFloor);
+    // Only reachable via an EMERGENCY_ONLY edge — proves that layering
+    // min_floor_changes' cost preference on top of /evacuate did not cost it
+    // the emergency profile's visibility rule.
+    await prisma.edge.update({
+      where: { id: sameFloorEdge.id },
+      data: { visibility: 'EMERGENCY_ONLY' },
+    });
+    await connectNodes(entrance, stairsBottom);
+    await connectNodes(stairsBottom, stairsTop, { transitType: 'STAIRS' });
+    await connectNodes(stairsTop, exitUpstairs);
+
+    // Default (time-priced) evacuation: the short upstairs detour wins.
+    const fast = await request(app).get(`/api/wayfinding/evacuate?from=${entrance.id}`);
+    expect(fast.status).toBe(200);
+    expect(fast.body.data.route.destination.nodeId).toBe(exitUpstairs.id);
+
+    // min_floor_changes' 600s penalty flips the preference to the long,
+    // same-floor walk — which is only reachable at all because /evacuate
+    // kept the emergency profile's EMERGENCY_ONLY visibility.
+    const slow = await request(app).get(
+      `/api/wayfinding/evacuate?from=${entrance.id}&profile=min_floor_changes`
+    );
+    expect(slow.status).toBe(200);
+    expect(slow.body.data.route.destination.nodeId).toBe(exitSameFloor.id);
+    // `profile` stays inside the closed RouteProfile union the frontend
+    // switches on (its emergency banner keys off `profile === 'emergency'`);
+    // the layered cost preference rides the separate, additive `preference`.
+    expect(slow.body.data.route.profile).toBe('emergency');
+    expect(slow.body.data.route.preference).toBe('min_floor_changes');
+  });
+
+  test('/evacuate?profile=walk keeps emergency visibility and elevator blocking', async () => {
+    const { building } = await createOwnerWithBuilding();
+    const f1 = await createFloor(building.id, { floorNumber: 1, scalePixelsPerMeter: 10 });
+    const f2 = await createFloor(building.id, { floorNumber: 2, scalePixelsPerMeter: 10 });
+    const entrance = await createNode(building.id, f1.id, { x: 0, y: 0, type: 'NORMAL' });
+
+    // Only reachable via an EMERGENCY_ONLY edge — invisible to ordinary
+    // wayfinding, visible only under the emergency profile.
+    const emergencyExit = await createNode(building.id, f1.id, {
+      x: 500, y: 0, type: 'EMERGENCY_EXIT',
+    });
+    const emergencyEdge = await connectNodes(entrance, emergencyExit);
+    await prisma.edge.update({
+      where: { id: emergencyEdge.id },
+      data: { visibility: 'EMERGENCY_ONLY' },
+    });
+
+    // Reachable via a fast elevator — the shortest route by raw time, but
+    // elevators must stay off-limits during an evacuation regardless of any
+    // explicit `profile=` the caller asks for.
+    const liftBottom = await createNode(building.id, f1.id, { x: 5, y: 0, type: 'TRANSIT' });
+    const liftTop = await createNode(building.id, f2.id, { x: 5, y: 0, type: 'TRANSIT' });
+    const liftExit = await createNode(building.id, f2.id, { x: 10, y: 0, type: 'EMERGENCY_EXIT' });
+    await connectNodes(entrance, liftBottom);
+    await connectNodes(liftBottom, liftTop, { transitType: 'ELEVATOR' });
+    await connectNodes(liftTop, liftExit);
+
+    const plain = await request(app).get(`/api/wayfinding/evacuate?from=${entrance.id}`);
+    expect(plain.status).toBe(200);
+    expect(plain.body.data.route.destination.nodeId).toBe(emergencyExit.id);
+    expect(plain.body.data.route.profile).toBe('emergency');
+    expect(plain.body.data.route.preference).toBeNull();
+
+    // A public, anonymous `profile=walk` request must not unhide the
+    // EMERGENCY_ONLY edge's opposite (a plain walk profile has no such
+    // effect here) nor unblock the elevator — it must reach the exact same
+    // exit as the request with no profile at all. `profile` stays
+    // `'emergency'` (the closed union the frontend's danger framing keys
+    // off); the requested preference rides the separate `preference` field.
+    const withWalk = await request(app).get(
+      `/api/wayfinding/evacuate?from=${entrance.id}&profile=walk`
+    );
+    expect(withWalk.status).toBe(200);
+    expect(withWalk.body.data.route.destination.nodeId).toBe(emergencyExit.id);
+    expect(withWalk.body.data.route.profile).toBe('emergency');
+    expect(withWalk.body.data.route.preference).toBe('walk');
+  });
+
+  test('/evacuate?accessible=true&excludeTags=service relaxes tags before ever dropping accessibility', async () => {
+    const { building } = await createOwnerWithBuilding();
+    const f1 = await createFloor(building.id, { floorNumber: 1, scalePixelsPerMeter: 10 });
+    const entrance = await createNode(building.id, f1.id, { x: 0, y: 0, type: 'NORMAL' });
+    const exit = await createNode(building.id, f1.id, { x: 100, y: 0, type: 'EMERGENCY_EXIT' });
+    // The only path: step-free, but tagged 'service'. Excluding the tag
+    // must still find it once tags relax — accessibility must never be
+    // dropped when it wasn't necessary to drop it.
+    await connectNodes(entrance, exit, { tags: ['service'], accessible: true });
+
+    const res = await request(app).get(
+      `/api/wayfinding/evacuate?from=${entrance.id}&accessible=true&excludeTags=service`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.data.route.tagConstraintsRelaxed).toBe(true);
+    expect(res.body.data.route.accessibleRouteUnavailable).toBe(false);
+  });
+
+  test('/evacuate?accessible=true&excludeTags=service drops accessibility only as an absolute last resort', async () => {
+    const { building } = await createOwnerWithBuilding();
+    const f1 = await createFloor(building.id, { floorNumber: 1, scalePixelsPerMeter: 10 });
+    const entrance = await createNode(building.id, f1.id, { x: 0, y: 0, type: 'NORMAL' });
+    const exit = await createNode(building.id, f1.id, { x: 100, y: 0, type: 'EMERGENCY_EXIT' });
+    // The only path: tagged 'service' AND not step-free. Relaxing tags
+    // alone is not enough, so accessibility must be dropped too, and both
+    // flags must say so — the route did in fact traverse a non-accessible,
+    // tag-excluded edge to get here.
+    await connectNodes(entrance, exit, { tags: ['service'], accessible: false });
+
+    const res = await request(app).get(
+      `/api/wayfinding/evacuate?from=${entrance.id}&accessible=true&excludeTags=service`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.data.route.accessibleRouteUnavailable).toBe(true);
+    expect(res.body.data.route.tagConstraintsRelaxed).toBe(true);
+  });
+
+  test('an EMERGENCY_ONLY edge is invisible to profile=walk but usable by /evacuate', async () => {
+    const { entrance, exit1 } = await seedMall();
+    const edge = await prisma.edge.findFirst({
+      where: {
+        OR: [
+          { sourceNodeId: entrance.id, targetNodeId: exit1.id },
+          { sourceNodeId: exit1.id, targetNodeId: entrance.id },
+        ],
+      },
+    });
+    await prisma.edge.update({ where: { id: edge.id }, data: { visibility: 'EMERGENCY_ONLY' } });
+
+    // The only edge to exit1 is now hidden from ordinary wayfinding.
+    const walkAttempt = await request(app).get(
+      `/api/wayfinding/route?from=${entrance.id}&to=${exit1.id}`
+    );
+    expect(walkAttempt.status).toBe(404);
+
+    // /evacuate's emergency profile can still see it.
+    const evac = await request(app).get(`/api/wayfinding/evacuate?from=${entrance.id}`);
+    expect(evac.status).toBe(200);
+    expect(evac.body.data.route.destination.nodeId).toBe(exit1.id);
   });
 });
 

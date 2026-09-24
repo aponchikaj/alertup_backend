@@ -158,8 +158,20 @@ export function pathEdges(graph, pathIds = []) {
  *   - profile: the resolved profile the search used (`buildRoutingContext().profile`).
  *     Legacy callers pass nothing and get a plain `walk` profile, because an
  *     ETA the UI can show is better than no ETA at all.
- *   - profileName: the profile's name, echoed back as `route.profile`
+ *   - profileName: the profile's name, echoed back as `route.profile`. Must
+ *     stay one of the named `PROFILE_NAMES` — the frontend's `RouteProfile`
+ *     type is a closed union it switches on (e.g. the emergency banner's
+ *     red/blue framing keys off `route.profile === 'emergency'`), so a value
+ *     outside that union silently mis-renders rather than erroring.
  *   - tagConstraintsRelaxed: the router dropped include/exclude tags to find this
+ *   - preference: an additional cost preference layered on top of `profile`
+ *     without changing its visibility/blocking rules — today only
+ *     `/evacuate` does this (e.g. `profile=min_floor_changes` still avoids
+ *     extra floor changes on top of the mandatory `emergency` profile).
+ *     Echoed back as `route.preference`: one of `'walk'|'elevator_first'|
+ *     'min_floor_changes'` or `null` when no preference was layered. This is
+ *     additive and NOT part of the `RouteProfile` union — display it as a
+ *     secondary hint, never in place of `route.profile`.
  *   - overlay: B7's closure overlay `{edgeMultiplier, blockedEdgeIds, blockedNodeIds}`
  *   - lean: omit `floor.drawing` (embedded routes: alternatives, AI payloads)
  */
@@ -172,6 +184,7 @@ export function assembleRoute(graph, pathIds, opts = {}) {
     profile = null,
     profileName = null,
     tagConstraintsRelaxed = false,
+    preference = null,
     overlay = null,
     lean = false,
   } = opts;
@@ -433,6 +446,7 @@ export function assembleRoute(graph, pathIds, opts = {}) {
     transitions,
     steps,
     profile: activeProfileName,
+    preference,
     totalDistanceM: round1(builtSegments.reduce((sum, s) => sum + s.distanceM, 0)),
     totalDurationSec:
       builtSegments.reduce((sum, s) => sum + s.durationSec, 0) +
