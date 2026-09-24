@@ -10,6 +10,8 @@ import {
   addMember,
 } from './helpers.js';
 import { resolveDestination } from '../features/wayfinding/destinations.js';
+import { buildSearchText } from '../features/mapEditor/fieldValidators.js';
+import { drain } from '../services/analyticsQueue.js';
 
 // Integration coverage for the new feature routers: map editor, wayfinding,
 // emergency v2.
@@ -615,13 +617,18 @@ describe('wayfinding API', () => {
     await connectNodes(esc1, esc4, { transitType: 'ESCALATOR', weight: 350, distance: 0, accessible: false });
     await connectNodes(esc4, shopNode);
     await connectNodes(entrance, exit1);
+    const keywords = ['clothes', 'fashion'];
     const poi = await prisma.poi.create({
       data: {
         nodeId: shopNode.id,
         buildingId: building.id,
         name: 'LC Waikiki',
         category: 'Apparel',
-        keywords: ['clothes', 'fashion'],
+        keywords,
+        // Written the same way the map-editor route computes it on save —
+        // this fixture is created directly through Prisma, so the search
+        // blob has to be built by hand to match a real row.
+        searchText: buildSearchText({ name: 'LC Waikiki', keywords }),
       },
     });
     return { ...seeded, f1, f4, entrance, esc1, esc4, shopNode, exit1, poi };
@@ -643,6 +650,91 @@ describe('wayfinding API', () => {
       `/api/wayfinding/buildings/${building.id}/pois?q=clothes`
     );
     expect(byKeyword.body.data.pois).toHaveLength(1);
+
+    // The response also carries a searchId (for the pick endpoint) and each
+    // POI's localized names, alongside the externalId it already returned.
+    expect(byName.body.data.searchId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    );
+    expect(byName.body.data.pois[0]).toMatchObject({ names: null, externalId: null });
+  });
+
+  test('POI search matches category — buildSearchText does not fold category in, so this branch is load-bearing on its own', async () => {
+    const { building, poi } = await seedMall(); // category: 'Apparel'
+
+    // Prove category search is NOT riding on searchText: it was never folded
+    // in there, so if the category OR-branch regressed, this would fail.
+    const stored = await prisma.poi.findUnique({ where: { id: poi.id } });
+    expect(stored.searchText).not.toMatch(/apparel/);
+
+    const byCategory = await request(app).get(
+      `/api/wayfinding/buildings/${building.id}/pois?q=apparel`
+    );
+    expect(byCategory.status).toBe(200);
+    expect(byCategory.body.data.pois.map((p) => p.name)).toContain('LC Waikiki');
+  });
+
+  test('a well-formed but nonexistent buildingId is a 404, not a quiet empty 200', async () => {
+    // Valid legacy-id shape (24 hex chars) per isId(), but never persisted —
+    // must not reach the database as a "real" building, and must never
+    // enqueue a searchEvent write (its FK to Building would fail and get
+    // silently swallowed, which is exactly the log-spam surface being closed).
+    const fakeBuildingId = 'a'.repeat(24);
+    const res = await request(app).get(
+      `/api/wayfinding/buildings/${fakeBuildingId}/pois?q=anything`
+    );
+    expect(res.status).toBe(404);
+
+    await drain();
+    const count = await prisma.searchEvent.count();
+    expect(count).toBe(0);
+  });
+
+  test('POI search matches a Georgian alias, and a legacy row with no names/searchText still matches by name', async () => {
+    const { building, f4 } = await seedMall();
+
+    // A POI saved the way the real map-editor write path builds it: name,
+    // English/Georgian names and an alias folded into searchText by
+    // buildSearchText, exactly as fieldValidators.js does on every save.
+    const cafeNode = await createNode(building.id, f4.id, { x: 400, y: 0, type: 'POI' });
+    const names = { en: 'Coffee House', ka: 'ყავის სახლი', aliases: ['Kava'] };
+    await prisma.poi.create({
+      data: {
+        nodeId: cafeNode.id,
+        buildingId: building.id,
+        name: 'Coffee House',
+        names,
+        searchText: buildSearchText({ name: 'Coffee House', names }),
+      },
+    });
+
+    const byGeorgianName = await request(app).get(
+      `/api/wayfinding/buildings/${building.id}/pois?q=${encodeURIComponent('ყავის')}`
+    );
+    expect(byGeorgianName.status).toBe(200);
+    expect(byGeorgianName.body.data.pois.map((p) => p.name)).toContain('Coffee House');
+
+    const byAlias = await request(app).get(
+      `/api/wayfinding/buildings/${building.id}/pois?q=kava`
+    );
+    expect(byAlias.body.data.pois.map((p) => p.name)).toContain('Coffee House');
+
+    // A row with neither `names` nor `searchText` populated (as an older,
+    // pre-slice row would still be after the migration's backfill covered
+    // only name + keywords) must still be findable by its plain name.
+    const legacyNode = await createNode(building.id, f4.id, { x: 500, y: 0, type: 'POI' });
+    await prisma.poi.create({
+      data: {
+        nodeId: legacyNode.id,
+        buildingId: building.id,
+        name: 'Legacy Kiosk',
+        // names and searchText intentionally left null/unset.
+      },
+    });
+    const byLegacyName = await request(app).get(
+      `/api/wayfinding/buildings/${building.id}/pois?q=legacy`
+    );
+    expect(byLegacyName.body.data.pois.map((p) => p.name)).toContain('Legacy Kiosk');
   });
 
   test('directory: POIs, named drawn rooms and labeled nodes — doors excluded', async () => {

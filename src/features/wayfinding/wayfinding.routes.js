@@ -1,8 +1,10 @@
 import { Router } from 'express';
+import { randomUUID } from 'node:crypto';
 import prisma from '../../db/prisma.js';
 import { ok, fail } from '../../utils/respond.js';
 import { isId } from '../../utils/ids.js';
 import { publicReadLimiter } from '../../services/rateLimiter.js';
+import { enqueue } from '../../services/analyticsQueue.js';
 import { getGraph } from './graphCache.js';
 import { findRoute, findEvacuationRoute } from './dijkstra.js';
 import { getSafetyField, pathFromField } from './safetyField.js';
@@ -19,6 +21,10 @@ import { resolveDestination, parseDestinations } from './destinations.js';
 import { resolveProfile, makeCostFn } from './costModel.js';
 
 const router = Router();
+
+// searchId shape: a v4 UUID minted by this route (never a Prisma cuid), so a
+// caller cannot feed a POI or node id into the pick endpoint by mistake.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Try the strict attempt first, then each fallback attempt in order, until
@@ -301,10 +307,40 @@ router.get(
       const { buildingId } = req.params;
       if (!isId(buildingId)) return fail(res, 400, 'Invalid building id.');
 
+      // A well-formed-but-unknown id must 404 rather than fall through to an
+      // empty-but-200 search: without this, an anonymous caller can drive an
+      // unbounded number of failed searchEvent.create FK writes (buildingId
+      // doesn't exist) at the full publicReadLimiter rate — each one caught
+      // and swallowed by the analytics queue, but still a console.error per
+      // request. 404 here removes the write from happening at all, instead
+      // of trying to gate the enqueue on it (which would also wrongly hide
+      // the FK case behind the same code path as "this building has no
+      // matching POIs", a real and valuable event this endpoint exists to
+      // log).
+      const building = await prisma.building.findUnique({
+        where: { id: buildingId },
+        select: { id: true },
+      });
+      if (!building) return fail(res, 404, 'Building not found.');
+
       const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
       const floorNumber =
         req.query.floor !== undefined ? Number(req.query.floor) : null;
 
+      // `searchText` is the precomputed blob buildSearchText() writes on
+      // every POI save — name + keywords + names.en/ka + aliases, all
+      // lowercased (see src/features/mapEditor/fieldValidators.js). Matching
+      // against it (case-sensitive `contains` on an already-lowercased
+      // column, against a lowercased query) is what makes an alias or a
+      // Georgian name findable. `name` is matched separately, case
+      // insensitively, so a row saved before this slice — where the
+      // migration backfilled searchText from name+keywords but `names` and
+      // any alias stay null — is still findable by its plain display name.
+      // `category` is matched as a THIRD, separate branch: buildSearchText
+      // deliberately does not fold category in (it's a taxonomy field, not
+      // a display/alias name), so "apparel" only ever finds LC Waikiki
+      // through this branch — dropping it silently loses category search
+      // for every POI ever saved, not just ones written before some cutoff.
       const where = {
         node: {
           buildingId,
@@ -315,9 +351,9 @@ router.get(
         ...(q
           ? {
               OR: [
+                { searchText: { contains: q.toLowerCase() } },
                 { name: { contains: q, mode: 'insensitive' } },
                 { category: { contains: q, mode: 'insensitive' } },
-                { keywords: { has: q.toLowerCase() } },
               ],
             }
           : {}),
@@ -354,6 +390,7 @@ router.get(
           category: p.category,
           description: p.description,
           externalId: p.externalId || null,
+          names: p.names || null,
           nodeId: p.node.id,
           floorId: p.node.floor?.id ?? null,
           floorNumber: p.node.floor?.floorNumber ?? null,
@@ -370,9 +407,83 @@ router.get(
           return a.name.localeCompare(b.name);
         });
 
-      return ok(res, { data: { pois: results } });
+      // Minted for every search (not just non-empty ones) so the response
+      // shape never changes — but only a real, non-empty query is worth
+      // logging: a blank query is just the directory browsing itself, not a
+      // visitor asking for something. This is the one signal a building
+      // owner has for "my map is missing X" (a q that returns 0 results),
+      // so zero-result queries are logged exactly like any other.
+      const searchId = randomUUID();
+      const response = ok(res, { data: { pois: results, searchId } });
+      if (q) {
+        enqueue('search-event', () =>
+          prisma.searchEvent.create({
+            data: {
+              id: searchId,
+              buildingId,
+              query: q,
+              resultCount: results.length,
+            },
+          })
+        );
+      }
+      return response;
     } catch (err) {
       console.error('POI search error:', err);
+      return fail(res, 500, 'Server error.');
+    }
+  }
+);
+
+/**
+ * POST /api/wayfinding/search-events/:searchId/pick
+ *
+ * Records which POI a visitor actually picked after a search — the other
+ * half of search-quality analytics alongside the zero-result logging above.
+ * Anonymous and public, same as /pois: no auth to check, so the only
+ * authorization question is "does this poiId belong to the building that
+ * owns this searchId" — enforced entirely inside the `updateMany` WHERE
+ * clause (one round trip, no read-then-write race) so a POI from Building B
+ * can never be recorded against a search that happened in Building A. A
+ * mismatch on any axis (unknown searchId, unknown poiId, or poiId from a
+ * different building) all come back as the same 404 — this endpoint never
+ * confirms or denies that a given searchId exists in someone else's building.
+ */
+router.post(
+  '/api/wayfinding/search-events/:searchId/pick',
+  publicReadLimiter,
+  async (req, res) => {
+    try {
+      const { searchId } = req.params;
+      if (!UUID_RE.test(searchId)) return fail(res, 400, 'Invalid search id.');
+
+      const { poiId } = req.body || {};
+      if (!isId(poiId)) return fail(res, 400, 'Invalid POI id.');
+
+      // NOTE: this scopes by the denormalized `Poi.buildingId`, while the
+      // /pois search above scopes by `node.buildingId` (the source of
+      // truth). The two are kept in sync on every map-editor write, but if
+      // they ever diverge for a given POI — or a legacy row's backfill
+      // missed it — that POI becomes searchable but permanently un-pickable
+      // (a 404 here, never a cross-building leak). Worth knowing if a "pick
+      // never records" report ever traces back to this endpoint.
+      const poi = await prisma.poi.findUnique({
+        where: { id: poiId },
+        select: { id: true, buildingId: true },
+      });
+      // A POI with no buildingId (never backfilled/linked) can't be scoped
+      // to any building, so it can never be a valid pick either.
+      if (!poi || !poi.buildingId) return fail(res, 404, 'Search event not found.');
+
+      const updated = await prisma.searchEvent.updateMany({
+        where: { id: searchId, buildingId: poi.buildingId },
+        data: { pickedPoiId: poi.id },
+      });
+      if (updated.count === 0) return fail(res, 404, 'Search event not found.');
+
+      return ok(res, { message: 'Recorded.' });
+    } catch (err) {
+      console.error('Search pick error:', err);
       return fail(res, 500, 'Server error.');
     }
   }
