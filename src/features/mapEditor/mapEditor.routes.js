@@ -16,6 +16,20 @@ import { buildQrSlug } from '../qr/qrPayload.js';
 import { floorLimitFor } from '../../services/plans.js';
 import { createEdge, recomputeEdgesForNode, normalizePair, computeEdgeGeometry } from './edgeService.js';
 import { planAutoConnect } from './autoConnect.js';
+import {
+  parseTags,
+  parseDirection,
+  parseRank,
+  parseVisibility,
+  parseExternalId,
+  parsePoiNames,
+  buildSearchText,
+} from './fieldValidators.js';
+import {
+  validateRoutingProfile,
+  resolveProfile,
+  DEFAULT_ROUTING_PROFILE,
+} from '../wayfinding/costModel.js';
 
 const router = Router();
 
@@ -63,6 +77,124 @@ const readDimensions = (body) => {
   return out;
 };
 
+const MAX_SHORT_NAME = 16;
+
+/**
+ * Did this P2002 come from a unique constraint covering `field`?
+ *
+ * Prisma reports the constraint in `err.meta.target`, as an array of field
+ * names on some connectors and as the raw index name (`Node_buildingId_externalId_key`)
+ * on others — both are covered by stringifying. Unknown shape means "not this
+ * field", so a future unique on the same model falls through to the generic
+ * handler instead of being reported as the wrong conflict.
+ *
+ * @param {{meta?: {target?: unknown}}} err
+ * @param {string} field
+ * @returns {boolean}
+ */
+const collidedOn = (err, field) => {
+  const target = err?.meta?.target;
+  if (target === undefined || target === null) return false;
+  return String(Array.isArray(target) ? target.join(',') : target).includes(field);
+};
+
+/**
+ * Read the floor fields that describe where a floor sits in the stack and how
+ * it is labelled in compact UI. Absent means "not part of this write"; an
+ * explicit null or empty string clears.
+ *
+ * `verticalOrder` may be negative — basements are the whole point of having it
+ * alongside `floorNumber`.
+ *
+ * @param {Record<string, unknown>} body
+ * @returns {{data?: {verticalOrder?: number|null, shortName?: string|null}, error?: string}}
+ */
+const readFloorPlacement = (body = {}) => {
+  const data = {};
+
+  if (body.verticalOrder !== undefined) {
+    if (body.verticalOrder === null || body.verticalOrder === '') {
+      data.verticalOrder = null;
+    } else {
+      const n = Number(body.verticalOrder);
+      if (!Number.isInteger(n)) {
+        return { error: 'verticalOrder must be an integer (negatives allowed).' };
+      }
+      data.verticalOrder = n;
+    }
+  }
+
+  if (body.shortName !== undefined) {
+    if (body.shortName === null) {
+      data.shortName = null;
+    } else if (typeof body.shortName !== 'string') {
+      return { error: 'shortName must be a string.' };
+    } else {
+      const value = body.shortName.trim();
+      if (value.length > MAX_SHORT_NAME) {
+        return { error: `shortName must be ${MAX_SHORT_NAME} characters or fewer.` };
+      }
+      data.shortName = value || null;
+    }
+  }
+
+  return { data };
+};
+
+/**
+ * Read the routing metadata an edge carries beyond its geometry. Shared by
+ * POST and PATCH, so the two cannot drift.
+ *
+ * `direction` (`BOTH|FORWARD|REVERSE`) is relative to the edge's stored
+ * `sourceNodeId` → `targetNodeId` — the pair as it comes back in the response,
+ * which is normalized to source < target and is NOT necessarily the order the
+ * two nodes were posted in. `FORWARD` therefore means the same thing on POST
+ * and PATCH, and PATCHing back the `direction` a POST returned is a no-op. A
+ * client holding its own "as drawn A→B" orientation must compare it against
+ * the returned `sourceNodeId` before deciding which value to send.
+ *
+ * `lengthM: null` is not "unknown" but "stop overriding": the graph loader
+ * derives metres from the pixel length and the floor scale whenever the
+ * column is null.
+ *
+ * @param {Record<string, unknown>} body
+ * @returns {{data?: object, error?: string}}
+ */
+const readEdgeRouting = (body = {}) => {
+  const data = {};
+
+  for (const [key, parse] of [
+    ['direction', parseDirection],
+    ['tags', parseTags],
+    ['rank', parseRank],
+    ['visibility', parseVisibility],
+  ]) {
+    if (body[key] === undefined) continue;
+    const parsed = parse(body[key]);
+    if (!parsed.ok) return { error: parsed.error };
+    data[key] = parsed.value;
+  }
+
+  if (body.lengthM !== undefined) {
+    if (body.lengthM === null) {
+      data.lengthM = null;
+    } else if (
+      typeof body.lengthM !== 'number' ||
+      !Number.isFinite(body.lengthM) ||
+      body.lengthM <= 0
+    ) {
+      return {
+        error:
+          'lengthM must be a positive number, or null to derive it from the floor scale.',
+      };
+    } else {
+      data.lengthM = body.lengthM;
+    }
+  }
+
+  return { data };
+};
+
 // ---------------------------------------------------------------- floors ----
 
 router.post(
@@ -88,6 +220,9 @@ router.post(
       // dimensions the user typed); uploaded ones inherit the default space.
       const dims = readDimensions(req.body);
       if (dims.error) return fail(res, 422, dims.error);
+
+      const placement = readFloorPlacement(req.body);
+      if (placement.error) return fail(res, 422, placement.error);
 
       const drawing = normalizeDrawing(req.body.drawing);
       if (!drawing.ok) return fail(res, 422, drawing.error);
@@ -122,6 +257,7 @@ router.post(
           width: dims.width,
           height: dims.height,
           drawing: drawing.drawing ?? undefined,
+          ...placement.data,
         },
       });
 
@@ -205,6 +341,10 @@ router.patch(
       if (dims.error) return fail(res, 422, dims.error);
       if (dims.width !== undefined) data.width = dims.width;
       if (dims.height !== undefined) data.height = dims.height;
+
+      const placement = readFloorPlacement(req.body);
+      if (placement.error) return fail(res, 422, placement.error);
+      Object.assign(data, placement.data);
 
       // Absent means "not part of this PATCH"; an explicit null clears it.
       if (req.body.drawing !== undefined) {
@@ -428,7 +568,7 @@ router.patch(
       if (!node) return fail(res, 404, 'Node not found.');
 
       const data = {};
-      const { x, y, type, label } = req.body || {};
+      const { x, y, type, label, visibility, externalId } = req.body || {};
       if (x !== undefined) {
         if (typeof x !== 'number' || Number.isNaN(x)) return fail(res, 422, 'x must be a number.');
         data.x = x;
@@ -447,6 +587,16 @@ router.patch(
         data.label =
           typeof label === 'string' ? label.trim().slice(0, 120) || null : null;
       }
+      if (visibility !== undefined) {
+        const parsed = parseVisibility(visibility);
+        if (!parsed.ok) return fail(res, 422, parsed.error);
+        data.visibility = parsed.value;
+      }
+      if (externalId !== undefined) {
+        const parsed = parseExternalId(externalId);
+        if (!parsed.ok) return fail(res, 422, parsed.error);
+        data.externalId = parsed.value;
+      }
 
       const updated = await prisma.node.update({ where: { id: node.id }, data });
       if (data.x !== undefined || data.y !== undefined) {
@@ -455,6 +605,17 @@ router.patch(
       invalidate(req.building.id);
       return ok(res, { message: 'Node updated.', data: { node: updated } });
     } catch (err) {
+      // @@unique([buildingId, externalId]) — the code is the integrator's
+      // handle on this point, so say which one collided. Guarded on the
+      // failing constraint so a unique added to Node later cannot be
+      // mislabelled as an externalId clash.
+      if (err.code === 'P2002' && collidedOn(err, 'externalId')) {
+        return fail(
+          res,
+          409,
+          `externalId "${String(req.body?.externalId).trim()}" is already used by another point in this building.`
+        );
+      }
       console.error('Update node error:', err);
       return fail(res, 500, 'Server error.');
     }
@@ -499,6 +660,9 @@ router.post(
         return fail(res, 422, 'weight must be a positive number.');
       }
 
+      const routing = readEdgeRouting(req.body);
+      if (routing.error) return fail(res, 422, routing.error);
+
       // Ownership: both nodes must be in the actor's building.
       const count = await prisma.node.count({
         where: { id: { in: [sourceNodeId, targetNodeId] }, buildingId: req.building.id },
@@ -511,6 +675,7 @@ router.post(
         transitType,
         weight: weight ?? null,
         accessible: typeof accessible === 'boolean' ? accessible : null,
+        ...routing.data,
       });
       invalidate(req.building.id);
       return ok(res, { status: 201, message: 'Edge created.', data: { edge } });
@@ -536,6 +701,11 @@ router.patch(
 
       const data = {};
       const { transitType, weight, accessible } = req.body || {};
+
+      const routing = readEdgeRouting(req.body);
+      if (routing.error) return fail(res, 422, routing.error);
+      Object.assign(data, routing.data);
+
       if (transitType !== undefined) {
         if (!TRANSIT_TYPES.includes(transitType)) {
           return fail(res, 422, `transitType must be one of ${TRANSIT_TYPES.join(', ')}.`);
@@ -653,7 +823,7 @@ router.put(
       });
       if (!node) return fail(res, 404, 'Node not found.');
 
-      const { name, category, description, keywords } = req.body || {};
+      const { name, category, description, keywords, externalId, names } = req.body || {};
       if (typeof name !== 'string' || name.trim().length < 1 || name.trim().length > 120) {
         return fail(res, 422, 'name is required (1-120 characters).');
       }
@@ -665,24 +835,60 @@ router.put(
         ...new Set((keywords || []).map((k) => k.trim().toLowerCase()).filter(Boolean)),
       ].slice(0, 20);
 
+      // `names` and `externalId` are the exception to this route's otherwise
+      // whole-row PUT semantics: absent means "leave unchanged", and only an
+      // explicit null clears. The shipped editor sends neither field, so
+      // treating absent as null would make every ordinary POI save silently
+      // erase an integrator's code and a shop's Georgian name. They are new
+      // fields with no legacy PUT contract to honour, so nothing is preserved
+      // by clearing them.
+      let parsedNames = null;
+      if (names !== undefined) {
+        parsedNames = parsePoiNames(names);
+        if (!parsedNames.ok) return fail(res, 422, parsedNames.error);
+      }
+      let parsedExternalId = null;
+      if (externalId !== undefined) {
+        parsedExternalId = parseExternalId(externalId);
+        if (!parsedExternalId.ok) return fail(res, 422, parsedExternalId.error);
+      }
+
       const poi = await prisma.$transaction(async (tx) => {
+        // Read inside the transaction: `searchText` is rebuilt on every save,
+        // so it has to be rebuilt from the names actually in force, kept ones
+        // included.
+        const existing = await tx.poi.findUnique({
+          where: { nodeId: node.id },
+          select: { names: true, externalId: true },
+        });
+        const effectiveNames = parsedNames ? parsedNames.value : (existing?.names ?? null);
+        const effectiveExternalId = parsedExternalId
+          ? parsedExternalId.value
+          : (existing?.externalId ?? null);
+
+        // Everything else is rewritten wholesale — including `buildingId`,
+        // without which every `ext:` lookup scoped by building misses POIs the
+        // editor created.
+        const values = {
+          buildingId: node.buildingId,
+          name: name.trim(),
+          category: typeof category === 'string' ? category.trim() || null : null,
+          description:
+            typeof description === 'string' ? description.trim().slice(0, 1000) || null : null,
+          keywords: cleanKeywords,
+          externalId: effectiveExternalId,
+          names: effectiveNames,
+          searchText: buildSearchText({
+            name,
+            keywords: cleanKeywords,
+            names: effectiveNames,
+          }),
+        };
+
         const upserted = await tx.poi.upsert({
           where: { nodeId: node.id },
-          create: {
-            nodeId: node.id,
-            name: name.trim(),
-            category: typeof category === 'string' ? category.trim() || null : null,
-            description:
-              typeof description === 'string' ? description.trim().slice(0, 1000) || null : null,
-            keywords: cleanKeywords,
-          },
-          update: {
-            name: name.trim(),
-            category: typeof category === 'string' ? category.trim() || null : null,
-            description:
-              typeof description === 'string' ? description.trim().slice(0, 1000) || null : null,
-            keywords: cleanKeywords,
-          },
+          create: { nodeId: node.id, ...values },
+          update: values,
         });
         if (node.type !== 'POI') {
           await tx.node.update({ where: { id: node.id }, data: { type: 'POI' } });
@@ -693,6 +899,13 @@ router.put(
       invalidate(req.building.id);
       return ok(res, { message: 'POI saved.', data: { poi } });
     } catch (err) {
+      if (err.code === 'P2002' && collidedOn(err, 'externalId')) {
+        return fail(
+          res,
+          409,
+          `externalId "${String(req.body?.externalId).trim()}" is already used by another POI in this building.`
+        );
+      }
       console.error('Upsert POI error:', err);
       return fail(res, 500, 'Server error.');
     }
@@ -720,6 +933,96 @@ router.delete(
       return ok(res, { message: 'POI removed.' });
     } catch (err) {
       console.error('Delete POI error:', err);
+      return fail(res, 500, 'Server error.');
+    }
+  }
+);
+
+// ------------------------------------------------------- routing profile ---
+
+/**
+ * GET /api/map-editor/buildings/:buildingId/routing-profile
+ *
+ * `routingProfile` is what the owner stored (null when untouched);
+ * `effective` is what the router actually uses — the overrides layered over
+ * the defaults — and `defaults` lets the editor show a placeholder next to
+ * every empty field instead of inventing its own copy of the numbers.
+ */
+router.get(
+  '/api/map-editor/buildings/:buildingId/routing-profile',
+  ...canEditMap,
+  async (req, res) => {
+    try {
+      const stored = req.building.routingProfile ?? null;
+      return ok(res, {
+        data: {
+          routingProfile: stored,
+          effective: resolveProfile(stored, 'walk'),
+          defaults: DEFAULT_ROUTING_PROFILE,
+        },
+      });
+    } catch (err) {
+      console.error('Get routing profile error:', err);
+      return fail(res, 500, 'Server error.');
+    }
+  }
+);
+
+/**
+ * PUT /api/map-editor/buildings/:buildingId/routing-profile
+ *
+ * Body is `{ routingProfile: {...} | null }` (a bare object is accepted too,
+ * for a client that PUTs the profile itself). Partial writes are rejected:
+ * `validateRoutingProfile` hands back the keys that passed even when others
+ * failed, and quietly storing half a profile is how a building ends up with
+ * an elevator wait nobody set.
+ */
+router.put(
+  '/api/map-editor/buildings/:buildingId/routing-profile',
+  ...canEditMap,
+  editorWriteLimiter,
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      let raw;
+      if (Object.hasOwn(body, 'routingProfile')) {
+        raw = body.routingProfile;
+      } else {
+        // Bare-object form: buildingId may ride along from the client's
+        // request envelope, and is not a tuning key.
+        const { buildingId, ...rest } = body;
+        raw = rest;
+      }
+
+      const result = validateRoutingProfile(raw);
+      // Structured alongside the sentence, so the editor can highlight the
+      // offending field instead of parsing prose.
+      if (!result.ok) {
+        return fail(res, 422, result.errors.join(' '), { errors: result.errors });
+      }
+
+      const stored =
+        raw === null || raw === undefined || Object.keys(result.value).length === 0
+          ? null
+          : result.value;
+
+      const building = await prisma.building.update({
+        where: { id: req.building.id },
+        data: { routingProfile: stored },
+        select: { routingProfile: true },
+      });
+
+      invalidate(req.building.id);
+      return ok(res, {
+        message: 'Routing profile saved.',
+        data: {
+          routingProfile: building.routingProfile ?? null,
+          effective: resolveProfile(building.routingProfile ?? null, 'walk'),
+          defaults: DEFAULT_ROUTING_PROFILE,
+        },
+      });
+    } catch (err) {
+      console.error('Update routing profile error:', err);
       return fail(res, 500, 'Server error.');
     }
   }

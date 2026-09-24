@@ -9,6 +9,7 @@ import {
   connectNodes,
   addMember,
 } from './helpers.js';
+import { resolveDestination } from '../features/wayfinding/destinations.js';
 
 // Integration coverage for the new feature routers: map editor, wayfinding,
 // emergency v2.
@@ -308,6 +309,294 @@ describe('map editor API', () => {
         }),
       );
     expect(tooMany.status).toBe(422);
+  });
+
+  test('edge writes carry direction, tags, rank, visibility and lengthM', async () => {
+    const { cookie, building } = await createOwnerWithBuilding();
+    const floor = await createFloor(building.id, { floorNumber: 1 });
+    const a = await createNode(building.id, floor.id, { x: 0, y: 0 });
+    const b = await createNode(building.id, floor.id, { x: 300, y: 0 });
+
+    const created = await request(app)
+      .post('/api/map-editor/edges')
+      .set('Cookie', cookie)
+      .send({
+        sourceNodeId: a.id,
+        targetNodeId: b.id,
+        buildingId: building.id,
+        direction: 'FORWARD',
+        tags: [' Stroller ', 'STROLLER', 'quiet'],
+        rank: 'SECONDARY',
+        visibility: 'STAFF',
+        lengthM: 6,
+      });
+    expect(created.status).toBe(201);
+    const edge = created.body.data.edge;
+    expect(edge.tags).toEqual(['stroller', 'quiet']);
+    expect(edge.rank).toBe('SECONDARY');
+    expect(edge.visibility).toBe('STAFF');
+    expect(edge.lengthM).toBe(6);
+    // `direction` reads against the edge's stored source/target, the same ones
+    // the response carries — so what POST returns is what a later PATCH of the
+    // same value reproduces. (Storage order itself is pinned in
+    // edgeService.test.js, in both cuid orderings.)
+    expect(edge.direction).toBe('FORWARD');
+
+    const repatched = await request(app)
+      .patch(`/api/map-editor/edges/${edge.id}`)
+      .set('Cookie', cookie)
+      .send({ direction: edge.direction });
+    expect(repatched.status).toBe(200);
+    expect(repatched.body.data.edge).toMatchObject({
+      direction: 'FORWARD',
+      sourceNodeId: edge.sourceNodeId,
+      targetNodeId: edge.targetNodeId,
+    });
+
+    const patched = await request(app)
+      .patch(`/api/map-editor/edges/${edge.id}`)
+      .set('Cookie', cookie)
+      .send({
+        direction: 'BOTH',
+        tags: ['step_free'],
+        rank: 'PRIMARY',
+        visibility: 'PUBLIC',
+        lengthM: 12.5,
+      });
+    expect(patched.status).toBe(200);
+    expect(patched.body.data.edge).toMatchObject({
+      direction: 'BOTH',
+      tags: ['step_free'],
+      rank: 'PRIMARY',
+      visibility: 'PUBLIC',
+      lengthM: 12.5,
+    });
+
+    // null clears the measured length so the graph loader derives it again.
+    const reset = await request(app)
+      .patch(`/api/map-editor/edges/${edge.id}`)
+      .set('Cookie', cookie)
+      .send({ lengthM: null });
+    expect(reset.status).toBe(200);
+    expect(reset.body.data.edge.lengthM).toBeNull();
+
+    const bogus = await request(app)
+      .patch(`/api/map-editor/edges/${edge.id}`)
+      .set('Cookie', cookie)
+      .send({ direction: 'SIDEWAYS' });
+    expect(bogus.status).toBe(422);
+  });
+
+  test('node PATCH stores visibility and externalId; a duplicate code is a 409', async () => {
+    const { cookie, building } = await createOwnerWithBuilding();
+    const floor = await createFloor(building.id, { floorNumber: 1 });
+    const a = await createNode(building.id, floor.id);
+    const b = await createNode(building.id, floor.id, { x: 200 });
+
+    const first = await request(app)
+      .patch(`/api/map-editor/nodes/${a.id}`)
+      .set('Cookie', cookie)
+      .send({ visibility: 'STAFF', externalId: ' BOOTH-12 ' });
+    expect(first.status).toBe(200);
+    expect(first.body.data.node.visibility).toBe('STAFF');
+    expect(first.body.data.node.externalId).toBe('BOOTH-12');
+
+    const clash = await request(app)
+      .patch(`/api/map-editor/nodes/${b.id}`)
+      .set('Cookie', cookie)
+      .send({ externalId: 'BOOTH-12' });
+    expect(clash.status).toBe(409);
+    expect(clash.body.message).toMatch(/BOOTH-12/);
+
+    const cleared = await request(app)
+      .patch(`/api/map-editor/nodes/${a.id}`)
+      .set('Cookie', cookie)
+      .send({ externalId: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.data.node.externalId).toBeNull();
+
+    // The code is free again once cleared.
+    const reused = await request(app)
+      .patch(`/api/map-editor/nodes/${b.id}`)
+      .set('Cookie', cookie)
+      .send({ externalId: 'BOOTH-12' });
+    expect(reused.status).toBe(200);
+  });
+
+  test('floors accept verticalOrder (negative allowed) and a short name', async () => {
+    const { cookie, building } = await createOwnerWithBuilding();
+
+    const created = await request(app)
+      .post(`/api/map-editor/buildings/${building.id}/floors`)
+      .set('Cookie', cookie)
+      .field('floorNumber', '0')
+      .field('verticalOrder', '-1')
+      .field('shortName', 'B1');
+    expect(created.status).toBe(201);
+    expect(created.body.data.floor.verticalOrder).toBe(-1);
+    expect(created.body.data.floor.shortName).toBe('B1');
+
+    const floor = created.body.data.floor;
+    const patched = await request(app)
+      .patch(`/api/map-editor/floors/${floor.id}`)
+      .set('Cookie', cookie)
+      .field('verticalOrder', '3')
+      .field('shortName', 'M2');
+    expect(patched.status).toBe(200);
+    expect(patched.body.data.floor.verticalOrder).toBe(3);
+    expect(patched.body.data.floor.shortName).toBe('M2');
+
+    const tooLong = await request(app)
+      .patch(`/api/map-editor/floors/${floor.id}`)
+      .set('Cookie', cookie)
+      .field('shortName', 'a'.repeat(17));
+    expect(tooLong.status).toBe(422);
+
+    const notAnInt = await request(app)
+      .patch(`/api/map-editor/floors/${floor.id}`)
+      .set('Cookie', cookie)
+      .field('verticalOrder', '1.5');
+    expect(notAnInt.status).toBe(422);
+  });
+
+  test('POI write stores names, searchText and a buildingId that ext: can find', async () => {
+    const { cookie, building } = await createOwnerWithBuilding();
+    const floor = await createFloor(building.id, { floorNumber: 1 });
+    const node = await createNode(building.id, floor.id);
+
+    const saved = await request(app)
+      .put(`/api/map-editor/nodes/${node.id}/poi`)
+      .set('Cookie', cookie)
+      .send({
+        name: 'Coffee House',
+        keywords: ['Espresso'],
+        externalId: 'SKU-9',
+        names: { en: 'Coffee House', ka: 'ყავის სახლი', aliases: ['Cafe', 'cafe'] },
+      });
+    expect(saved.status).toBe(200);
+    expect(saved.body.data.poi.externalId).toBe('SKU-9');
+    expect(saved.body.data.poi.names).toEqual({
+      en: 'Coffee House',
+      ka: 'ყავის სახლი',
+      aliases: ['Cafe'],
+    });
+
+    const stored = await prisma.poi.findUnique({ where: { nodeId: node.id } });
+    // Without buildingId every ext: lookup scoped by building misses it.
+    expect(stored.buildingId).toBe(building.id);
+    expect(stored.searchText).toBe('coffee house espresso ყავის სახლი cafe');
+
+    const resolved = await resolveDestination(building.id, 'ext:SKU-9');
+    expect(resolved).toMatchObject({ ok: true, nodeId: node.id });
+
+    // Another building's POI with the same code stays out of reach.
+    const other = await createOwnerWithBuilding();
+    const otherMiss = await resolveDestination(other.building.id, 'ext:SKU-9');
+    expect(otherMiss.ok).toBe(false);
+  });
+
+  test('a POI save that omits names and externalId leaves them alone', async () => {
+    const { cookie, building } = await createOwnerWithBuilding();
+    const floor = await createFloor(building.id, { floorNumber: 1 });
+    const node = await createNode(building.id, floor.id);
+    const url = `/api/map-editor/nodes/${node.id}/poi`;
+
+    await request(app)
+      .put(url)
+      .set('Cookie', cookie)
+      .send({
+        name: 'Coffee House',
+        keywords: ['Espresso'],
+        externalId: 'SKU-9',
+        names: { en: 'Coffee House', ka: 'ყავის სახლი', aliases: ['Cafe'] },
+      });
+
+    // Exactly what the shipped editor sends today: no names, no externalId.
+    const legacySave = await request(app)
+      .put(url)
+      .set('Cookie', cookie)
+      .send({
+        buildingId: building.id,
+        name: 'Coffee House',
+        category: 'Cafe',
+        description: null,
+        keywords: ['Espresso'],
+      });
+    expect(legacySave.status).toBe(200);
+    expect(legacySave.body.data.poi.externalId).toBe('SKU-9');
+    expect(legacySave.body.data.poi.names).toEqual({
+      en: 'Coffee House',
+      ka: 'ყავის სახლი',
+      aliases: ['Cafe'],
+    });
+    // searchText is rebuilt, so it has to be rebuilt from the kept values.
+    expect(legacySave.body.data.poi.searchText).toBe(
+      'coffee house espresso ყავის სახლი cafe'
+    );
+    const stillResolves = await resolveDestination(building.id, 'ext:SKU-9');
+    expect(stillResolves).toMatchObject({ ok: true, nodeId: node.id });
+
+    // Clearing stays possible — it just has to be asked for.
+    const cleared = await request(app)
+      .put(url)
+      .set('Cookie', cookie)
+      .send({ name: 'Coffee House', externalId: null, names: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.data.poi.externalId).toBeNull();
+    expect(cleared.body.data.poi.names).toBeNull();
+    expect(cleared.body.data.poi.searchText).toBe('coffee house');
+    expect((await resolveDestination(building.id, 'ext:SKU-9')).ok).toBe(false);
+  });
+
+  test('routing profile round-trips and rejects invalid tuning', async () => {
+    const { cookie, building } = await createOwnerWithBuilding();
+    const url = `/api/map-editor/buildings/${building.id}/routing-profile`;
+
+    const put = await request(app)
+      .put(url)
+      .set('Cookie', cookie)
+      .send({ routingProfile: { walkSpeedMps: 1.1, northOffsetDeg: -15 } });
+    expect(put.status).toBe(200);
+    expect(put.body.data.routingProfile).toEqual({
+      walkSpeedMps: 1.1,
+      northOffsetDeg: -15,
+    });
+
+    const get = await request(app).get(url).set('Cookie', cookie);
+    expect(get.status).toBe(200);
+    expect(get.body.data.routingProfile.walkSpeedMps).toBe(1.1);
+    // The effective profile layers the overrides over the defaults.
+    expect(get.body.data.effective.walkSpeedMps).toBe(1.1);
+    expect(get.body.data.effective.elevatorWaitSec).toBe(30);
+
+    const unknownKey = await request(app)
+      .put(url)
+      .set('Cookie', cookie)
+      .send({ routingProfile: { teleportSpeed: 9 } });
+    expect(unknownKey.status).toBe(422);
+    expect(unknownKey.body.message).toMatch(/teleportSpeed/);
+    // Structured too, so the editor can highlight the offending field rather
+    // than parsing a sentence.
+    expect(unknownKey.body.errors).toEqual([
+      expect.stringContaining('teleportSpeed'),
+    ]);
+
+    const zeroSpeed = await request(app)
+      .put(url)
+      .set('Cookie', cookie)
+      .send({ routingProfile: { walkSpeedMps: 0 } });
+    expect(zeroSpeed.status).toBe(422);
+
+    // The stored profile is untouched by a rejected write.
+    const unchanged = await prisma.building.findUnique({ where: { id: building.id } });
+    expect(unchanged.routingProfile).toEqual({ walkSpeedMps: 1.1, northOffsetDeg: -15 });
+
+    const cleared = await request(app)
+      .put(url)
+      .set('Cookie', cookie)
+      .send({ routingProfile: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.data.routingProfile).toBeNull();
   });
 });
 
