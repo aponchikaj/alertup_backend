@@ -744,6 +744,42 @@ describe('wayfinding API', () => {
     expect(route.totalDurationSec).toBeGreaterThan(0);
   });
 
+  test('route carries bilingual turn-by-turn instructions', async () => {
+    const { entrance, poi } = await seedMall();
+    const res = await request(app).get(
+      `/api/wayfinding/route?from=${entrance.id}&to=poi:${poi.id}`
+    );
+    expect(res.status).toBe(200);
+    const instructions = res.body.data.route.instructions;
+    expect(Array.isArray(instructions)).toBe(true);
+    expect(instructions[0].kind).toBe('depart');
+    expect(instructions.at(-1).kind).toBe('arrive');
+    expect(instructions.some((i) => i.kind === 'transit')).toBe(true);
+    for (const instruction of instructions) {
+      expect(instruction.text.en.trim()).not.toBe('');
+      expect(instruction.text.ka.trim()).not.toBe('');
+    }
+  });
+
+  test('?heading= phrases the opening instruction against the compass', async () => {
+    const { entrance, poi } = await seedMall();
+    const url = `/api/wayfinding/route?from=${entrance.id}&to=poi:${poi.id}`;
+    const plain = await request(app).get(url);
+    // The first leg runs due east on the map; facing north means turning right.
+    const facing = await request(app).get(`${url}&heading=0`);
+
+    expect(facing.status).toBe(200);
+    const opening = facing.body.data.route.instructions[0];
+    expect(opening.text.en).toMatch(/right/i);
+    expect(opening.text.en).not.toBe(
+      plain.body.data.route.instructions[0].text.en
+    );
+    // `kind` drives the arrow rotation on the shipped stepper — it must be the
+    // turn the text describes, not a straight-up `depart`.
+    expect(opening.kind).toBe('right');
+    expect(plain.body.data.route.instructions[0].kind).toBe('depart');
+  });
+
   test('accessible route falls back with a flag when only escalators exist', async () => {
     const { entrance, poi } = await seedMall();
     const res = await request(app).get(

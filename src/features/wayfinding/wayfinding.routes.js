@@ -468,6 +468,10 @@ router.get('/api/wayfinding/route', publicReadLimiter, async (req, res) => {
       // The ORIGIN-ADJUSTED overlay, so the warnings describe the same
       // restrictions the search actually ran under.
       overlay: context.overlay,
+      // Which way the visitor's phone says they are pointing, so the opening
+      // instruction can be "turn right, then go 20 m" instead of assuming
+      // they already face the first leg.
+      heading: parsed.heading,
     });
     // Also on the route itself: the frontend normalizes `route.closures`, and
     // a route handed to the AI or embedded as an alternative travels alone.
@@ -668,6 +672,7 @@ router.get('/api/wayfinding/evacuate', publicReadLimiter, async (req, res) => {
       preference: costOverlayName,
       tagConstraintsRelaxed,
       overlay: context.overlay,
+      heading: parsed.heading,
     });
     route.closures = closures;
 

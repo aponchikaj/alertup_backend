@@ -413,3 +413,59 @@ describe('assembleRoute', () => {
     expect('svgContent' in leanRoute.segments[0].floor).toBe(false);
   });
 });
+
+describe('assembleRoute instructions', () => {
+  test('every route carries a turn-by-turn feed', () => {
+    const graph = twoFloorGraph();
+    const route = assembleRoute(graph, FULL_PATH, {
+      destinationPoi: { id: 'p1', name: 'LC Waikiki', category: 'Apparel' },
+    });
+
+    expect(Array.isArray(route.instructions)).toBe(true);
+    expect(route.instructions.length).toBeGreaterThan(0);
+    expect(route.instructions[0].kind).toBe('depart');
+    expect(route.instructions.at(-1).kind).toBe('arrive');
+    expect(route.instructions.some((i) => i.kind === 'transit')).toBe(true);
+    expect(route.instructions.map((i) => i.index)).toEqual(
+      route.instructions.map((_, i) => i)
+    );
+    for (const instruction of route.instructions) {
+      expect(instruction.text.en.trim()).not.toBe('');
+      expect(instruction.text.ka.trim()).not.toBe('');
+    }
+  });
+
+  test('the instruction distances sum to the route total', () => {
+    const graph = twoFloorGraph();
+    const route = assembleRoute(graph, FULL_PATH);
+    const summed = route.instructions.reduce((total, i) => total + i.distanceM, 0);
+    expect(summed).toBeCloseTo(route.totalDistanceM, 5);
+  });
+
+  test('a heading changes how the departure is phrased', () => {
+    const graph = twoFloorGraph();
+    const plain = assembleRoute(graph, FULL_PATH);
+    // The first leg runs due east; facing map-north means turning right first.
+    const facing = assembleRoute(graph, FULL_PATH, { heading: 0 });
+
+    expect(facing.instructions[0].text.en).not.toBe(plain.instructions[0].text.en);
+    expect(facing.instructions[0].text.en).toMatch(/right/i);
+    // The arrow the stepper draws comes from `kind` alone, so it has to agree
+    // with the words: a `depart` here would point up over "Turn right".
+    expect(plain.instructions[0].kind).toBe('depart');
+    expect(facing.instructions[0].kind).toBe('right');
+  });
+
+  test('every walk step is claimed by at least one instruction', () => {
+    const graph = twoFloorGraph();
+    const route = assembleRoute(graph, FULL_PATH);
+    route.steps.forEach((step) => {
+      if (step.kind !== 'walk') return;
+      expect(
+        route.instructions.some(
+          (i) => i.kind !== 'transit' && i.kind !== 'arrive' && i.segmentIndex === step.segmentIndex
+        )
+      ).toBe(true);
+    });
+  });
+});

@@ -6,6 +6,7 @@ import {
   edgeDurationSec,
 } from './costModel.js';
 import { smoothSegment } from './smoothing.js';
+import { buildInstructions } from './instructions.js';
 
 const toStepNode = (node) => ({
   id: node.id,
@@ -174,6 +175,10 @@ export function pathEdges(graph, pathIds = []) {
  *     additive and NOT part of the `RouteProfile` union — display it as a
  *     secondary hint, never in place of `route.profile`.
  *   - overlay: B7's closure overlay `{edgeMultiplier, blockedEdgeIds, blockedNodeIds}`
+ *   - heading: the visitor's COMPASS bearing in degrees (0-359) when the device
+ *     gave us one, so the opening instruction can be phrased against which way
+ *     they are actually pointing rather than assuming they already face the
+ *     first leg. `profile.northOffsetDeg` relates it to map bearings.
  *   - lean: omit `floor.drawing` (embedded routes: alternatives, AI payloads)
  */
 export function assembleRoute(graph, pathIds, opts = {}) {
@@ -187,6 +192,7 @@ export function assembleRoute(graph, pathIds, opts = {}) {
     tagConstraintsRelaxed = false,
     preference = null,
     overlay = null,
+    heading = null,
     lean = false,
   } = opts;
 
@@ -428,7 +434,7 @@ export function assembleRoute(graph, pathIds, opts = {}) {
   const totalPx = builtSegments.reduce((sum, s) => sum + s.distancePx, 0);
   const metersKnown = builtSegments.every((s) => s.distanceMeters !== null);
 
-  return {
+  const route = {
     mode,
     origin: {
       nodeId: origin.id,
@@ -460,4 +466,16 @@ export function assembleRoute(graph, pathIds, opts = {}) {
     tagConstraintsRelaxed,
     warnings,
   };
+
+  // Turn-by-turn runs LAST, over the finished route: it reads the smoothed
+  // polylines, the per-segment metres and the transitions this function just
+  // produced, and reaches back into the graph for the POIs and floor drawings
+  // a lean route does not carry. Nothing above it changes.
+  route.instructions = buildInstructions(route, graph, {
+    profile: activeProfile,
+    heading: Number.isFinite(heading) ? heading : null,
+    scaleFor: scaleOf,
+  });
+
+  return route;
 }
