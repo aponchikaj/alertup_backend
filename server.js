@@ -40,6 +40,8 @@ import mapEditorRouter from './src/features/mapEditor/mapEditor.routes.js'
 import emergencyRouter from './src/features/emergency/emergency.routes.js'
 import realtimeRouter from './src/features/realtime/realtime.routes.js'
 import aiRouter from './src/features/ai/ai.routes.js'
+import agentRouter from './src/features/ai/agents/agent.routes.js'
+import evacuationBriefRouter from './src/features/ai/evacuationBrief.routes.js'
 
 const app = express();
 const PORT = config.port;
@@ -191,6 +193,8 @@ app.use(mapEditorRouter)
 app.use(emergencyRouter)
 app.use(realtimeRouter)
 app.use(aiRouter)
+app.use(agentRouter)
+app.use(evacuationBriefRouter)
 app.use(editorAssistantRouter)
 app.use(publicAssistantRouter)
 

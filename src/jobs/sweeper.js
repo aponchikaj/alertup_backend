@@ -7,6 +7,11 @@ import prisma from '../db/prisma.js';
 const SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 const STALE_INVITE_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
+// AI transcripts exist for memory and budgeting, and both only look back 24
+// hours, so a month is already generous. Conversations opened during an active
+// emergency are exempt — see below.
+export const AI_CONVERSATION_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
 async function sweep() {
   const now = new Date();
   try {
@@ -21,10 +26,25 @@ async function sweep() {
         expiresAt: { lt: new Date(now.getTime() - STALE_INVITE_AGE_MS) },
       },
     });
+    // Old AI conversations, messages following by cascade.
+    //
+    // emergencyId is null on an ordinary transcript and set on one opened
+    // while a building was being evacuated. The second kind is the only record
+    // of what the assistant told occupants during an incident, so it is never
+    // swept — it lives until the building itself is deleted.
+    await prisma.aiConversation.deleteMany({
+      where: {
+        emergencyId: null,
+        createdAt: { lt: new Date(now.getTime() - AI_CONVERSATION_RETENTION_MS) },
+      },
+    });
   } catch (err) {
     console.error('Sweeper error:', err.message);
   }
 }
+
+/** Run one sweep now. Used by startSweeper's timers and by operators/tests. */
+export const sweepOnce = sweep;
 
 let timer = null;
 

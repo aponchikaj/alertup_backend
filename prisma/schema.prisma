@@ -88,13 +88,14 @@ model User {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
-  ownedBuildings Building[]       @relation("BuildingOwner")
-  memberships    BuildingMember[]
-  invitesSent    BuildingInvite[] @relation("InviteSender")
-  verifications  Verification[]
-  scanEvents     ScanEvent[]
-  emergencies    EmergencyEvent[] @relation("EmergencyTriggeredBy")
-  reviews        Review[]
+  ownedBuildings  Building[]       @relation("BuildingOwner")
+  memberships     BuildingMember[]
+  invitesSent     BuildingInvite[] @relation("InviteSender")
+  verifications   Verification[]
+  scanEvents      ScanEvent[]
+  aiConversations AiConversation[]
+  emergencies     EmergencyEvent[] @relation("EmergencyTriggeredBy")
+  reviews         Review[]
 }
 
 model Building {
@@ -108,15 +109,16 @@ model Building {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
-  floors     Floor[]
-  nodes      Node[]
-  edges      Edge[]
-  roles      Role[]
-  members    BuildingMember[]
-  invites    BuildingInvite[]
-  emergencies EmergencyEvent[]
-  logs       Log[]
-  scanEvents ScanEvent[]
+  floors          Floor[]
+  nodes           Node[]
+  edges           Edge[]
+  roles           Role[]
+  members         BuildingMember[]
+  invites         BuildingInvite[]
+  emergencies     EmergencyEvent[]
+  logs            Log[]
+  scanEvents      ScanEvent[]
+  aiConversations AiConversation[]
 
   @@index([ownerId])
   @@index([name])
@@ -174,10 +176,10 @@ model BuildingInvite {
   acceptedById String?
   acceptedAt   DateTime?
   createdAt    DateTime     @default(now())
+  // partial unique (buildingId, lower(email)) WHERE status='PENDING' — raw SQL migration
 
   @@index([buildingId, status])
   @@index([email])
-  // partial unique (buildingId, lower(email)) WHERE status='PENDING' — raw SQL migration
 }
 
 model Floor {
@@ -222,9 +224,10 @@ model Node {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  poi       Poi?
-  edgesFrom Edge[] @relation("EdgeSource")
-  edgesTo   Edge[] @relation("EdgeTarget")
+  poi        Poi?
+  edgesFrom  Edge[]      @relation("EdgeSource")
+  edgesTo    Edge[]      @relation("EdgeTarget")
+  scanEvents ScanEvent[]
 
   @@index([floorId])
   @@index([buildingId])
@@ -325,11 +328,18 @@ model ScanEvent {
   building     Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
   userId       String?
   user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  // Which sticker was scanned. Nullable because every row written before this
+  // column existed has no answer, and SetNull because a re-drawn map deletes
+  // nodes while the scan history has to survive it. Without this, "which
+  // entrance do visitors actually use" is unanswerable.
+  nodeId       String?
+  node         Node?    @relation(fields: [nodeId], references: [id], onDelete: SetNull)
   buildingName String
   scannedAt    DateTime @default(now())
 
   @@index([userId, scannedAt(sort: Desc)])
   @@index([buildingId, scannedAt(sort: Desc)])
+  @@index([nodeId, scannedAt(sort: Desc)])
 }
 
 model Review {
@@ -357,4 +367,77 @@ model Report {
   reason    String?
   message   String?
   createdAt DateTime @default(now())
+}
+
+/**
+ * ============================================================================
+ * AI agent conversations.
+ * ----------------------------------------------------------------------------
+ * Persisted for three reasons, in descending order of weight:
+ * 1. Audit. After an incident an operator has to be able to answer "what did
+ * the assistant tell occupants?" Nothing else in the system records that.
+ * 2. Budget. Per-IP limits cannot express "this building has had enough
+ * today" — and a whole building behind one NAT shares a single IP, so the
+ * IP-shaped question is the wrong one.
+ * 3. Memory across turns, which is the least important of the three.
+ * Retention lives in jobs/sweeper.js: ordinary conversations are swept after
+ * 30 days, emergency ones are kept — they are the audit record.
+ * =========================================================================
+ */
+model AiConversation {
+  id      String @id @default(cuid())
+  agentId String
+
+  buildingId String?
+  building   Building? @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  // Null for anonymous visitors, who are most of the traffic: scan pages have
+  // no login and never will.
+  userId     String?
+  user       User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // Where the visitor scanned in, denormalized like ScanEvent.buildingName:
+  // the audit record must stay readable after the map is redrawn.
+  nodeId      String?
+  // Set when the conversation was opened while this emergency was ACTIVE. It
+  // is what makes a row an audit record rather than a transcript, so the
+  // sweeper keys retention on it.
+  emergencyId String?
+
+  locale    String   @default("en")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages AiMessage[]
+
+  @@index([buildingId, createdAt(sort: Desc)])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([emergencyId])
+}
+
+// One turn. Tool calls are rows here with role 'tool' rather than their own
+// model: they are read in sequence with the turns around them, and a separate
+// table would only add a join to every read.
+model AiMessage {
+  id             String         @id @default(cuid())
+  conversationId String
+  conversation   AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  // 'user' | 'assistant' | 'tool'
+  role    String
+  content String @db.Text
+
+  toolName String?
+  toolArgs Json?
+  toolOk   Boolean?
+
+  // Which provider actually answered — the fallback is invisible to the user
+  // by design, so without this an incident review cannot tell Gemini from Groq.
+  provider String?
+  model    String?
+  // True when the static localized fallback answered instead of a model.
+  fallback Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([conversationId, createdAt])
 }

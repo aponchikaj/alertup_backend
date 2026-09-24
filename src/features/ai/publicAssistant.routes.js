@@ -137,7 +137,7 @@ export const demoSystemPrompt = (locale) =>
     `Canvas: ${DEMO_CANVAS.width}x${DEMO_CANVAS.height} units, 50 units = 1 metre. The floor starts empty.`,
     '',
     'ARCHITECTURE RULES: doors ~50 units; typical room 200x150; align everything to a 25-unit grid; nothing may leave the canvas; rooms must not overlap; include an outer wall, at least one ENTRANCE and one EXIT icon.',
-    'CIRCULATION IS OPEN FLOOR, NOT A SHAPE: the empty background between rooms IS the corridor. NEVER output a room named "Corridor"/"Hall"/"Walkway" (the server deletes them) — instead leave a continuous band of empty floor at least 100 units wide connecting the ENTRANCE, every room and the EXIT.',
+    'CIRCULATION IS OPEN FLOOR, NOT A SHAPE: the empty background between rooms IS the corridor. NEVER output a room named "Corridor"/"Hallway"/"Walkway" (the server deletes them) — instead leave a continuous band of empty floor at least 100 units wide connecting the ENTRANCE, every room and the EXIT.',
     '',
     'Output the design as ONE fenced ```json block: {"version":1,"shapes":[...]} where each shape is one of:',
     `- {"kind":"wall","points":[x1,y1,x2,y2,...],"thickness":6}`,
