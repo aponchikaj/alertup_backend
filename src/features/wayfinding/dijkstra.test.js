@@ -457,6 +457,48 @@ describe('profile-driven routing', () => {
     expect(Number.isFinite(result.cost)).toBe(true);
   });
 
+  test('a SECONDARY-ranked edge is avoided when a PRIMARY alternative exists at comparable length', () => {
+    // Two same-floor detours of comparable physical length — PRIMARY totals
+    // 12 m, SECONDARY totals 10 m (real lengths, via `lengthM`) — but the
+    // SECONDARY route is cheaper in raw pixel weight, so plain distance-based
+    // routing picks it. `makeCostFn`'s secondaryRankMultiplier (B2) prices
+    // seconds, not pixels, so under a resolved profile the extra 20% length
+    // of the PRIMARY corridor is still cheaper than SECONDARY's 1.5x
+    // penalty, and the router must switch to it — service corridors and
+    // back-of-house routes should lose to a public one unless there is no
+    // real PRIMARY alternative.
+    const graph = buildGraph({
+      nodes: [
+        { id: 'start', x: 0, y: 0 },
+        { id: 'p1', x: 50, y: 0 },
+        { id: 'goal', x: 100, y: 0, type: 'POI' },
+        { id: 's1', x: 50, y: 50 },
+      ],
+      edges: [
+        ['start', 'p1', { rank: 'PRIMARY', weight: 60, lengthM: 6 }],
+        ['p1', 'goal', { rank: 'PRIMARY', weight: 60, lengthM: 6 }],
+        ['start', 's1', { rank: 'SECONDARY', weight: 50, lengthM: 5 }],
+        ['s1', 'goal', { rank: 'SECONDARY', weight: 50, lengthM: 5 }],
+      ],
+    });
+
+    // Without a cost function, plain pixel weights pick the cheaper-in-px
+    // SECONDARY route (100 vs 120).
+    expect(shortestPath(graph, 'start', { targetId: 'goal' }).path).toEqual([
+      'start',
+      's1',
+      'goal',
+    ]);
+
+    // With the profile's costFn (seconds, rank multiplier included), the
+    // PRIMARY route wins: 12 m / 1.4 m/s ≈ 8.57 s vs (10 m / 1.4 m/s) x 1.5
+    // ≈ 10.71 s for SECONDARY.
+    const result = findRoute(graph, 'start', 'goal', {
+      profile: resolveProfile(null, 'walk'),
+    });
+    expect(result.path).toEqual(['start', 'p1', 'goal']);
+  });
+
   test('an invalid profile shape throws instead of silently corrupting routing', () => {
     const graph = buildGraph({
       nodes: [{ id: 'a' }, { id: 'b' }],

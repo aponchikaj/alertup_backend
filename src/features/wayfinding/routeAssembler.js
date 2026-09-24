@@ -5,6 +5,7 @@ import {
   normalizeProfile,
   edgeDurationSec,
 } from './costModel.js';
+import { smoothSegment } from './smoothing.js';
 
 const toStepNode = (node) => ({
   id: node.id,
@@ -254,6 +255,10 @@ export function assembleRoute(graph, pathIds, opts = {}) {
       index,
       floor: floorSummary(floor, lean),
       nodes: segmentNodes.map(toStepNode),
+      // Drawing-only geometry: a straight-line-where-possible polyline built
+      // from the floor's drawn walls. Distances below stay NODE-based — see
+      // the module header on `smoothing.js`.
+      points: smoothSegment(segmentNodes, floor).points,
       distancePx,
       distanceMeters: pxToMeters(distancePx, floor),
       distanceM: metersFromPx(distancePx, floor),

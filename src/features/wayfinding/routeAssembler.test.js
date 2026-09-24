@@ -351,6 +351,45 @@ describe('assembleRoute', () => {
     expect(assembleRoute(twoFloorGraph(), FULL_PATH, {}).scaleAssumed).toBe(false);
   });
 
+  test('segments carry points: unsmoothed node polyline when the floor has no wall/outline geometry', () => {
+    const graph = makeGraph();
+    const route = assembleRoute(graph, ['a', 'b', 'esc1', 'esc4', 'shop'], {});
+
+    expect(route.segments[0].points).toEqual([
+      { x: 0, y: 0, nodeId: 'a' },
+      { x: 300, y: 0, nodeId: 'b' },
+      { x: 300, y: 100, nodeId: 'esc1' },
+    ]);
+    expect(route.segments[1].points).toEqual([
+      { x: 300, y: 100, nodeId: 'esc4' },
+      { x: 500, y: 100, nodeId: 'shop' },
+    ]);
+    // Distances stay node-based: smoothing never touches them.
+    expect(route.segments[0].distancePx).toBe(400);
+  });
+
+  test('segments carry points: a wall keeps the corner but distances stay node-based', () => {
+    const graph = twoFloorGraph();
+    // A wall crossing the diagonal from a (0,0) to esc1 (300,100) — but not
+    // the vertical b (300,0) -> esc1 (300,100) leg — forces the corner at b
+    // to survive smoothing; the drawing lives on floor-1, where segment 0
+    // walks.
+    graph.floors.get('floor-1').drawing = {
+      shapes: [{ kind: 'wall', points: [150, -50, 150, 150], thickness: 4 }],
+    };
+    const route = assembleRoute(graph, FULL_PATH, {});
+
+    // a -> esc1 direct is blocked by the wall at x=150, so the corner at b
+    // must survive.
+    expect(route.segments[0].points.map((p) => p.nodeId)).toEqual(['a', 'b', 'esc1']);
+    // Segment 1 (floor-2) has no drawing, so it stays unsmoothed.
+    expect(route.segments[1].points.map((p) => p.nodeId)).toEqual(['esc2', 'shop']);
+
+    // Distances are unchanged by the drawing being present.
+    expect(route.segments[0].distancePx).toBe(400);
+    expect(route.segments[0].distanceM).toBe(40);
+  });
+
   test('pathEdges resolves the traversed adjacency entries and lean drops the drawing', () => {
     const graph = twoFloorGraph();
     const walked = pathEdges(graph, FULL_PATH);
