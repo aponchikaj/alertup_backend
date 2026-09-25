@@ -2,6 +2,7 @@ import prisma from '../../../../db/prisma.js';
 import { getGraph } from '../../../wayfinding/graphCache.js';
 import { findRoute, findEvacuationRoute } from '../../../wayfinding/dijkstra.js';
 import { assembleRoute } from '../../../wayfinding/routeAssembler.js';
+import { recordRouteRequest } from '../../../wayfinding/routeRequests.js';
 import { defineTool } from '../toolRegistry.js';
 
 /* ============================================================================
@@ -106,18 +107,50 @@ const find_nearest_exit = defineTool({
   },
   handler: async (ctx, args) => {
     // No origin means no route. Saying so is the whole point: the alternative
-    // is a model describing an exit it has no basis for.
+    // is a model describing an exit it has no basis for. Nothing is recorded
+    // here — same as an HTTP call site never enqueuing a write before its
+    // origin resolves, this isn't a real route request without one.
     if (!ctx.nodeId) return { found: false, reason: 'unknown_position' };
 
     const graph = await getGraph(ctx.buildingId);
     if (!graph.nodes.has(ctx.nodeId)) return { found: false, reason: 'unknown_position' };
 
+    // EVACUATION-mode rows record 'wheelchair' or 'emergency' everywhere else
+    // in this table (the HTTP /evacuate endpoint, the QR scan route) — never
+    // 'walk', which is the WAYFINDING-mode default and means a different
+    // profile entirely on this shared column.
+    const profile = args.accessible ? 'wheelchair' : 'emergency';
     const result = findEvacuationRoute(graph, ctx.nodeId, { accessible: Boolean(args.accessible) });
-    if (!result) return { found: false, reason: 'no_exit' };
+    if (!result) {
+      recordRouteRequest({
+        buildingId: ctx.buildingId,
+        fromNodeId: ctx.nodeId,
+        to: null,
+        profile,
+        mode: 'EVACUATION',
+        src: 'ai',
+        found: false,
+      });
+      return { found: false, reason: 'no_exit' };
+    }
 
     const exitNode = graph.nodes.get(result.path[result.path.length - 1]);
+    const summary = summarizeRoute(graph, result.path, {
+      mode: 'EVACUATION',
+      accessible: Boolean(args.accessible),
+    });
+    recordRouteRequest({
+      buildingId: ctx.buildingId,
+      fromNodeId: ctx.nodeId,
+      to: null,
+      profile,
+      mode: 'EVACUATION',
+      src: 'ai',
+      found: true,
+      distanceM: summary.distanceMeters ?? null,
+    });
     return {
-      ...summarizeRoute(graph, result.path, { mode: 'EVACUATION', accessible: Boolean(args.accessible) }),
+      ...summary,
       exitName: exitNode?.label || 'the emergency exit',
       exitFloorNumber: exitNode?.floorNumber ?? null,
     };
@@ -137,7 +170,12 @@ const get_route = defineTool({
     },
   },
   handler: async (ctx, args) => {
+    // No origin at all: there is no `from`, so this can never become a real
+    // route request — same as an HTTP call site never enqueuing a write
+    // before the origin resolves.
     if (!ctx.nodeId) return { found: false, reason: 'unknown_position' };
+
+    const profile = args.accessible ? 'wheelchair' : 'walk';
 
     let targetNodeId = args.toNodeId || null;
     let destinationPoi = null;
@@ -148,29 +186,87 @@ const get_route = defineTool({
         where: { id: args.toPoiId, node: { buildingId: ctx.buildingId } },
         select: { id: true, name: true, nodeId: true },
       });
-      if (!poi) return { found: false, reason: 'unknown_destination' };
+      if (!poi) {
+        // The origin (ctx.nodeId) IS known and valid here, and a destination
+        // WAS attempted — this is the AI-concierge equivalent of the HTTP
+        // `/route` handler's `resolveDestination` failure (a `poi:<id>`
+        // token that doesn't resolve), which IS recorded there. The AI
+        // surface is the one most likely to receive a mistyped or invented
+        // destination, which makes this exactly the row worth keeping, not
+        // dropping. `to` is prefixed the same way the HTTP `to` column
+        // already stores a `poi:<id>` token, so a reader of this table sees
+        // a self-describing "what was being looked up" rather than a bare id.
+        recordRouteRequest({
+          buildingId: ctx.buildingId,
+          fromNodeId: ctx.nodeId,
+          to: `poi:${args.toPoiId}`,
+          profile,
+          mode: 'WAYFINDING',
+          src: 'ai',
+          found: false,
+        });
+        return { found: false, reason: 'unknown_destination' };
+      }
       targetNodeId = poi.nodeId;
       destinationPoi = poi;
     }
 
+    // Neither `toPoiId` nor `toNodeId` was given at all — no destination was
+    // ever attempted, the same shape as an HTTP request with no `to` param
+    // at all (rejected before the origin is even looked up, and never
+    // recorded there either).
     if (!targetNodeId) return { found: false, reason: 'unknown_destination' };
 
     const graph = await getGraph(ctx.buildingId);
     if (!graph.nodes.has(targetNodeId) || !graph.nodes.has(ctx.nodeId)) {
+      // A concrete node id was given (directly, or resolved from a poi above)
+      // but it isn't in this building's graph — the AI-tool equivalent of the
+      // HTTP handler's "Destination is not in this building" 404, which is
+      // also recorded there.
+      recordRouteRequest({
+        buildingId: ctx.buildingId,
+        fromNodeId: ctx.nodeId,
+        to: targetNodeId,
+        profile,
+        mode: 'WAYFINDING',
+        src: 'ai',
+        found: false,
+      });
       return { found: false, reason: 'unknown_destination' };
     }
-
     const result = findRoute(graph, ctx.nodeId, targetNodeId, {
       accessible: Boolean(args.accessible),
     });
-    if (!result) return { found: false, reason: 'no_route' };
-
-    return {
-      ...summarizeRoute(graph, result.path, {
+    if (!result) {
+      recordRouteRequest({
+        buildingId: ctx.buildingId,
+        fromNodeId: ctx.nodeId,
+        to: targetNodeId,
+        profile,
         mode: 'WAYFINDING',
-        accessible: Boolean(args.accessible),
-        destinationPoi,
-      }),
+        src: 'ai',
+        found: false,
+      });
+      return { found: false, reason: 'no_route' };
+    }
+
+    const summary = summarizeRoute(graph, result.path, {
+      mode: 'WAYFINDING',
+      accessible: Boolean(args.accessible),
+      destinationPoi,
+    });
+    recordRouteRequest({
+      buildingId: ctx.buildingId,
+      fromNodeId: ctx.nodeId,
+      to: targetNodeId,
+      profile,
+      mode: 'WAYFINDING',
+      src: 'ai',
+      found: true,
+      distanceM: summary.distanceMeters ?? null,
+    });
+    return {
+      ...summary,
       destinationName: destinationPoi?.name ?? graph.nodes.get(targetNodeId)?.label ?? null,
     };
   },

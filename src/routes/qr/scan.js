@@ -17,6 +17,7 @@ import {
 } from '../../features/wayfinding/closures.js';
 import { calculateDistance } from '../../features/wayfinding/dijkstra.js';
 import { publish } from '../../features/realtime/broadcaster.js';
+import { recordRouteRequest } from '../../features/wayfinding/routeRequests.js';
 
 const router = express.Router();
 
@@ -167,6 +168,21 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
       ? assembleRoute(graph, evac.path, { mode: 'EVACUATION', overlay })
       : null;
     if (route) route.closures = closures;
+
+    // B13: every scan is a route request too — this is the highest-traffic
+    // call site (every printed sticker in the field), always an evacuation
+    // search from the scanned node with no explicit `to`.
+    recordRouteRequest({
+      buildingId,
+      fromNodeId: node.id,
+      to: null,
+      profile: 'emergency',
+      mode: 'EVACUATION',
+      src: 'scan',
+      found,
+      distanceM: route?.totalDistanceM ?? null,
+      durationSec: route?.totalDurationSec ?? null,
+    });
 
     let activeEmergencyId = null;
     if (building.emergencyMode) {

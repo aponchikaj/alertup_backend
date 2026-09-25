@@ -21,6 +21,7 @@ import { resolveDestination, parseDestinations, MAX_DESTINATIONS } from './desti
 import { resolveProfile, makeCostFn } from './costModel.js';
 import { planMultiStopWithFallbacks } from './multiStop.js';
 import { assembleMultiStopRoute } from './multiStopRouteAssembler.js';
+import { recordRouteRequest } from './routeRequests.js';
 
 const router = Router();
 
@@ -526,19 +527,38 @@ function countRequestedDestinations(rawTo) {
  * routing decisions themselves.
  */
 async function assembleMultiStopResponse(res, { from, origin, parsed, destinations }) {
+  // Every stop the caller actually asked for, IN REQUEST ORDER — see B13's
+  // report for why `to` records this JSON-encoded list (not just the final
+  // destination) for a multi-stop request.
+  const requestedTo = JSON.stringify(destinations);
+  const recordFailure = (profile) =>
+    recordRouteRequest({
+      buildingId: origin.buildingId,
+      fromNodeId: from,
+      to: requestedTo,
+      profile,
+      mode: 'WAYFINDING',
+      src: parsed.src,
+      found: false,
+    });
+
   const resolvedStops = [];
   for (let i = 0; i < destinations.length; i += 1) {
     // Sequential rather than Promise.all: keeps error reporting
     // ("destination #N") aligned with request order, and at most 8 of these
     // is not worth the added complexity of parallelizing.
     const resolved = await resolveDestination(origin.buildingId, destinations[i]);
-    if (!resolved.ok) return fail(res, resolved.status, resolved.message);
+    if (!resolved.ok) {
+      recordFailure(parsed.name);
+      return fail(res, resolved.status, resolved.message);
+    }
     resolvedStops.push({ ...resolved, requestIndex: i });
   }
 
   const graph = await getGraph(origin.buildingId);
   for (const stop of resolvedStops) {
     if (!graph.nodes.has(stop.nodeId)) {
+      recordFailure(parsed.name);
       return fail(res, 404, `Destination #${stop.requestIndex + 1} is not in this building.`);
     }
   }
@@ -552,7 +572,10 @@ async function assembleMultiStopResponse(res, { from, origin, parsed, destinatio
     overlay,
     { originId: from }
   );
-  if (!context.ok) return fail(res, context.status, context.error);
+  if (!context.ok) {
+    recordFailure(parsed.name);
+    return fail(res, context.status, context.error);
+  }
 
   const accessible = context.name === 'wheelchair';
   const targetIds = resolvedStops.map((s) => s.nodeId);
@@ -570,6 +593,7 @@ async function assembleMultiStopResponse(res, { from, origin, parsed, destinatio
   );
 
   if (!plan.ok) {
+    recordFailure(context.name);
     const failedStop = resolvedStops[plan.failedIndex];
     const node = graph.nodes.get(failedStop.nodeId);
     const name = failedStop.poi?.name ?? node?.poi?.name ?? null;
@@ -592,7 +616,17 @@ async function assembleMultiStopResponse(res, { from, origin, parsed, destinatio
   });
   route.closures = closures;
 
-  // B13: recordRouteRequest({ buildingId: origin.buildingId, profile: context.name, src: parsed.src, ... })
+  recordRouteRequest({
+    buildingId: origin.buildingId,
+    fromNodeId: from,
+    to: requestedTo,
+    profile: context.name,
+    mode: 'WAYFINDING',
+    src: parsed.src,
+    found: true,
+    distanceM: route.totalDistanceM,
+    durationSec: route.totalDurationSec,
+  });
 
   return ok(res, { data: { route, closures } });
 }
@@ -634,13 +668,27 @@ router.get('/api/wayfinding/route', publicReadLimiter, async (req, res) => {
     }
 
     const rawTo = destinations[0];
+    const recordFailure = (profile) =>
+      recordRouteRequest({
+        buildingId: origin.buildingId,
+        fromNodeId: from,
+        to: rawTo,
+        profile,
+        mode: 'WAYFINDING',
+        src: parsed.src,
+        found: false,
+      });
 
     const resolved = await resolveDestination(origin.buildingId, rawTo);
-    if (!resolved.ok) return fail(res, resolved.status, resolved.message);
+    if (!resolved.ok) {
+      recordFailure(parsed.name);
+      return fail(res, resolved.status, resolved.message);
+    }
     const to = resolved.nodeId;
 
     const graph = await getGraph(origin.buildingId);
     if (!graph.nodes.has(to)) {
+      recordFailure(parsed.name);
       return fail(res, 404, 'Destination is not in this building.');
     }
 
@@ -670,7 +718,10 @@ router.get('/api/wayfinding/route', publicReadLimiter, async (req, res) => {
       overlay,
       { originId: from }
     );
-    if (!context.ok) return fail(res, context.status, context.error);
+    if (!context.ok) {
+      recordFailure(parsed.name);
+      return fail(res, context.status, context.error);
+    }
 
     const accessible = context.name === 'wheelchair';
 
@@ -689,6 +740,7 @@ router.get('/api/wayfinding/route', publicReadLimiter, async (req, res) => {
         })
     );
     if (!result) {
+      recordFailure(context.name);
       return fail(res, 404, 'No route found between these points.');
     }
 
@@ -712,7 +764,17 @@ router.get('/api/wayfinding/route', publicReadLimiter, async (req, res) => {
     // a route handed to the AI or embedded as an alternative travels alone.
     route.closures = closures;
 
-    // B13: recordRouteRequest({ buildingId: origin.buildingId, profile: context.name, src: parsed.src, ... })
+    recordRouteRequest({
+      buildingId: origin.buildingId,
+      fromNodeId: from,
+      to: rawTo,
+      profile: context.name,
+      mode: 'WAYFINDING',
+      src: parsed.src,
+      found: true,
+      distanceM: route.totalDistanceM,
+      durationSec: route.totalDurationSec,
+    });
 
     return ok(res, { data: { route, closures } });
   } catch (err) {
@@ -750,6 +812,18 @@ router.get('/api/wayfinding/evacuate', publicReadLimiter, async (req, res) => {
     });
     if (!origin) return fail(res, 404, 'Origin node not found.');
 
+    const wheelchairRequestedEarly = parsed.name === 'wheelchair';
+    const recordFailure = () =>
+      recordRouteRequest({
+        buildingId: origin.buildingId,
+        fromNodeId: from,
+        to: null,
+        profile: wheelchairRequestedEarly ? 'wheelchair' : 'emergency',
+        mode: 'EVACUATION',
+        src: parsed.src,
+        found: false,
+      });
+
     const graph = await getGraph(origin.buildingId);
 
     // `contextName` is always 'emergency': visibility, blockedTransit and
@@ -768,7 +842,10 @@ router.get('/api/wayfinding/evacuate', publicReadLimiter, async (req, res) => {
       overlay,
       { originId: from }
     );
-    if (!context.ok) return fail(res, context.status, context.error);
+    if (!context.ok) {
+      recordFailure();
+      return fail(res, context.status, context.error);
+    }
 
     const wheelchairRequested = parsed.name === 'wheelchair';
     const explicitProfileName =
@@ -891,6 +968,7 @@ router.get('/api/wayfinding/evacuate', publicReadLimiter, async (req, res) => {
       searchCostFn = attempt.costFn;
     }
     if (!result) {
+      recordFailure();
       return fail(res, 404, 'No exit route found from this location.');
     }
 
@@ -940,7 +1018,17 @@ router.get('/api/wayfinding/evacuate', publicReadLimiter, async (req, res) => {
       alternative.route.closures = closures;
     }
 
-    // B13: recordRouteRequest({ buildingId: origin.buildingId, profile: route.profile, src: parsed.src, ... })
+    recordRouteRequest({
+      buildingId: origin.buildingId,
+      fromNodeId: from,
+      to: null,
+      profile: wheelchairRequested ? 'wheelchair' : 'emergency',
+      mode: 'EVACUATION',
+      src: parsed.src,
+      found: true,
+      distanceM: route.totalDistanceM,
+      durationSec: route.totalDurationSec,
+    });
 
     return ok(res, { data: { route, closures } });
   } catch (err) {

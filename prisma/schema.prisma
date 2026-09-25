@@ -402,11 +402,27 @@ model Closure {
 // One routing computation, for quality/analytics (success rate, distance
 // distribution, which profiles get used) — deliberately lean, no PII beyond
 // what src/profile/mode already imply.
+// What visitors actually asked for (B13): every /route, /evacuate, QR scan
+// and AI-tool route search, success or failure — a failed row (found:false)
+// is the most valuable one, since it is how an owner learns people keep
+// asking for somewhere unreachable. Written via
+// src/features/wayfinding/routeRequests.js#recordRouteRequest, off the
+// response path through the analytics queue; never call prisma directly for
+// this table.
 model RouteRequest {
-  id          String   @id @default(cuid())
-  buildingId  String
-  building    Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
-  fromNodeId  String?
+  id         String   @id @default(cuid())
+  buildingId String
+  building   Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  fromNodeId String?
+  // The destination(s) requested. TWO SHAPES share this one column:
+  //   - a single-destination request stores the raw token as given: a node
+  //     id, a `poi:<poiId>` token, or an `ext:<code>` token.
+  //   - a multi-stop request (more than one `to` on the same call) stores
+  //     `JSON.stringify([...])` — EVERY requested token, IN REQUEST ORDER
+  //     (not the solved visiting order `multiStop.js` may pick). A reader
+  //     must `JSON.parse` when the value starts with `[`; this is not
+  //     ambiguous in practice because a destination token never begins with
+  //     `[`, but it IS a convention to know rather than a schema guarantee.
   to          String?
   profile     String
   mode        String
