@@ -951,6 +951,166 @@ describe('wayfinding API', () => {
     expect(res.body.data.route.accessibleRouteUnavailable).toBe(true);
   });
 
+  describe('multi-stop routing (B12)', () => {
+    /** Three colinear stops off one entrance, so "sensible order" is
+     *  unambiguous: nearest first, farthest last, never backtracking. */
+    async function seedLine() {
+      const seeded = await createOwnerWithBuilding();
+      const { building } = seeded;
+      const floor = await createFloor(building.id, { floorNumber: 1, scalePixelsPerMeter: 10 });
+      const entrance = await createNode(building.id, floor.id, { x: 0, y: 0, type: 'ENTRANCE' });
+      const near = await createNode(building.id, floor.id, { x: 50, y: 0, type: 'POI' });
+      const far = await createNode(building.id, floor.id, { x: 200, y: 0, type: 'POI' });
+      const island = await createNode(building.id, floor.id, { x: 900, y: 0, type: 'POI' }); // no edges: unreachable
+      await connectNodes(entrance, near);
+      await connectNodes(near, far);
+      const nearPoi = await prisma.poi.create({ data: { nodeId: near.id, name: 'Near Shop' } });
+      const farPoi = await prisma.poi.create({ data: { nodeId: far.id, name: 'Far Shop' } });
+      const islandPoi = await prisma.poi.create({ data: { nodeId: island.id, name: 'Stranded Kiosk' } });
+      return { ...seeded, entrance, near, far, island, nearPoi, farPoi, islandPoi };
+    }
+
+    test('a single `to` produces a payload with no legs/stops/stopIndex — byte-identical to a plain point-to-point route', async () => {
+      const { entrance, poi } = await seedMall();
+      const res = await request(app).get(
+        `/api/wayfinding/route?from=${entrance.id}&to=poi:${poi.id}`
+      );
+      expect(res.status).toBe(200);
+      const route = res.body.data.route;
+      expect(route.legs).toBeUndefined();
+      expect(route.stops).toBeUndefined();
+      // Per-key, not `arrayContaining` (which is satisfied the moment EITHER
+      // key is absent) — a regression that reintroduced only one of the two
+      // must still fail this test.
+      expect(Object.hasOwn(route, 'legs')).toBe(false);
+      expect(Object.hasOwn(route, 'stops')).toBe(false);
+      for (const instruction of route.instructions) {
+        expect(instruction.stopIndex).toBeUndefined();
+      }
+    });
+
+    test('to=a&to=b visits them in the optimized order, not the request order', async () => {
+      const { entrance, near, far, nearPoi, farPoi } = await seedLine();
+      // Requested far-then-near; the sensible walk is near-then-far (no
+      // backtracking past the shop the visitor already reached).
+      const res = await request(app).get(
+        `/api/wayfinding/route?from=${entrance.id}&to=${far.id}&to=${near.id}`
+      );
+      expect(res.status).toBe(200);
+      const route = res.body.data.route;
+
+      expect(route.legs).toHaveLength(2);
+      expect(route.legs.map((leg) => leg.toNodeId)).toEqual([near.id, far.id]);
+      expect(route.legs[0].poi).toMatchObject({ id: nearPoi.id, name: 'Near Shop' });
+      expect(route.legs[1].poi).toMatchObject({ id: farPoi.id, name: 'Far Shop' });
+
+      expect(route.stops).toHaveLength(2);
+      expect(route.stops.map((s) => s.nodeId)).toEqual([near.id, far.id]);
+      expect(route.stops[0].stopIndex).toBe(0);
+      expect(route.stops[1].stopIndex).toBe(1);
+      expect(route.stops[1].distanceFromStartM).toBeGreaterThan(route.stops[0].distanceFromStartM);
+
+      // The whole trip still renders like any other route: one continuous
+      // path ending at the LAST stop visited (far), not the last one typed.
+      expect(route.destination.nodeId).toBe(far.id);
+      expect(route.mode).toBe('WAYFINDING');
+
+      // The final stop is always the route's real destination, so it gets a
+      // real, localized arrive instruction carrying its stopIndex.
+      const arrive = route.instructions.at(-1);
+      expect(arrive.kind).toBe('arrive');
+      expect(arrive.stopIndex).toBe(1);
+    });
+
+    test('an unreachable stop 404s naming it, rather than silently dropping it from the plan', async () => {
+      const { entrance, near, island, islandPoi } = await seedLine();
+      const res = await request(app).get(
+        `/api/wayfinding/route?from=${entrance.id}&to=${near.id}&to=${island.id}`
+      );
+      expect(res.status).toBe(404);
+      expect(res.body.message).toContain(islandPoi.name);
+    });
+
+    test('more than 8 destinations is refused outright (422), not silently truncated', async () => {
+      const { entrance, near, far } = await seedLine();
+      // Alternating ids so no two ADJACENT `to`s are identical — otherwise
+      // the same adjacent-duplicate collapsing `parseDestinations` applies
+      // would hide the overflow this test exists to catch.
+      const manyTo = Array.from({ length: 9 }, (_, i) => `to=${i % 2 === 0 ? near.id : far.id}`).join(
+        '&'
+      );
+      const res = await request(app).get(`/api/wayfinding/route?from=${entrance.id}&${manyTo}`);
+      expect(res.status).toBe(422);
+    });
+
+    test('accessible=true with one inaccessible leg falls back for the WHOLE plan and warns, rather than 404ing', async () => {
+      // seedMall's only floor1<->floor4 connector is an inaccessible
+      // escalator; exit1 sits on floor1 (an ordinary accessible edge from
+      // entrance), the POI sits on floor4 (only reachable via that
+      // escalator). Under strict wheelchair routing, the second leg has no
+      // step-free path at all — the whole PLAN must relax, not just that leg.
+      const { entrance, exit1, shopNode, poi } = await seedMall();
+      const res = await request(app).get(
+        `/api/wayfinding/route?from=${entrance.id}&to=${exit1.id}&to=poi:${poi.id}&accessible=true`
+      );
+      expect(res.status).toBe(200);
+      const route = res.body.data.route;
+
+      // A route, not a 404: the visitor still needs to get there, so they are
+      // routed and warned, exactly like a single-destination wheelchair
+      // request under the same topology would be.
+      expect(route.accessible).toBe(true);
+      expect(route.accessibleRouteUnavailable).toBe(true);
+      expect(route.legs).toHaveLength(2);
+      expect(route.legs[1].toNodeId).toBe(shopNode.id);
+
+      // The warning names which floors and how far in, same as a
+      // single-destination accessible route reports it.
+      const inaccessible = route.warnings.filter((w) => w.code === 'INACCESSIBLE_STEP');
+      expect(inaccessible.length).toBeGreaterThan(0);
+      expect(inaccessible[0]).toMatchObject({
+        segmentIndex: expect.any(Number),
+        distanceFromStartM: expect.any(Number),
+      });
+    });
+
+    test('accessible=true + excludeTags relax cumulatively for the whole plan, same as a single destination', async () => {
+      // Tag the only floor1<->floor4 connector 'service' AND leave it
+      // inaccessible (seedMall's default): excluding the tag alone is not
+      // enough for the whole plan to succeed, so accessibility must drop
+      // too — and both flags must say so, exactly like the existing
+      // single-destination cumulative-relaxation test above.
+      const { entrance, exit1, shopNode, poi } = await seedMall();
+      const escalatorEdge = await prisma.edge.findFirst({ where: { transitType: 'ESCALATOR' } });
+      await prisma.edge.update({ where: { id: escalatorEdge.id }, data: { tags: ['service'] } });
+
+      const res = await request(app).get(
+        `/api/wayfinding/route?from=${entrance.id}&to=${exit1.id}&to=poi:${poi.id}` +
+          `&accessible=true&excludeTags=service`
+      );
+      expect(res.status).toBe(200);
+      const route = res.body.data.route;
+      expect(route.tagConstraintsRelaxed).toBe(true);
+      expect(route.accessibleRouteUnavailable).toBe(true);
+      expect(route.legs[1].toNodeId).toBe(shopNode.id);
+    });
+
+    test('a destination requested twice (a round trip) is walked in request order, never collapsed adjacent', async () => {
+      const { entrance, near, far } = await seedLine();
+      // far, then back near, then far again: a genuine round trip. If the
+      // ordering optimizer ran at all, it would see two zero-distance copies
+      // of `far` and place them next to each other, silently dropping the
+      // detour back through `near` in between.
+      const res = await request(app).get(
+        `/api/wayfinding/route?from=${entrance.id}&to=${far.id}&to=${near.id}&to=${far.id}`
+      );
+      expect(res.status).toBe(200);
+      const route = res.body.data.route;
+      expect(route.legs.map((leg) => leg.toNodeId)).toEqual([far.id, near.id, far.id]);
+      expect(route.stops.map((s) => s.nodeId)).toEqual([far.id, near.id, far.id]);
+    });
+  });
+
   test('evacuation route finds nearest exit', async () => {
     const { entrance, exit1 } = await seedMall();
     const res = await request(app).get(`/api/wayfinding/evacuate?from=${entrance.id}`);

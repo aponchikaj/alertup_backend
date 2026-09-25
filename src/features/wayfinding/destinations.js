@@ -22,7 +22,9 @@
 import prisma from '../../db/prisma.js';
 import { isId } from '../../utils/ids.js';
 
-const MAX_DESTINATIONS = 8;
+/** Exported so callers can reject an overlong request explicitly (422)
+ *  instead of relying on `parseDestinations`'s silent truncation below. */
+export const MAX_DESTINATIONS = 8;
 
 const poiSummary = (poi) => (poi ? { id: poi.id, name: poi.name, category: poi.category } : null);
 
@@ -80,8 +82,14 @@ export async function resolveDestination(buildingId, raw) {
  * duplicates collapse (a client re-sending the same stop twice in a row);
  * non-adjacent repeats (a round trip back through an earlier stop) are kept.
  *
- * Multi-destination routing itself is B12 — today's callers only ever look
- * at `[0]` — but the parsing is shared groundwork for it.
+ * Multi-destination routing (B12) is `wayfinding.routes.js`'s job: it walks
+ * every entry through `resolveDestination`, then `multiStop.js` orders and
+ * routes them. This function only ever parses the query into tokens — it is
+ * `multiStop.js`'s `planMultiStop` that honours the "non-adjacent repeats are
+ * a round trip" promise above: a repeated destination disables its geometric
+ * ordering heuristic (which has no notion of identity and would otherwise
+ * place two occurrences of the SAME node adjacent) and walks the request in
+ * the exact order given instead.
  *
  * @param {{to?: string|string[]}} query `req.query`
  * @returns {string[]} at most 8 entries

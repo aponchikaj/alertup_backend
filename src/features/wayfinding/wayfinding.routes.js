@@ -17,8 +17,10 @@ import {
   applyOverlay,
   publicClosure,
 } from './closures.js';
-import { resolveDestination, parseDestinations } from './destinations.js';
+import { resolveDestination, parseDestinations, MAX_DESTINATIONS } from './destinations.js';
 import { resolveProfile, makeCostFn } from './costModel.js';
+import { planMultiStopWithFallbacks } from './multiStop.js';
+import { assembleMultiStopRoute } from './multiStopRouteAssembler.js';
 
 const router = Router();
 
@@ -489,8 +491,115 @@ router.post(
   }
 );
 
+/**
+ * How many destination tokens the client actually sent, collapsing adjacent
+ * duplicates the SAME way `parseDestinations` does. Computed on the RAW
+ * query, before `parseDestinations`'s own silent `slice(0, MAX_DESTINATIONS)`
+ * — that truncation exists so a caller who accidentally repeats a `to` still
+ * gets an answer, not so a genuine 9-stop request can sneak past a cap that
+ * exists to keep `planMultiStop` bounded.
+ */
+function countRequestedDestinations(rawTo) {
+  if (rawTo === undefined || rawTo === null || rawTo === '') return 0;
+  const values = (Array.isArray(rawTo) ? rawTo : [rawTo])
+    .map((v) => String(v).trim())
+    .filter(Boolean);
+  let count = 0;
+  let last = null;
+  for (const value of values) {
+    if (value === last) continue;
+    last = value;
+    count += 1;
+  }
+  return count;
+}
+
+/**
+ * Mode A-multi (B12): more than one `to`. Resolve every requested stop, then
+ * hand the routing policy entirely to `multiStop.js`
+ * (`planMultiStopWithFallbacks` picks a sensible visiting order and searches
+ * the whole plan under the same strict-then-relaxed routing context a
+ * single-destination request would use) and `multiStopRouteAssembler.js`
+ * (splices the winning plan into the response). This function only does
+ * HTTP-layer work: parsing/resolving the request and shaping the failure
+ * messages — see `multiStop.js`'s header for the real request cost and the
+ * routing decisions themselves.
+ */
+async function assembleMultiStopResponse(res, { from, origin, parsed, destinations }) {
+  const resolvedStops = [];
+  for (let i = 0; i < destinations.length; i += 1) {
+    // Sequential rather than Promise.all: keeps error reporting
+    // ("destination #N") aligned with request order, and at most 8 of these
+    // is not worth the added complexity of parallelizing.
+    const resolved = await resolveDestination(origin.buildingId, destinations[i]);
+    if (!resolved.ok) return fail(res, resolved.status, resolved.message);
+    resolvedStops.push({ ...resolved, requestIndex: i });
+  }
+
+  const graph = await getGraph(origin.buildingId);
+  for (const stop of resolvedStops) {
+    if (!graph.nodes.has(stop.nodeId)) {
+      return fail(res, 404, `Destination #${stop.requestIndex + 1} is not in this building.`);
+    }
+  }
+
+  const activeClosures = await getActiveClosures(origin.buildingId);
+  const closures = activeClosures.map(publicClosure);
+  const overlay = buildOverlay(activeClosures, graph);
+
+  const context = applyOverlay(
+    { graph, name: parsed.name, includeTags: parsed.includeTags, excludeTags: parsed.excludeTags },
+    overlay,
+    { originId: from }
+  );
+  if (!context.ok) return fail(res, context.status, context.error);
+
+  const accessible = context.name === 'wheelchair';
+  const targetIds = resolvedStops.map((s) => s.nodeId);
+
+  // `context.fallbacks` is already strictest-relaxation-first (tags before
+  // accessibility — see `buildRoutingContext`), exactly what cumulative flag
+  // tracking requires.
+  const { plan, tagConstraintsRelaxed, accessibleRouteUnavailable } = planMultiStopWithFallbacks(
+    graph,
+    from,
+    targetIds,
+    context.profile,
+    { edgeFilter: context.strictEdgeFilter, costFn: context.costFn },
+    context.fallbacks
+  );
+
+  if (!plan.ok) {
+    const failedStop = resolvedStops[plan.failedIndex];
+    const node = graph.nodes.get(failedStop.nodeId);
+    const name = failedStop.poi?.name ?? node?.poi?.name ?? null;
+    return fail(
+      res,
+      404,
+      name ? `No route found to "${name}".` : `No route found to destination #${plan.failedIndex + 1}.`
+    );
+  }
+
+  const route = assembleMultiStopRoute(graph, plan, {
+    resolvedStops,
+    accessible,
+    accessibleRouteUnavailable,
+    tagConstraintsRelaxed,
+    profile: context.profile,
+    profileName: context.name,
+    overlay: context.overlay,
+    heading: parsed.heading,
+  });
+  route.closures = closures;
+
+  // B13: recordRouteRequest({ buildingId: origin.buildingId, profile: context.name, src: parsed.src, ... })
+
+  return ok(res, { data: { route, closures } });
+}
+
 // Mode A: point-to-point wayfinding. `to` accepts a node id, "poi:<poiId>",
-// or "ext:<code>"; repeated `to` (multi-stop) is B12 — only the first is used.
+// or "ext:<code>"; `to` is repeatable for multi-stop routing (B12), searched
+// in an order `multiStop.js` chooses, not necessarily the order requested.
 router.get('/api/wayfinding/route', publicReadLimiter, async (req, res) => {
   try {
     const from = String(req.query.from || '');
@@ -499,17 +608,32 @@ router.get('/api/wayfinding/route', publicReadLimiter, async (req, res) => {
     const parsed = parseRoutingQuery(req.query);
     if (!parsed.ok) return fail(res, 400, parsed.error);
 
+    const requestedCount = countRequestedDestinations(req.query.to);
+    if (requestedCount > MAX_DESTINATIONS) {
+      return fail(res, 422, `Too many destinations: at most ${MAX_DESTINATIONS} are allowed.`);
+    }
+
     const destinations = parseDestinations(req.query);
     if (destinations.length === 0) {
       return fail(res, 400, 'Invalid destination node id.');
     }
-    const rawTo = destinations[0]; // B12: multi-stop routing uses the rest.
 
     const origin = await prisma.node.findUnique({
       where: { id: from },
       select: { buildingId: true, poi: { select: { id: true } } },
     });
     if (!origin) return fail(res, 404, 'Origin node not found.');
+
+    // A single `to` falls straight through to the path below, UNCHANGED from
+    // before this task: same variables, same calls, same payload shape — the
+    // frontend's golden fixtures and the live scan page depend on that being
+    // byte-for-byte identical. Only `destinations.length > 1` takes the new
+    // multi-stop branch above.
+    if (destinations.length > 1) {
+      return await assembleMultiStopResponse(res, { from, origin, parsed, destinations });
+    }
+
+    const rawTo = destinations[0];
 
     const resolved = await resolveDestination(origin.buildingId, rawTo);
     if (!resolved.ok) return fail(res, resolved.status, resolved.message);
