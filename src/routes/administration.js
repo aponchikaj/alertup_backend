@@ -84,7 +84,7 @@ router.post(
           trigger: 'ADMIN',
         });
       } else {
-        await resolveEmergency(req.building.id);
+        await resolveEmergency(req.building.id, { userId: req.user.id });
       }
 
       return res.send({ Success: true, Message: 'Saved.' });
@@ -203,9 +203,17 @@ router.get(
         return res.send({ Success: false, Message: 'Logs not found.' });
       }
 
+      // isEmergency: true, matching GET /api/administration/logs/:id — this is
+      // the incident feed for one resolved emergency, not a general log
+      // browser. Without it, a B14 audit row (SYSTEM, isEmergency: false) for
+      // an unrelated map edit that happened to land in the same time window
+      // shows up as if it were part of the incident, and — correctly, since
+      // audit rows are exempt from `logs/clear` — can never be cleared out of
+      // this view either.
       const logs = await prisma.log.findMany({
         where: {
           buildingId: req.building.id,
+          isEmergency: true,
           createdAt: { gte: STARTED_DATE, lte: FINISHED_DATE },
           ...(typeFilter ? { type: typeFilter } : {}),
         },
@@ -231,6 +239,12 @@ router.get(
 );
 
 /* ---------------- CLEAR LOGS ---------------- */
+// Clears the live emergency-feed noise (isEmergency: true — what
+// GET /api/administration/logs/:id reads), never the accountability trail.
+// Audit rows (B14) default to isEmergency: false specifically so this
+// building-wide delete cannot sweep them up — a building may be legally
+// required to keep a record of who changed what, even after the incident
+// that made them look at the logs is long over.
 router.post(
   '/api/administration/logs/clear/:id',
   whoami,
@@ -238,7 +252,7 @@ router.post(
   async (req, res) => {
     try {
       const result = await prisma.log.deleteMany({
-        where: { buildingId: req.building.id },
+        where: { buildingId: req.building.id, isEmergency: true },
       });
 
       return res.send({

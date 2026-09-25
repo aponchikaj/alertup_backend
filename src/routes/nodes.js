@@ -6,6 +6,7 @@ import { PERMISSIONS } from '../auth/permissions.js';
 import { isId } from '../utils/ids.js';
 import { createEdge, recomputeEdgesForNode, normalizePair } from '../features/mapEditor/edgeService.js';
 import { invalidate } from '../features/wayfinding/graphCache.js';
+import { writeAudit, actorFromReq } from '../services/audit.js';
 
 const router = express.Router();
 
@@ -100,15 +101,26 @@ router.post('/api/nodes', ...guard, async (req, res) => {
     }
 
     const floor = await floorFor(req.building.id, floorNumber);
-    const node = await prisma.node.create({
-      data: {
+    const nodeData = {
+      buildingId: req.building.id,
+      floorId: floor.id,
+      x,
+      y,
+      type: TO_NEW_TYPE[type],
+      label: label || null,
+    };
+    const actor = actorFromReq(req);
+    const node = await prisma.$transaction(async (tx) => {
+      const row = await tx.node.create({ data: nodeData });
+      await writeAudit(tx, {
         buildingId: req.building.id,
-        floorId: floor.id,
-        x,
-        y,
-        type: TO_NEW_TYPE[type],
-        label: label || null,
-      },
+        ...actor,
+        entity: 'Node',
+        entityId: row.id,
+        action: 'create',
+        payload: nodeData,
+      });
+      return row;
     });
 
     // Same-building filter + symmetric write, now guaranteed by the edges table.
@@ -116,7 +128,22 @@ router.post('/api/nodes', ...guard, async (req, res) => {
     if (Array.isArray(connections)) {
       for (const otherId of connections.filter((c) => isId(String(c)))) {
         try {
-          await createEdge({ sourceNodeId: node.id, targetNodeId: otherId, inferCrossFloorTransit: true });
+          await prisma.$transaction(async (tx) => {
+            const row = await createEdge({
+              sourceNodeId: node.id,
+              targetNodeId: otherId,
+              inferCrossFloorTransit: true,
+              client: tx,
+            });
+            await writeAudit(tx, {
+              buildingId: req.building.id,
+              ...actor,
+              entity: 'Edge',
+              entityId: row.id,
+              action: 'create',
+              payload: { sourceNodeId: node.id, targetNodeId: otherId, via: 'legacy-nodes' },
+            });
+          });
           created.push(otherId);
         } catch {
           // dangling/cross-building/duplicate — legacy behaviour was to skip
@@ -199,9 +226,24 @@ router.put('/api/nodes/:nodeId', ...guard, async (req, res) => {
       updateData.label = label || null;
     }
 
-    const updated = await prisma.node.update({
-      where: { id: node.id },
-      data: updateData,
+    const actor = actorFromReq(req);
+    // Node update + its audit row commit or roll back together — same
+    // property B14 relies on everywhere else (see mapEditor.routes.js).
+    // Audit-first: entityId (node.id) is already known, and writing it first
+    // is what makes a rollback test on this route meaningful.
+    const updated = await prisma.$transaction(async (tx) => {
+      await writeAudit(tx, {
+        buildingId: req.building.id,
+        ...actor,
+        entity: 'Node',
+        entityId: node.id,
+        action: 'update',
+        payload: updateData,
+      });
+      return tx.node.update({
+        where: { id: node.id },
+        data: updateData,
+      });
     });
 
     if (updateData.x !== undefined || updateData.y !== undefined) {
@@ -229,7 +271,22 @@ router.put('/api/nodes/:nodeId', ...guard, async (req, res) => {
       for (const otherId of after) {
         if (!before.has(otherId)) {
           try {
-            await createEdge({ sourceNodeId: node.id, targetNodeId: otherId, inferCrossFloorTransit: true });
+            await prisma.$transaction(async (tx) => {
+              const edge = await createEdge({
+                sourceNodeId: node.id,
+                targetNodeId: otherId,
+                inferCrossFloorTransit: true,
+                client: tx,
+              });
+              await writeAudit(tx, {
+                buildingId: req.building.id,
+                ...actor,
+                entity: 'Edge',
+                entityId: edge.id,
+                action: 'create',
+                payload: { sourceNodeId: node.id, targetNodeId: otherId, via: 'legacy-nodes' },
+              });
+            });
           } catch {
             // duplicate/cross-floor without transit — skip like legacy
           }
@@ -238,8 +295,19 @@ router.put('/api/nodes/:nodeId', ...guard, async (req, res) => {
       for (const otherId of before) {
         if (!after.has(otherId)) {
           const [s, t] = normalizePair(node.id, otherId);
-          await prisma.edge.deleteMany({
-            where: { sourceNodeId: s, targetNodeId: t },
+          await prisma.$transaction(async (tx) => {
+            const removed = await tx.edge.findFirst({ where: { sourceNodeId: s, targetNodeId: t } });
+            if (removed) {
+              await writeAudit(tx, {
+                buildingId: req.building.id,
+                ...actor,
+                entity: 'Edge',
+                entityId: removed.id,
+                action: 'delete',
+                payload: { sourceNodeId: s, targetNodeId: t, via: 'legacy-nodes' },
+              });
+            }
+            await tx.edge.deleteMany({ where: { sourceNodeId: s, targetNodeId: t } });
           });
         }
       }
@@ -281,7 +349,17 @@ router.delete('/api/nodes/:nodeId', ...guard, async (req, res) => {
     }
 
     // FK cascade removes incident edges and any POI.
-    await prisma.node.delete({ where: { id: node.id } });
+    await prisma.$transaction(async (tx) => {
+      await writeAudit(tx, {
+        buildingId: req.building.id,
+        ...actorFromReq(req),
+        entity: 'Node',
+        entityId: node.id,
+        action: 'delete',
+        payload: { type: node.type, label: node.label },
+      });
+      await tx.node.delete({ where: { id: node.id } });
+    });
     invalidate(req.building.id);
 
     res.status(200).json({
@@ -333,7 +411,22 @@ router.post('/api/nodes/connect', ...guard, async (req, res) => {
     }
 
     try {
-      await createEdge({ sourceNodeId: node1Id, targetNodeId: node2Id, inferCrossFloorTransit: true });
+      await prisma.$transaction(async (tx) => {
+        const edge = await createEdge({
+          sourceNodeId: node1Id,
+          targetNodeId: node2Id,
+          inferCrossFloorTransit: true,
+          client: tx,
+        });
+        await writeAudit(tx, {
+          buildingId: req.building.id,
+          ...actorFromReq(req),
+          entity: 'Edge',
+          entityId: edge.id,
+          action: 'create',
+          payload: { sourceNodeId: node1Id, targetNodeId: node2Id, via: 'legacy-connect' },
+        });
+      });
     } catch (err) {
       if (err.status === 409) {
         return res

@@ -31,6 +31,12 @@ export function computeEdgeGeometry(nodeA, nodeB, { transitType = 'WALKWAY', wei
 
 /**
  * Create an edge between two nodes of the same building.
+ *
+ * `client` defaults to the module-level `prisma` but accepts a
+ * `prisma.$transaction(async (tx) => ...)` client too, so a caller that needs
+ * the create and its audit row to commit or roll back together can pass `tx`
+ * straight through instead of duplicating this function's logic inline.
+ *
  * @throws {Error} with .status for client errors
  */
 export async function createEdge({
@@ -52,6 +58,7 @@ export async function createEdge({
   // no transit type. When set, cross-floor WALKWAY silently becomes STAIRS
   // (the old FLOOR_CHANGE semantics) instead of a validation error.
   inferCrossFloorTransit = false,
+  client = prisma,
 }) {
   if (sourceNodeId === targetNodeId) {
     const err = new Error('A node cannot connect to itself.');
@@ -60,8 +67,8 @@ export async function createEdge({
   }
 
   const [a, b] = await Promise.all([
-    prisma.node.findUnique({ where: { id: sourceNodeId } }),
-    prisma.node.findUnique({ where: { id: targetNodeId } }),
+    client.node.findUnique({ where: { id: sourceNodeId } }),
+    client.node.findUnique({ where: { id: targetNodeId } }),
   ]);
   if (!a || !b) {
     const err = new Error('Both nodes must exist.');
@@ -99,7 +106,7 @@ export async function createEdge({
     accessible ?? !(transitType === 'STAIRS' || transitType === 'ESCALATOR');
 
   try {
-    return await prisma.edge.create({
+    return await client.edge.create({
       data: {
         sourceNodeId: sourceId,
         targetNodeId: targetId,

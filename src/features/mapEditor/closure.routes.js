@@ -8,6 +8,7 @@ import { PERMISSIONS } from '../../auth/permissions.js';
 import { editorWriteLimiter } from '../../services/rateLimiter.js';
 import { publish } from '../realtime/broadcaster.js';
 import { invalidateClosures, publicClosure } from '../wayfinding/closures.js';
+import { writeAudit, actorFromReq } from '../../services/audit.js';
 
 /**
  * Closure CRUD for the map editor.
@@ -21,14 +22,17 @@ import { invalidateClosures, publicClosure } from '../wayfinding/closures.js';
  *   1. validates the ids against THIS building (a closure naming another
  *      building's edge is either a bug or an attempt to shut someone else's
  *      corridor),
- *   2. `invalidateClosures` so the router picks it up on the next request
+ *   2. runs inside `prisma.$transaction` alongside its `writeAudit` row —
+ *      a closure that fails to persist must not leave a record of a change
+ *      that never took effect, and one that succeeds must always have one,
+ *   3. `invalidateClosures` so the router picks it up on the next request
  *      rather than up to 15 s later,
- *   3. `publish`es `closure_changed` so every open scan page re-routes
+ *   4. `publish`es `closure_changed` so every open scan page re-routes
  *      itself without waiting for a poll.
  *
- * Kept deliberately audit-free: B14 adds the audit row, and with it the
- * `$transaction` that makes the row and the write atomic. A transaction
- * around today's single statement would buy nothing.
+ * Steps 3-4 run AFTER the transaction commits: announcing a closure that then
+ * gets rolled back would send a client down a corridor the database never
+ * actually blocked.
  */
 
 const router = Router();
@@ -248,21 +252,31 @@ router.post(
       });
       if (error) return fail(res, 422, error);
 
-      const row = await prisma.closure.create({
-        data: {
+      const closureData = {
+        buildingId: req.building.id,
+        edgeIds: data.edgeIds ?? [],
+        nodeIds: data.nodeIds ?? [],
+        floorId: data.floorId ?? null,
+        // Absent means blocked: an owner reaching for this during an
+        // incident means "do not send anyone through here", and the
+        // penalty form is the deliberate, explicit one.
+        costMultiplier: data.costMultiplier ?? null,
+        reason: data.reason ?? null,
+        ...(data.startsAt ? { startsAt: data.startsAt } : {}),
+        endsAt: data.endsAt ?? null,
+        createdById: req.user?.id ?? null,
+      };
+      const row = await prisma.$transaction(async (tx) => {
+        const created = await tx.closure.create({ data: closureData });
+        await writeAudit(tx, {
           buildingId: req.building.id,
-          edgeIds: data.edgeIds ?? [],
-          nodeIds: data.nodeIds ?? [],
-          floorId: data.floorId ?? null,
-          // Absent means blocked: an owner reaching for this during an
-          // incident means "do not send anyone through here", and the
-          // penalty form is the deliberate, explicit one.
-          costMultiplier: data.costMultiplier ?? null,
-          reason: data.reason ?? null,
-          ...(data.startsAt ? { startsAt: data.startsAt } : {}),
-          endsAt: data.endsAt ?? null,
-          createdById: req.user?.id ?? null,
-        },
+          ...actorFromReq(req),
+          entity: 'Closure',
+          entityId: created.id,
+          action: 'create',
+          payload: closureData,
+        });
+        return created;
       });
 
       announce(req.building.id, row, 'created');
@@ -299,7 +313,17 @@ router.patch(
       });
       if (error) return fail(res, 422, error);
 
-      const row = await prisma.closure.update({ where: { id: current.id }, data });
+      const row = await prisma.$transaction(async (tx) => {
+        await writeAudit(tx, {
+          buildingId: req.building.id,
+          ...actorFromReq(req),
+          entity: 'Closure',
+          entityId: current.id,
+          action: 'update',
+          payload: data,
+        });
+        return tx.closure.update({ where: { id: current.id }, data });
+      });
 
       announce(req.building.id, row, 'updated');
       return ok(res, { message: 'Closure updated.', data: { closure: editorClosure(row) } });
@@ -322,7 +346,17 @@ router.delete(
       });
       if (!current) return fail(res, 404, 'Closure not found.');
 
-      await prisma.closure.delete({ where: { id: current.id } });
+      await prisma.$transaction(async (tx) => {
+        await writeAudit(tx, {
+          buildingId: req.building.id,
+          ...actorFromReq(req),
+          entity: 'Closure',
+          entityId: current.id,
+          action: 'delete',
+          payload: { edgeIds: current.edgeIds, nodeIds: current.nodeIds, reason: current.reason },
+        });
+        await tx.closure.delete({ where: { id: current.id } });
+      });
 
       // Announced from the row as it was: the client needs to know WHICH
       // restriction lifted, and after the delete there is nothing to read.

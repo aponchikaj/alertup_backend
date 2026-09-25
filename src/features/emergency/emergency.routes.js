@@ -83,7 +83,7 @@ router.post(
   async (req, res) => {
     try {
       if (!requireChallenge(req, res)) return;
-      const result = await resolveEmergency(req.building.id);
+      const result = await resolveEmergency(req.building.id, { userId: req.user.id });
       return ok(res, {
         message: result.alreadyResolved
           ? 'No active emergency.'
