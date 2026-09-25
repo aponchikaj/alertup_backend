@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { nextSeq, append } from './eventLog.js';
 
 // In-process pub/sub, one channel per building. All emergency/log writers
 // publish here after their DB write commits; SSE routes subscribe.
@@ -31,12 +32,23 @@ export function atCapacity(buildingId) {
 }
 
 /**
+ * Emit first, persist asynchronously: live subscribers get the frame
+ * immediately with an in-memory monotonic seq attached, and the durable
+ * write to `RealtimeEvent` (for `Last-Event-ID`/`?sinceSeq` replay) happens
+ * after, ordered per-building — see eventLog.js for why. A lost persist only
+ * degrades replay for a reconnecting client; it never delays or fails this
+ * broadcast.
+ *
  * @param {string} buildingId
  * @param {string} event   e.g. 'emergency_started'
  * @param {object} data    JSON-serializable payload
+ * @returns {number} the seq assigned to this frame
  */
 export function publish(buildingId, event, data = {}) {
-  emitter.emit(channelKey(buildingId), { event, data });
+  const seq = nextSeq(buildingId, event);
+  emitter.emit(channelKey(buildingId), { event, data, seq });
+  append(buildingId, seq, event, data);
+  return seq;
 }
 
 /**
@@ -84,4 +96,11 @@ export function closeAll() {
   emitter.removeAllListeners();
   perBuilding.clear();
   totalSubscribers = 0;
+}
+
+/** TEST-ONLY. Number of closers currently registered — used to prove a
+ *  connection that tore itself down early didn't leak an entry that nothing
+ *  will ever call or remove. */
+export function _closerCountForTests() {
+  return closers.size;
 }

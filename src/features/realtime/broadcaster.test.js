@@ -21,7 +21,9 @@ describe('broadcaster', () => {
 
     publish('bldA', 'emergency_started', { emergencyId: 'e1' });
 
-    expect(gotA).toEqual([
+    // toMatchObject, not toEqual: publish() now also attaches a `seq`
+    // (B15) — this test only cares about routing, not the sequence value.
+    expect(gotA).toMatchObject([
       { event: 'emergency_started', data: { emergencyId: 'e1' } },
     ]);
     expect(gotB).toEqual([]);

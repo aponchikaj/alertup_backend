@@ -121,6 +121,23 @@ export const aiDailyLimiter = rateLimit({
   message: deny('Daily assistant limit reached. Please try again tomorrow.'),
 });
 
+/**
+ * The public SSE connect endpoint (`/api/realtime/buildings/:id/status`).
+ * No auth, so it's the one realtime endpoint an anonymous caller can hit
+ * directly and try to open many long-lived connections against. The limit
+ * is generous on purpose: a real emergency legitimately produces reconnect
+ * storms (a building's wifi flapping while people evacuate), and this must
+ * never be what turns that into a 429 during an evacuation. It backstops the
+ * broadcaster's own per-building/global subscriber caps — it is not the
+ * primary defense.
+ */
+export const sseConnectLimiter = rateLimit({
+  ...baseOptions,
+  windowMs: 60 * 1000,
+  limit: 300,
+  message: deny('Too many connection attempts. Please wait a moment.'),
+});
+
 /** The anonymous home-page design demo. A full design burns 10-20x the
  *  tokens of a chat answer, so its daily budget is much tighter. */
 export const aiDemoDailyLimiter = rateLimit({

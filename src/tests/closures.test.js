@@ -440,7 +440,9 @@ describe('closure CRUD', () => {
       reason: 'Flooded',
       costMultiplier: null,
     });
-    expect(seen).toEqual([
+    // toMatchObject, not toEqual: publish() now also attaches a `seq` (B15)
+    // that this test doesn't need to pin down.
+    expect(seen).toMatchObject([
       {
         event: 'closure_changed',
         data: expect.objectContaining({
