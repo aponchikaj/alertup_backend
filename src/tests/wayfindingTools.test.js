@@ -138,6 +138,43 @@ describe('find_nearest_exit', () => {
     expect(result.data.found).toBe(true);
     expect(result.data.exitName).toBe('North Exit');
     expect(result.data.distanceMeters).toBeGreaterThan(0);
+    expect(result.data.durationSec).toBeGreaterThan(0);
+  });
+
+  test('an ETA that reflects the building\'s OWN calibrated walk speed, not a generic default', async () => {
+    // B16 regression guard: an earlier version of this tool threaded a bare
+    // profile-name STRING into `assembleRoute`, which resolves with NO
+    // building overrides at all (`resolveProfile(null, name)`) — silently
+    // discarding a building's own `routingProfile` and roughly halving the
+    // ETA for any building that calibrated a slower walk speed. Passing
+    // nothing (the current behaviour) falls back to
+    // `resolveProfile(graph.routingProfile ?? null, 'walk')`, which DOES pick
+    // up the override.
+    const { user } = await createUser();
+    const { building } = await createBuilding(user.id, {
+      routingProfile: { walkSpeedMps: 0.7 },
+    });
+    const floor = await createFloor(building.id, { floorNumber: 1, scalePixelsPerMeter: 50 });
+    const lobby = await createNode(building.id, floor.id, { x: 0, y: 0, label: 'Lobby' });
+    const exit = await createNode(building.id, floor.id, {
+      x: 400,
+      y: 0,
+      type: 'EMERGENCY_EXIT',
+      label: 'Exit',
+    });
+    await connectNodes(lobby, exit);
+
+    const result = await runTool({
+      tool: wayfindingTools.find_nearest_exit,
+      ctx: ctxFor(building.id, lobby.id),
+      args: {},
+    });
+
+    expect(result.data.found).toBe(true);
+    // 400 px / 50 px-per-metre = 8 m; at the building's own 0.7 m/s that is
+    // ~11.4 s. The regression above would have reported ~5.7 s instead (the
+    // generic 1.4 m/s default with the override discarded).
+    expect(result.data.durationSec).toBeGreaterThanOrEqual(11);
   });
 
   test('reports honestly when the building has no exit at all', async () => {
@@ -184,6 +221,7 @@ describe('get_route', () => {
     expect(result.data.found).toBe(true);
     expect(result.data.distanceMeters).toBeGreaterThan(0);
     expect(result.data.floorChanges).toBe(0);
+    expect(result.data.durationSec).toBeGreaterThan(0);
   });
 
   test('omits the distance on an unscaled floor rather than saying "0 metres"', async () => {

@@ -189,6 +189,31 @@ describe('RouteRequest — QR scan route', () => {
       src: 'scan',
     });
   });
+
+  // B16: the stored `profile` column must reflect the profile actually used
+  // for THIS request, not a value hardcoded at the call site — a scan under
+  // `?profile=wheelchair` is a different row, for analytics purposes, than a
+  // plain emergency one, and a column that silently means different things
+  // across rows is worse than no column at all.
+  test('a scan under ?profile=wheelchair records "wheelchair", not a hardcoded value', async () => {
+    const { building, floor, entrance } = await seedMall();
+    const qrId = qrIdFor(entrance, floor.floorNumber);
+
+    const res = await request(app).get(`/api/qr/scan/route/${qrId}?profile=wheelchair`);
+    expect(res.status).toBe(200);
+
+    await drain();
+
+    const rows = await prisma.routeRequest.findMany({ where: { buildingId: building.id } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      buildingId: building.id,
+      fromNodeId: entrance.id,
+      mode: 'EVACUATION',
+      src: 'scan',
+      profile: 'wheelchair',
+    });
+  });
 });
 
 describe('RouteRequest — AI wayfinding tool', () => {

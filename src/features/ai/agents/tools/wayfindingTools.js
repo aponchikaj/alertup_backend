@@ -25,7 +25,25 @@ import { defineTool } from '../toolRegistry.js';
 
 const SEARCH_LIMIT = 8;
 
-/** A path is only useful to the model as a shape: how far, how many floors. */
+/**
+ * A path is only useful to the model as a shape: how far, how many floors,
+ * how long.
+ *
+ * B16 tried threading a `profileName` STRING through to `assembleRoute` here,
+ * on the theory that the AI surface's ETA should reflect the same named
+ * profile as the HTTP surfaces. That was a regression, not an improvement:
+ * `assembleRoute`'s `normalizeProfile` resolves a bare string with NO
+ * building overrides (`resolveProfile(null, name)`), whereas passing nothing
+ * at all falls back to `resolveProfile(graph.routingProfile ?? null, 'walk')`
+ * — which DOES pick up the building's own calibrated `routingProfile` (e.g. a
+ * custom `walkSpeedMps`). The string form silently discarded that. It also
+ * bought nothing even done correctly: `etaProfileOf` (routeAssembler.js)
+ * strips `transitMultiplier`, `floorChangePenaltySec` and `blockedTransit`
+ * for ETA purposes — exactly the three knobs that distinguish one named
+ * profile's physics from another — so no profile name can change the ETA
+ * either way. Left at the default (no `profile` passed) instead: simpler,
+ * and correct today and if that stripping ever changes.
+ */
 function summarizeRoute(graph, path, { mode, accessible, destinationPoi }) {
   const route = assembleRoute(graph, path, { mode, accessible, destinationPoi });
   if (!route) return { found: false };
@@ -38,6 +56,9 @@ function summarizeRoute(graph, path, { mode, accessible, destinationPoi }) {
   return {
     found: true,
     ...(meters > 0 ? { distanceMeters: meters } : {}),
+    // Always numeric — `assembleRoute` assumes a scale when the floor has
+    // none, so unlike distance there is no "0 means unknown" case to hide.
+    durationSec: Math.round(route.totalDurationSec ?? 0),
     floorChanges: transitions.length,
     // Named so the agent can warn about lifts during an emergency without
     // being told the whole path.

@@ -8,16 +8,20 @@ import { parseQrSlug } from '../../features/qr/qrPayload.js';
 import { getGraph } from '../../features/wayfinding/graphCache.js';
 import { findEvacuationRoute } from '../../features/wayfinding/dijkstra.js';
 import { assembleRoute } from '../../features/wayfinding/routeAssembler.js';
-import { makeOverlayFilter, makeOverlayCostFn } from '../../features/wayfinding/profiles.js';
+import { parseRoutingQuery, composeFilters, makeOverlayCostFn } from '../../features/wayfinding/profiles.js';
+import { resolveProfile, makeCostFn } from '../../features/wayfinding/costModel.js';
+import { getSafetyField, pathFromField } from '../../features/wayfinding/safetyField.js';
+import { alternativeExits } from '../../features/wayfinding/alternatives.js';
+import { searchWithFallbacks } from '../../features/wayfinding/wayfinding.routes.js';
 import {
   getActiveClosures,
   buildOverlay,
-  overlayForOrigin,
+  applyOverlay,
   publicClosure,
 } from '../../features/wayfinding/closures.js';
 import { calculateDistance } from '../../features/wayfinding/dijkstra.js';
-import { publish } from '../../features/realtime/broadcaster.js';
 import { recordRouteRequest } from '../../features/wayfinding/routeRequests.js';
+import { recordAction } from '../../features/emergency/emergencyService.js';
 
 const router = express.Router();
 
@@ -100,29 +104,155 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
       connections: neighbourIds(n.id),
     });
 
-    // Active closures, folded into the search. This route is what someone
-    // standing in the building follows during an incident, so a closed
-    // corridor has to be closed here too — with the scanned node itself
-    // exempt, or the person reading the sticker on the closed area's wall is
-    // told there is no way out at all.
+    // B16: bring the scan endpoint up to the same routing contract as
+    // /api/wayfinding/evacuate — closures folded into an overlay, the cached
+    // distance-to-safety field for the common case, alternative exits, and
+    // real turn-by-turn instructions (assembleRoute builds those internally).
     //
-    // The cost function stays the pixel-distance default this legacy route
-    // has always used; `makeOverlayCostFn` only layers the closures'
-    // multipliers on top, and both helpers are inert when nothing is closed.
+    // LIFE-SAFETY RULE, same as /evacuate: this is an evacuation surface, so
+    // visibility (EMERGENCY_ONLY edges) and blocking always come from the
+    // `emergency` profile — never from an explicit `?profile=`. `wheelchair`
+    // (`?profile=wheelchair` or `?accessible=true`) layers an accessibility
+    // REQUIREMENT on top via `composeFilters`, with its own last-resort
+    // fallback that drops it. Any OTHER named profile contributes COST
+    // preferences only (`transitMultiplier`/`floorChangePenaltySec`, layered
+    // onto the emergency-resolved profile below) — it is never allowed to
+    // swap out the visibility/blocking rules a printed sticker's evacuation
+    // route depends on, exactly like `/evacuate`'s `costOverlayName`.
+    const parsedQuery = parseRoutingQuery(req.query);
+    if (!parsedQuery.ok) {
+      return res.status(400).json({ success: false, message: parsedQuery.error, qrId });
+    }
+    const wheelchairRequested = parsedQuery.name === 'wheelchair';
+    const profileName = wheelchairRequested ? 'wheelchair' : 'emergency';
+    const explicitProfileName =
+      typeof req.query.profile === 'string' && req.query.profile ? parsedQuery.name : null;
+    const costOverlayName =
+      explicitProfileName && explicitProfileName !== 'wheelchair' && explicitProfileName !== 'emergency'
+        ? explicitProfileName
+        : null;
+
     const activeClosures = await getActiveClosures(buildingId);
     const closures = activeClosures.map(publicClosure);
-    const overlay = overlayForOrigin(buildOverlay(activeClosures, graph), node.id);
-    const evac = findEvacuationRoute(graph, node.id, {
-      edgeFilter: makeOverlayFilter(overlay),
-      costFn: makeOverlayCostFn((edge) => edge.cost, overlay),
-    });
-    const found = Boolean(evac);
+    const overlay = buildOverlay(activeClosures, graph);
+
+    // The scanned node's own block is lifted (`applyOverlay`'s job): someone
+    // standing in the area that was just closed must still get an exit, not
+    // a dead end.
+    const context = applyOverlay(
+      {
+        graph,
+        name: 'emergency',
+        includeTags: parsedQuery.includeTags,
+        excludeTags: parsedQuery.excludeTags,
+      },
+      overlay,
+      { originId: node.id }
+    );
+    if (!context.ok) {
+      return res.status(400).json({ success: false, message: context.error, qrId });
+    }
+
+    // A non-wheelchair, non-emergency explicit profile (e.g. `elevator_first`,
+    // `min_floor_changes`) layers its cost knobs onto the emergency-resolved
+    // profile, then re-wraps the cost function with the overlay — mirroring
+    // `/evacuate` exactly, so the same query string steers the same way on
+    // both surfaces. Its hard block (visibility, blockedTransit) is untouched
+    // either way; only which of two otherwise-legal routes looks cheaper can
+    // move.
+    let effectiveProfile = context.profile;
+    let effectiveCostFn = context.costFn;
+    if (costOverlayName) {
+      const requestedProfile = resolveProfile(graph.routingProfile, costOverlayName);
+      effectiveProfile = {
+        ...context.profile,
+        transitMultiplier: requestedProfile.transitMultiplier,
+        floorChangePenaltySec: requestedProfile.floorChangePenaltySec,
+      };
+      effectiveCostFn = makeOverlayCostFn(makeCostFn(effectiveProfile), context.overlay);
+    }
+
+    // Wheelchair layers a hard accessibility requirement on top of emergency's
+    // filter, with its own fallback (after any tag-relaxation step) that drops
+    // it as an absolute last resort.
+    const requireAccessible = (edge) => edge.accessible !== false;
+    const strictEdgeFilter = wheelchairRequested
+      ? composeFilters(context.strictEdgeFilter, requireAccessible)
+      : context.strictEdgeFilter;
+    const tagRelaxedFallbacks = context.fallbacks.map((fb) => ({
+      label: fb.label,
+      edgeFilter: wheelchairRequested ? composeFilters(fb.edgeFilter, requireAccessible) : fb.edgeFilter,
+      costFn: effectiveCostFn,
+    }));
+    const bottomEdgeFilter =
+      context.fallbacks.length > 0
+        ? context.fallbacks[context.fallbacks.length - 1].edgeFilter
+        : context.strictEdgeFilter;
+    const accessibilityDroppedFallback = wheelchairRequested
+      ? [{ label: 'accessibleRouteUnavailable', edgeFilter: bottomEdgeFilter, costFn: effectiveCostFn }]
+      : [];
+    const fallbacks = [...tagRelaxedFallbacks, ...accessibilityDroppedFallback];
+
+    // The cached distance-to-safety field answers the common case (plain
+    // `emergency`, origin not itself exempted) in a pointer walk. Wheelchair
+    // is a relaxation LADDER rather than one cost function, so it always goes
+    // through the forward search below. Same 4-part key shape as
+    // `/evacuate`'s `fieldVariant` (profile # preference # includeTags #
+    // excludeTags) — an equivalent request on either surface shares one
+    // cached field instead of building and caching the same field twice
+    // against the shared per-graph cap.
+    const originExempted = Boolean(overlay?.blockedNodeIds?.has(node.id));
+    const useField = !wheelchairRequested && !originExempted;
+    const fieldVariant = [
+      'emergency',
+      costOverlayName ?? '',
+      parsedQuery.includeTags.join(','),
+      parsedQuery.excludeTags.join(','),
+    ].join('#');
+
+    let result = useField
+      ? pathFromField(
+          getSafetyField(
+            graph,
+            { name: fieldVariant, costFn: effectiveCostFn, edgeFilter: strictEdgeFilter },
+            { fingerprint: context.overlay?.fingerprint ?? '' }
+          ),
+          node.id
+        )
+      : null;
+
+    let tagConstraintsRelaxed = false;
+    let accessibleRouteUnavailable = false;
+    let searchEdgeFilter = strictEdgeFilter;
+    let searchCostFn = effectiveCostFn;
+
+    if (!result) {
+      const attempt = searchWithFallbacks(
+        { edgeFilter: strictEdgeFilter, costFn: effectiveCostFn },
+        fallbacks,
+        (edgeFilter, costFn) =>
+          findEvacuationRoute(graph, node.id, {
+            accessible: false, // relaxation is driven by the fallback chain above
+            profile: effectiveProfile,
+            costFn,
+            edgeFilter,
+          })
+      );
+      result = attempt.result;
+      tagConstraintsRelaxed = attempt.tagConstraintsRelaxed;
+      accessibleRouteUnavailable = attempt.accessibleRouteUnavailable;
+      searchEdgeFilter = attempt.edgeFilter;
+      searchCostFn = attempt.costFn;
+    }
+
+    const found = Boolean(result);
     const pathNodes = found
-      ? evac.path.map((id) => graph.nodes.get(id)).filter(Boolean)
+      ? result.path.map((id) => graph.nodes.get(id)).filter(Boolean)
       : [];
     const exitNode = found ? pathNodes[pathNodes.length - 1] : null;
 
-    // Legacy floorTransitions/walkingDistance semantics.
+    // Legacy floorTransitions/walkingDistance semantics — unchanged shape,
+    // now fed by the same search result the new `route` uses.
     const floorChanges = [];
     let walkingDistance = 0;
     for (let i = 1; i < pathNodes.length; i++) {
@@ -149,7 +279,7 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
       message: found ? null : 'No exit route found from this location',
       exitNodeId: exitNode ? exitNode.id : null,
       path: pathNodes.map((p) => p.id),
-      distance: found ? pathNodes.length - 1 : 0,
+      distance: found ? pathNodes.length - 1 : 0, // hop count — CONTRACT, never meters/seconds
       walkingDistance,
       exitNode: exitNode
         ? {
@@ -163,20 +293,62 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
         : null,
     };
 
-    // New stepper-shaped route for the redesigned viewer.
+    // New stepper-shaped route for the redesigned viewer: instructions,
+    // warnings and alternative exits, all built from the SAME winning search
+    // attempt the legacy fields above were derived from.
     const route = found
-      ? assembleRoute(graph, evac.path, { mode: 'EVACUATION', overlay })
+      ? assembleRoute(graph, result.path, {
+          mode: 'EVACUATION',
+          accessible: wheelchairRequested,
+          accessibleRouteUnavailable,
+          profile: effectiveProfile,
+          // Stays inside the closed RouteProfile union the frontend switches
+          // on; the layered cost preference rides the separate, additive
+          // `preference` field instead of a composite name.
+          profileName,
+          preference: costOverlayName,
+          tagConstraintsRelaxed,
+          overlay: context.overlay,
+          heading: parsedQuery.heading,
+        })
       : null;
-    if (route) route.closures = closures;
+    if (route) {
+      route.closures = closures;
+      // Searched under the SAME constraints that found the primary, so an
+      // alternative can never be a door the primary was already told it
+      // could not use.
+      route.alternatives = alternativeExits(
+        graph,
+        node.id,
+        {
+          profile: effectiveProfile,
+          profileName,
+          preference: costOverlayName,
+          costFn: searchCostFn,
+          edgeFilter: searchEdgeFilter,
+          overlay: context.overlay,
+          accessible: wheelchairRequested,
+          accessibleRouteUnavailable,
+          tagConstraintsRelaxed,
+        },
+        { primaryExitId: result.exitNodeId, max: 2 }
+      );
+      for (const alternative of route.alternatives) {
+        alternative.route.closures = closures;
+      }
+    }
 
-    // B13: every scan is a route request too — this is the highest-traffic
-    // call site (every printed sticker in the field), always an evacuation
-    // search from the scanned node with no explicit `to`.
+    // B13/B16: every scan is a route request too — this is the highest-
+    // traffic call site (every printed sticker in the field), always an
+    // evacuation search from the scanned node with no explicit `to`. Records
+    // the profile actually used, not a hardcoded value — a scan under
+    // `?profile=wheelchair` that falls back is still worth telling apart from
+    // a plain `emergency` row.
     recordRouteRequest({
       buildingId,
       fromNodeId: node.id,
       to: null,
-      profile: 'emergency',
+      profile: profileName,
       mode: 'EVACUATION',
       src: 'scan',
       found,
@@ -224,6 +396,7 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
       // ---- additions for the redesigned viewer ----
       route,
       closures,
+      profile: profileName,
       emergency: {
         active: building.emergencyMode,
         message: building.emergencyMode ? building.emergencyMessage : null,
@@ -240,20 +413,7 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
     if (building.emergencyMode === true) {
       try {
         const message = `new Scan on ${node.floor?.floorNumber} Floor near ${node.label || 'a checkpoint'}`;
-        await prisma.$transaction([
-          prisma.log.create({
-            data: { buildingId, type: 'SCAN', isEmergency: true, message },
-          }),
-          prisma.emergencyEvent.updateMany({
-            where: { buildingId, status: 'ACTIVE' },
-            data: { scanned: { increment: 1 } },
-          }),
-        ]);
-        publish(buildingId, 'log_appended', {
-          message,
-          type: 'SCAN',
-          createdAt: new Date().toISOString(),
-        });
+        await recordAction(buildingId, 'scanned', { message, nodeId: node.id });
       } catch (logErr) {
         console.error('Failed to record emergency scan:', logErr.message);
       }
@@ -271,6 +431,7 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
               buildingId,
               userId: decoded.userID,
               buildingName: building.name,
+              nodeId: node.id,
             },
           });
         }

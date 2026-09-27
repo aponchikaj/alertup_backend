@@ -83,7 +83,14 @@ describe('buildBriefFacts', () => {
     expect(facts.found).toBe(false);
   });
 
-  test('flags when the computed route runs through a lift', async () => {
+  /**
+   * B16: this brief is read alongside the drawn route on the same overlay,
+   * so it must never contradict it. Every other evacuation surface
+   * (`/evacuate`, the QR scan route) always searches under the `emergency`
+   * profile — elevators off-limits unless the building says its cars are
+   * evacuation-rated — and the brief now has to agree.
+   */
+  test('reports no route when the only way out is a lift the building has not rated for evacuation', async () => {
     const { user } = await createUser();
     const { building } = await createBuilding(user.id);
     const ground = await createFloor(building.id, { floorNumber: 1, scalePixelsPerMeter: 50 });
@@ -100,7 +107,31 @@ describe('buildBriefFacts', () => {
 
     const facts = await buildBriefFacts({ buildingId: building.id, nodeId: here.id });
 
-    // Routing does not exclude lifts, so the brief must not pretend it did.
+    // The `emergency` profile blocks ELEVATOR outright when the building has
+    // not declared its cars evacuation-rated, and this is the only path out
+    // — exactly what /evacuate and the scan route would also report.
+    expect(facts.found).toBe(false);
+  });
+
+  test('flags a route through the lift when the building rates its cars for evacuation', async () => {
+    const { user } = await createUser();
+    const { building } = await createBuilding(user.id, {
+      routingProfile: { elevatorEvacuationRated: true },
+    });
+    const ground = await createFloor(building.id, { floorNumber: 1, scalePixelsPerMeter: 50 });
+    const upper = await createFloor(building.id, { floorNumber: 2, scalePixelsPerMeter: 50 });
+    const here = await createNode(building.id, upper.id, { label: 'Office' });
+    const lift = await createNode(building.id, ground.id, { type: 'TRANSIT' });
+    const exit = await createNode(building.id, ground.id, {
+      x: 300,
+      type: 'EMERGENCY_EXIT',
+      label: 'Side Exit',
+    });
+    await connectNodes(here, lift, { transitType: 'ELEVATOR', distance: 0, weight: 300 });
+    await connectNodes(lift, exit);
+
+    const facts = await buildBriefFacts({ buildingId: building.id, nodeId: here.id });
+
     expect(facts.found).toBe(true);
     expect(facts.usesElevator).toBe(true);
   });

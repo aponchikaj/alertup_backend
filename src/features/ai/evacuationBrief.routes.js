@@ -5,6 +5,7 @@ import { publicReadLimiter } from '../../services/rateLimiter.js';
 import { getGraph } from '../wayfinding/graphCache.js';
 import { findEvacuationRoute } from '../wayfinding/dijkstra.js';
 import { assembleRoute } from '../wayfinding/routeAssembler.js';
+import { resolveProfile } from '../wayfinding/costModel.js';
 import { aiAvailable, chatOnce } from './aiClient.js';
 
 /* ============================================================================
@@ -46,10 +47,29 @@ export async function buildBriefFacts({ buildingId, nodeId, accessible = false }
   // so a node id from elsewhere simply is not in it.
   if (!graph.nodes.has(nodeId)) return { found: false };
 
-  const result = findEvacuationRoute(graph, nodeId, { accessible });
+  // B16 fix: this brief is read ALONGSIDE the drawn route on the same
+  // overlay, and its own documented contract above says it must never
+  // contradict that line. Every other evacuation surface (`/evacuate`, the
+  // QR scan route) always searches under the `emergency` profile's
+  // visibility and blocking — elevators off-limits unless the building says
+  // its cars are evacuation-rated — with `accessible` layered on top as an
+  // independent constraint, never a different profile. Searching with no
+  // profile at all (the previous behaviour) used pixel weights and never
+  // excluded a lift, so this function could — and, on a building with a
+  // non-rated lift, did — narrate a route through a door the scan/evacuate
+  // surfaces would have refused to offer at all.
+  const profile = resolveProfile(graph.routingProfile ?? null, 'emergency');
+  const result = findEvacuationRoute(graph, nodeId, { accessible, profile });
   if (!result) return { found: false };
 
-  const route = assembleRoute(graph, result.path, { mode: 'EVACUATION', accessible });
+  const profileName = accessible ? 'wheelchair' : 'emergency';
+  const route = assembleRoute(graph, result.path, {
+    mode: 'EVACUATION',
+    accessible,
+    accessibleRouteUnavailable: result.accessibleRouteUnavailable,
+    profile,
+    profileName,
+  });
   if (!route) return { found: false };
 
   const exitNode = graph.nodes.get(result.path[result.path.length - 1]);
@@ -64,10 +84,11 @@ export async function buildBriefFacts({ buildingId, nodeId, accessible = false }
     // "0 m" reads as "you are already there".
     ...(meters > 0 ? { distanceMeters: meters } : {}),
     floorChanges: transitions.length,
-    // findEvacuationRoute filters on accessibility, NOT on transit type, so a
-    // computed evacuation route can legitimately run through a lift. The brief
-    // reports that rather than reciting "never use elevators" over a route
-    // that does exactly that — the drawn line is what the visitor follows.
+    // Now that the search runs under the `emergency` profile, this can only
+    // ever be true when the building's lifts are evacuation-rated — the same
+    // condition under which /evacuate and the scan route would also route
+    // through one. It stays reported (rather than dropped) so the sentence
+    // can still say so when it happens.
     usesElevator: transitions.some((transition) => transition.transitType === 'ELEVATOR'),
     accessibleRouteUnavailable: Boolean(route.accessibleRouteUnavailable),
   };

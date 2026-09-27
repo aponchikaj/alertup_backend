@@ -57,7 +57,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  *   rules than the primary would offer a door the primary already proved
  *   unreachable under those rules.
  */
-function searchWithFallbacks(strictAttempt, fallbackAttempts, search) {
+export function searchWithFallbacks(strictAttempt, fallbackAttempts, search) {
   const strictResult = search(strictAttempt.edgeFilter, strictAttempt.costFn);
   if (strictResult) {
     return {
