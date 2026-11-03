@@ -19,7 +19,7 @@ const isAdmin = (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(adminToken, config.jwt.secret);
+    const decoded = jwt.verify(adminToken, config.jwt.secret, { algorithms: ['HS256'] });
 
     if (!decoded || decoded.isAdmin !== true) {
       req.isAdmin = false;

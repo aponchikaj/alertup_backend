@@ -23,7 +23,7 @@ jest.unstable_mockModule('@google/genai', () => ({
   },
 }));
 
-const { streamChat } = await import('../features/ai/geminiClient.js');
+const { streamChat, chatOnce, callWithTools } = await import('../features/ai/geminiClient.js');
 
 const collect = async (iter) => {
   const out = [];
@@ -125,4 +125,61 @@ describe('first-token deadline', () => {
 
     expect(error.name).toBe('AbortError');
   }, 5000);
+});
+
+/* FX-043 — the one-shot paths need a deadline too. The evacuation brief and
+   the agent tool loop both use them; without one, a hung Gemini call holds
+   the request open until the visitor gives up. */
+describe('one-shot deadline (chatOnce, callWithTools)', () => {
+  /** A call that never answers until it is aborted. */
+  const hangingCall = () =>
+    jest.fn(
+      ({ config }) =>
+        new Promise((_resolve, reject) => {
+          const signal = config.abortSignal;
+          const fail = () =>
+            reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
+          if (signal?.aborted) return fail();
+          signal?.addEventListener('abort', fail, { once: true });
+        })
+    );
+
+  test('chatOnce rejects with a retryable TimeoutError when the provider hangs', async () => {
+    generateContent.mockImplementation(hangingCall());
+
+    await expect(
+      chatOnce({ system: 's', messages: [{ role: 'user', content: 'hi' }], timeoutMs: 20 })
+    ).rejects.toMatchObject({ name: 'TimeoutError' });
+  });
+
+  test('callWithTools rejects with a retryable TimeoutError when the provider hangs', async () => {
+    generateContent.mockImplementation(hangingCall());
+
+    await expect(
+      callWithTools({ system: 's', messages: [{ role: 'user', content: 'hi' }], timeoutMs: 20 })
+    ).rejects.toMatchObject({ name: 'TimeoutError' });
+  });
+
+  test('a caller abort on a one-shot call stays an AbortError', async () => {
+    generateContent.mockImplementation(hangingCall());
+    const caller = new AbortController();
+
+    const pending = chatOnce({
+      system: 's',
+      messages: [{ role: 'user', content: 'hi' }],
+      signal: caller.signal,
+      timeoutMs: 10_000,
+    });
+    caller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  test('a fast answer is returned untouched', async () => {
+    generateContent.mockResolvedValue({ text: 'ok' });
+
+    await expect(
+      chatOnce({ system: 's', messages: [{ role: 'user', content: 'hi' }], timeoutMs: 1000 })
+    ).resolves.toBe('ok');
+  });
 });

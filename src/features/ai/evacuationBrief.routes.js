@@ -3,9 +3,8 @@ import { ok, fail } from '../../utils/respond.js';
 import { isId } from '../../utils/ids.js';
 import { publicReadLimiter } from '../../services/rateLimiter.js';
 import { getGraph } from '../wayfinding/graphCache.js';
-import { findEvacuationRoute } from '../wayfinding/dijkstra.js';
-import { assembleRoute } from '../wayfinding/routeAssembler.js';
-import { resolveProfile } from '../wayfinding/costModel.js';
+import { getActiveClosures } from '../wayfinding/closures.js';
+import { planEvacuation } from '../wayfinding/planning.js';
 import { aiAvailable, chatOnce } from './aiClient.js';
 
 /* ============================================================================
@@ -32,6 +31,10 @@ import { aiAvailable, chatOnce } from './aiClient.js';
 const router = express.Router();
 
 const BRIEF_MAX_TOKENS = 80;
+// The template is already a correct answer, so the model gets only a short
+// window to improve on it — an evacuating visitor should not wait on a
+// provider (FX-043).
+const BRIEF_TIMEOUT_MS = 5000;
 
 /**
  * Compute the evacuation facts. Pure lookup — no model involved.
@@ -47,30 +50,21 @@ export async function buildBriefFacts({ buildingId, nodeId, accessible = false }
   // so a node id from elsewhere simply is not in it.
   if (!graph.nodes.has(nodeId)) return { found: false };
 
-  // B16 fix: this brief is read ALONGSIDE the drawn route on the same
-  // overlay, and its own documented contract above says it must never
-  // contradict that line. Every other evacuation surface (`/evacuate`, the
-  // QR scan route) always searches under the `emergency` profile's
-  // visibility and blocking — elevators off-limits unless the building says
-  // its cars are evacuation-rated — with `accessible` layered on top as an
-  // independent constraint, never a different profile. Searching with no
-  // profile at all (the previous behaviour) used pixel weights and never
-  // excluded a lift, so this function could — and, on a building with a
-  // non-rated lift, did — narrate a route through a door the scan/evacuate
-  // surfaces would have refused to offer at all.
-  const profile = resolveProfile(graph.routingProfile ?? null, 'emergency');
-  const result = findEvacuationRoute(graph, nodeId, { accessible, profile });
-  if (!result) return { found: false };
-
-  const profileName = accessible ? 'wheelchair' : 'emergency';
-  const route = assembleRoute(graph, result.path, {
-    mode: 'EVACUATION',
-    accessible,
-    accessibleRouteUnavailable: result.accessibleRouteUnavailable,
-    profile,
-    profileName,
+  // This brief is read ALONGSIDE the drawn route on the same overlay, and
+  // its own contract above says it must never contradict that line. So it
+  // asks the same planner /evacuate and the QR scan route use — emergency
+  // visibility and blocking, the building's active closures, wheelchair
+  // layered on top — rather than searching on its own (FX-010: the earlier
+  // search skipped closures and could name an exit behind a closed corridor).
+  const plan = planEvacuation({
+    graph,
+    activeClosures: await getActiveClosures(buildingId),
+    originId: nodeId,
+    query: { name: accessible ? 'wheelchair' : null },
+    withAlternatives: false,
   });
-  if (!route) return { found: false };
+  if (!plan.ok || !plan.found) return { found: false };
+  const { result, route } = plan;
 
   const exitNode = graph.nodes.get(result.path[result.path.length - 1]);
   const transitions = route.transitions || [];
@@ -91,6 +85,9 @@ export async function buildBriefFacts({ buildingId, nodeId, accessible = false }
     // can still say so when it happens.
     usesElevator: transitions.some((transition) => transition.transitType === 'ELEVATOR'),
     accessibleRouteUnavailable: Boolean(route.accessibleRouteUnavailable),
+    // D14: every exit was behind a closure and this is the least-blocked way
+    // out. The sentence must say so.
+    ...(route.closuresIgnored ? { closuresIgnored: true } : {}),
   };
 }
 
@@ -115,6 +112,7 @@ export function briefTemplate(facts, locale = 'en') {
     if (facts.distanceMeters) parts.push(`დაახლოებით ${facts.distanceMeters} მ`);
     let text = `${parts.join(', ')}.`;
     if (facts.floorChanges > 0) text += ' მიჰყევით ეკრანზე მონიშნულ წითელ მარშრუტს.';
+    if (facts.closuresIgnored) text += ' ყველა გასასვლელი დახურულ ზონაშია — იმოძრავეთ სიფრთხილით.';
     return text;
   }
 
@@ -125,6 +123,7 @@ export function briefTemplate(facts, locale = 'en') {
   if (facts.distanceMeters) parts.push(`about ${facts.distanceMeters} m`);
   let text = `${parts.join(', ')}.`;
   if (facts.floorChanges > 0) text += ' Follow the red route on screen.';
+  if (facts.closuresIgnored) text += ' Every exit is behind a closed area: move with caution.';
   return text;
 }
 
@@ -136,6 +135,7 @@ async function phraseBrief(facts, locale, signal) {
     'Never add a fact you were not given: no directions, no landmarks, no floor or exit that is not listed.',
     `Reply ONLY in ${locale === 'ka' ? 'Georgian' : 'English'}. One sentence. No preamble.`,
     'The visitor is following a red route drawn on their screen; never contradict it or give your own turn-by-turn directions.',
+    'If closuresIgnored is true, the route passes through a closed area because every exit is blocked: say so and tell them to move with caution.',
   ].join('\n');
 
   const reply = await chatOnce({
@@ -144,6 +144,7 @@ async function phraseBrief(facts, locale, signal) {
     messages: [{ role: 'user', content: JSON.stringify(facts) }],
     maxTokens: BRIEF_MAX_TOKENS,
     signal,
+    timeoutMs: BRIEF_TIMEOUT_MS,
   });
 
   return reply?.trim() || '';

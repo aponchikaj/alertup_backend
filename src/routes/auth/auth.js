@@ -21,6 +21,7 @@ import {
   setSessionCookie,
   wantsTokenInBody,
 } from '../../utils/session.js';
+import { escapeHtml } from '../../services/escapeHtml.js';
 
 // A bcrypt hash to compare against when no user matched, so a missing account
 // and a wrong password take the same amount of time. Returning early on a miss
@@ -123,7 +124,7 @@ router.post('/api/auth/register', registerLimiter, async (req, res) => {
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
           <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
             <h1 style="color: #FF7B22; margin-top: 0;">Welcome to AlertUp!</h1>
-            <p style="color: #333; font-size: 16px;">Hello <strong>${newUserName}</strong>,</p>
+            <p style="color: #333; font-size: 16px;">Hello <strong>${escapeHtml(newUserName)}</strong>,</p>
             <p style="color: #666;">Thank you for joining AlertUp! We're excited to have you on board.</p>
             <p style="color: #666;">To get started and access all features, please verify your email address.</p>
             <div style="background-color: #e3f2fd; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #2196f3;">
@@ -186,7 +187,7 @@ router.post('/api/auth/login', loginLimiter, async (req, res) => {
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
             <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
               <h1 style="color: #FF7B22; margin-top: 0;">🔐 Login Verification</h1>
-              <p style="color: #333; font-size: 16px;">Hello <strong>${userName}</strong>,</p>
+              <p style="color: #333; font-size: 16px;">Hello <strong>${escapeHtml(userName)}</strong>,</p>
               <p style="color: #666;">Enter this verification code to complete your login:</p>
 
               <div style="background-color: #f9f9f9; padding: 20px; border-radius: 6px; margin: 25px 0; text-align: center; border: 2px dashed #FF7B22;">
@@ -236,7 +237,7 @@ router.post('/api/auth/login', loginLimiter, async (req, res) => {
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
             <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
               <h1 style="color: #FF7B22; margin-top: 0;">🔐 New Login Detected</h1>
-              <p style="color: #333; font-size: 16px;">Hello <strong>${userName}</strong>,</p>
+              <p style="color: #333; font-size: 16px;">Hello <strong>${escapeHtml(userName)}</strong>,</p>
               <p style="color: #666;">We detected a new login to your AlertUp account.</p>
             </div>
           </div>
@@ -318,7 +319,7 @@ router.post('/api/auth/login/2fa', authLimiter, async (req, res) => {
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
           <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
             <h1 style="color: #FF7B22; margin-top: 0;">🔐 New Login Detected</h1>
-            <p style="color: #333; font-size: 16px;">Hello <strong>${userName}</strong>,</p>
+            <p style="color: #333; font-size: 16px;">Hello <strong>${escapeHtml(userName)}</strong>,</p>
             <p style="color: #666;">We detected a new login to your AlertUp account.</p>
           </div>
         </div>

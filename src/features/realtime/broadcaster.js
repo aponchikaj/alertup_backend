@@ -24,11 +24,55 @@ export function subscriberCount(buildingId) {
   return buildingId ? perBuilding.get(String(buildingId)) || 0 : totalSubscribers;
 }
 
+// TEST-ONLY override of the two caps above (null restores them).
+let capsOverride = null;
+export function _setCapsForTests(caps) {
+  capsOverride = caps;
+}
+const capPerBuilding = () => capsOverride?.perBuilding ?? MAX_SUBSCRIBERS_PER_BUILDING;
+const capTotal = () => capsOverride?.total ?? MAX_SUBSCRIBERS_TOTAL;
+
 export function atCapacity(buildingId) {
   return (
-    totalSubscribers >= MAX_SUBSCRIBERS_TOTAL ||
-    (perBuilding.get(String(buildingId)) || 0) >= MAX_SUBSCRIBERS_PER_BUILDING
+    totalSubscribers >= capTotal() ||
+    (perBuilding.get(String(buildingId)) || 0) >= capPerBuilding()
   );
+}
+
+/* D15 (research 004): every open stream's slot, so a full building can make
+   room instead of refusing the newest client. Insertion order = age. */
+const slots = new Set();
+
+/**
+ * Free one slot for a newcomer when `buildingId` (or the whole server) is
+ * full: evict the OLDEST stream of the IP holding the MOST slots in the full
+ * scope. Squatting slots therefore buys nothing, while a building's shared
+ * Wi-Fi only loses a slot when it is the biggest holder. The evicted stream
+ * is told to fall back to polling, which always works.
+ *
+ * @returns {boolean} true when there is (now) room; false when nothing
+ *   evictable was found and the newcomer must be refused.
+ */
+export function makeRoom(buildingId) {
+  if (!atCapacity(buildingId)) return true;
+  const id = String(buildingId);
+  const buildingFull = (perBuilding.get(id) || 0) >= capPerBuilding();
+  const candidates = [...slots].filter((slot) => slot.onEvict && (!buildingFull || slot.buildingId === id));
+  if (candidates.length === 0) return false;
+
+  const perIp = new Map();
+  for (const slot of candidates) perIp.set(slot.ip, (perIp.get(slot.ip) || 0) + 1);
+  let topIp = null;
+  let topCount = 0;
+  for (const [ip, count] of perIp) {
+    if (count > topCount) {
+      topIp = ip;
+      topCount = count;
+    }
+  }
+  const victim = candidates.find((slot) => slot.ip === topIp);
+  victim.evict();
+  return !atCapacity(buildingId);
 }
 
 /**
@@ -56,7 +100,7 @@ export function publish(buildingId, event, data = {}) {
  * @param {(msg: {event: string, data: object}) => void} listener
  * @returns {() => void} unsubscribe
  */
-export function subscribe(buildingId, listener) {
+export function subscribe(buildingId, listener, { ip = null, onEvict = null } = {}) {
   const key = channelKey(buildingId);
   const id = String(buildingId);
   emitter.on(key, listener);
@@ -64,16 +108,34 @@ export function subscribe(buildingId, listener) {
   totalSubscribers += 1;
 
   let active = true;
-  return function unsubscribe() {
+  const slot = {
+    buildingId: id,
+    ip,
+    onEvict,
+    // Evicting always releases the slot, whatever the stream does with the
+    // notice — a newcomer must never be left waiting on a slow socket.
+    evict() {
+      try {
+        onEvict?.();
+      } finally {
+        unsubscribe();
+      }
+    },
+  };
+  slots.add(slot);
+
+  return unsubscribe;
+  function unsubscribe() {
     if (!active) return;
     active = false;
+    slots.delete(slot);
     emitter.off(key, listener);
     const remaining = (perBuilding.get(id) || 1) - 1;
     if (remaining <= 0) perBuilding.delete(id);
     else perBuilding.set(id, remaining);
     totalSubscribers = Math.max(0, totalSubscribers - 1);
     emitter.emit(`unsubscribed:${key}`);
-  };
+  }
 }
 
 const closers = new Set();
@@ -95,6 +157,7 @@ export function closeAll() {
   closers.clear();
   emitter.removeAllListeners();
   perBuilding.clear();
+  slots.clear();
   totalSubscribers = 0;
 }
 

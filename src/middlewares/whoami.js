@@ -18,7 +18,7 @@ const whoami = async (req, res, next) => {
   }
 
   try {
-    const data = jwt.verify(userToken, config.jwt.secret);
+    const data = jwt.verify(userToken, config.jwt.secret, { algorithms: ['HS256'] });
 
     // The admin token minted in routes/admin.js carries only
     // {isAdmin:true} and is signed with this same secret, so it reaches here

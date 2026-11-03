@@ -29,7 +29,6 @@ import connectRouter from './src/routes/connect.js'
 import debugRouter from './src/routes/debug.js'
 import routingRouter from './src/routes/routing.js'
 import nodesRouter from './src/routes/nodes.js'
-import uploadRouter from './src/routes/upload.js'
 import qrRouter from './src/routes/qr/qr.js'
 import qrScanRouter from './src/routes/qr/scan.js'
 import websitereview from './src/routes/reviews.js'
@@ -43,6 +42,8 @@ import realtimeRouter from './src/features/realtime/realtime.routes.js'
 import aiRouter from './src/features/ai/ai.routes.js'
 import agentRouter from './src/features/ai/agents/agent.routes.js'
 import evacuationBriefRouter from './src/features/ai/evacuationBrief.routes.js'
+import { installProcessGuards } from './src/utils/processGuards.js';
+import helmet from 'helmet'
 
 const app = express();
 const PORT = config.port;
@@ -52,19 +53,27 @@ const isProduction = config.isProduction;
 // client spoof its IP via X-Forwarded-For and defeat the rate limiters.
 app.set('trust proxy', 1);
 
+// FX-047: standard security headers. The API serves JSON (and a few images),
+// so helmet's strict default CSP costs nothing here. CORP is relaxed to
+// cross-origin because the SPA on alertup.world embeds API-served images.
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  })
+);
+
 app.use(cparser())
 
 const envAllowed = config.cors.allowedOrigins;
+// FX-057: credentialed origins, HTTPS only. stage/pre-prod are listed here
+// so the stage backend no longer depends on ALLOWED_ORIGINS being set on every
+// deploy. localhost/LAN/*.vercel.app stay development-only conveniences below.
 const defaultAllowed = [
   "https://alertup.world",
-  "http://alertup.world",
   "https://www.alertup.world",
-  "http://www.alertup.world",
+  "https://stage.alertup.world",
+  "https://pre-prod.alertup.world",
   "https://alertup.vercel.app",
-  "http://alertup.vercel.app",
-  "http://localhost:5173",
-  "https://localhost:5173",
-  "https://alertup-qs1zp9gbl-aponchikajs-projects.vercel.app"
 ];
 
 // Merge env list with defaults (env can override/append)
@@ -183,7 +192,6 @@ app.use(connectRouter)
 app.use(debugRouter)
 app.use('/api/route', routingRouter)
 app.use(nodesRouter)
-app.use('/api/upload', uploadRouter)
 app.use(qrRouter)
 app.use('/api/qr/scan', qrScanRouter)
 app.use(websitereview)
@@ -288,6 +296,7 @@ const startServer = async () => {
     console.log('⚠️  Starting server anyway...');
   }
 
+  installProcessGuards();
   startSweeper();
 
   const server = app.listen(PORT, () => {

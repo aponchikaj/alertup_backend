@@ -30,6 +30,8 @@ const getStatus = jest.fn(() => pendingStatus());
 // still wires up; this test never exercises those routes.
 jest.unstable_mockModule('../features/emergency/emergencyService.js', () => ({
   getStatus,
+  getStatusCached: getStatus,
+  invalidateStatus: jest.fn(),
   triggerEmergency: jest.fn(),
   resolveEmergency: jest.fn(),
   recordAction: jest.fn(),

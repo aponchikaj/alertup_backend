@@ -5,6 +5,30 @@ import { writeAudit } from '../../services/audit.js';
 // Explicit, idempotent emergency transitions. Replaces the old $not-toggle,
 // which could flip the wrong way when two admins raced.
 
+/* D15 (research 004): during an incident hundreds of phones poll the same
+   building's status. One read per building per second answers all of them;
+   concurrent callers share the in-flight promise. Every state change below
+   (trigger, resolve, occupant action) drops the entry, so a change is never
+   hidden behind the cache. */
+const STATUS_CACHE_MS = 1000;
+const statusCache = new Map();
+
+export function invalidateStatus(buildingId) {
+  statusCache.delete(String(buildingId));
+}
+
+export async function getStatusCached(buildingId) {
+  const key = String(buildingId);
+  const hit = statusCache.get(key);
+  if (hit && Date.now() - hit.at < STATUS_CACHE_MS) return hit.promise;
+  const promise = getStatus(buildingId).catch((err) => {
+    statusCache.delete(key);
+    throw err;
+  });
+  statusCache.set(key, { at: Date.now(), promise });
+  return promise;
+}
+
 export async function getStatus(buildingId) {
   const building = await prisma.building.findUnique({
     where: { id: buildingId },
@@ -138,6 +162,7 @@ export async function triggerEmergency(
     return { alreadyActive: false, event };
   });
 
+  invalidateStatus(buildingId);
   if (!result.alreadyActive) {
     publish(buildingId, 'emergency_started', {
       emergencyId: result.event.id,
@@ -214,6 +239,7 @@ export async function resolveEmergency(
     return { alreadyResolved: false };
   });
 
+  invalidateStatus(buildingId);
   if (!result.alreadyResolved) {
     publish(buildingId, 'emergency_ended', { endedAt: new Date().toISOString() });
   }
@@ -255,12 +281,18 @@ export async function recordAction(buildingId, action, { message, nodeId } = {})
 
   const logSpec = ACTION_LOGS[action];
   const logMessage = message || logSpec.message;
-  const [updated] = await prisma.$transaction([
-    prisma.emergencyEvent.updateMany({
+
+  // FX-051: only an action during an ACTIVE emergency counts. Without one,
+  // nothing is written — an anonymous "I evacuated" on a quiet day would
+  // otherwise appear in the owner's log feed as fake activity. The counter
+  // increment decides, inside the same transaction as the log row.
+  const recorded = await prisma.$transaction(async (tx) => {
+    const updated = await tx.emergencyEvent.updateMany({
       where: { buildingId, status: 'ACTIVE' },
       data: { [field]: { increment: 1 } },
-    }),
-    prisma.log.create({
+    });
+    if (updated.count === 0) return false;
+    await tx.log.create({
       data: {
         buildingId,
         type: logSpec.type,
@@ -268,19 +300,21 @@ export async function recordAction(buildingId, action, { message, nodeId } = {})
         message: logMessage,
         ...(nodeId ? { entity: 'Node', entityId: nodeId } : {}),
       },
-    }),
-  ]);
+    });
+    return true;
+  });
+  if (!recorded) return { recorded: false };
+  invalidateStatus(buildingId); // the counters just changed
 
   publish(buildingId, 'log_appended', {
     message: logMessage,
     type: logSpec.type,
     createdAt: new Date().toISOString(),
   });
-  if (updated.count > 0) {
-    const event = await prisma.emergencyEvent.findFirst({
-      where: { buildingId, status: 'ACTIVE' },
-      select: { scanned: true, evacuated: true, calledEmergency: true },
-    });
-    if (event) publish(buildingId, 'counters_updated', event);
-  }
+  const event = await prisma.emergencyEvent.findFirst({
+    where: { buildingId, status: 'ACTIVE' },
+    select: { scanned: true, evacuated: true, calledEmergency: true },
+  });
+  if (event) publish(buildingId, 'counters_updated', event);
+  return { recorded: true };
 }

@@ -85,6 +85,20 @@ export const emergencyActionLimiter = rateLimit({
  * (QR scan, floor lookup). Wide enough never to affect a real evacuation,
  * narrow enough to stop scripted enumeration.
  */
+/**
+ * D15 (research 004): the emergency status poll — the fallback every phone
+ * uses when it cannot hold a live stream. Sized for a building's shared Wi-Fi
+ * or carrier NAT: hundreds of real occupants polling every 10 s behind ONE
+ * IP. The 1 s per-building cache in front of it means even this ceiling costs
+ * one database read per second per building.
+ */
+export const statusPollLimiter = rateLimit({
+  ...baseOptions,
+  windowMs: 60 * 1000,
+  limit: 1200,
+  message: deny('Too many requests. Please wait a moment.'),
+});
+
 export const publicReadLimiter = rateLimit({
   ...baseOptions,
   windowMs: 60 * 1000, // 1 minute

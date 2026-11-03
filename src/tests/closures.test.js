@@ -794,12 +794,19 @@ describe('closures change the route', () => {
     expect(fromB.status).toBe(200);
     expect(routeNodeIds(fromB.body.data.route)).toEqual([b.id, exit.id]);
 
-    // …and the person routed PAST b still cannot be sent through it.
+    // …and the person routed PAST b is never given b as a NORMAL route: with
+    // no other way out they get the D14 last resort, flagged as crossing a
+    // closure. An unflagged route here would mean the exemption leaked.
     const fromA = await evacuate(a.id);
-    expect(fromA.status).toBe(404);
+    expect(fromA.status).toBe(200);
+    expect(fromA.body.data.route.closuresIgnored).toBe(true);
+    expect(fromA.body.data.route.warnings[0].code).toBe('ROUTE_THROUGH_CLOSURE');
   });
 
-  test('a blocked evacuation edge is never traversed', async () => {
+  // D14 (founder, 2026-11-03): when closures cut off every exit, give the
+  // least-closed way out with a warning rather than no route at all. A blocked
+  // edge is still never part of a NORMAL route — only of a flagged last resort.
+  test('a blocked evacuation edge is only traversed as a flagged last resort', async () => {
     const { building } = await createOwnerWithBuilding();
     const floor = await createFloor(building.id, { floorNumber: 1, scalePixelsPerMeter: 10 });
     const origin = await createNode(building.id, floor.id, { x: 0, y: 0 });
@@ -815,7 +822,9 @@ describe('closures change the route', () => {
 
     const res = await request(app).get(`/api/wayfinding/evacuate?from=${origin.id}`);
 
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(200);
+    expect(res.body.data.route.closuresIgnored).toBe(true);
+    expect(res.body.data.route.warnings[0].code).toBe('ROUTE_THROUGH_CLOSURE');
   });
 });
 
@@ -859,7 +868,7 @@ describe('the scan route respects closures', () => {
     ]);
   });
 
-  test('never routes an occupant through a blocked edge', async () => {
+  test('routes through a blocked edge only as a flagged last resort (D14)', async () => {
     const { building, origin, edge } = await seedScan();
     await prisma.closure.create({
       data: { buildingId: building.id, edgeIds: [edge.id], reason: 'Fire' },
@@ -868,7 +877,9 @@ describe('the scan route respects closures', () => {
     const res = await request(app).get(`/api/qr/scan/route/${qrIdFor(origin, 1)}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.data.emergencyRoute.found).toBe(false);
+    expect(res.body.data.emergencyRoute.found).toBe(true);
+    expect(res.body.data.route.closuresIgnored).toBe(true);
+    expect(res.body.data.route.warnings[0].code).toBe('ROUTE_THROUGH_CLOSURE');
     expect(res.body.data.closures).toHaveLength(1);
   });
 });

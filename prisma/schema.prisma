@@ -605,3 +605,29 @@ model AiMessage {
 
   @@index([conversationId, createdAt])
 }
+
+/// D3 (founder decision 2026-11-03): incident history outlives the building.
+/// Written in the same transaction as any building delete (owner, account
+/// deletion, admin), BEFORE the cascade removes EmergencyEvent, Log and
+/// AiConversation rows. No foreign keys on purpose — a row must survive both
+/// the building and its owner.
+model IncidentArchive {
+  id           String   @id @default(cuid())
+  buildingId   String
+  buildingName String
+  ownerId      String?
+  /// 'INCIDENT' (one emergency, with its logs and AI transcripts) or 'AUDIT'
+  /// (the building's accountability log rows).
+  kind         String
+  emergencyId  String?
+  startedAt    DateTime?
+  endedAt      DateTime?
+  /// 'building_deleted' | 'account_deleted' | 'admin_deleted'
+  reason       String
+  snapshot     Json
+  archivedAt   DateTime @default(now())
+
+  @@index([buildingId])
+  @@index([ownerId])
+  @@index([emergencyId])
+}

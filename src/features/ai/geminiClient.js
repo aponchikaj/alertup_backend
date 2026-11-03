@@ -23,6 +23,46 @@ function gemini() {
 
 export const FIRST_TOKEN_TIMEOUT_MS = 10000;
 
+/**
+ * FX-043: deadline for the non-streaming calls (chatOnce, callWithTools).
+ * `@google/genai` has no request timeout, so without this a hung call held
+ * the evacuation brief and the agent tool loop open indefinitely.
+ */
+export const ONE_SHOT_TIMEOUT_MS = 30000;
+
+/**
+ * Run `call(signal)` under a deadline. The caller's own abort still surfaces
+ * as an AbortError; the deadline surfaces as a TimeoutError, which aiClient
+ * treats as retryable so the fallback provider gets a turn.
+ */
+async function withDeadline(signal, timeoutMs, call) {
+  const controller = new AbortController();
+  const abortUpstream = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', abortUpstream, { once: true });
+  }
+  let timedOut = false;
+  const deadline = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await call(controller.signal);
+  } catch (error) {
+    if (timedOut && !signal?.aborted) {
+      throw Object.assign(new Error(`Gemini did not answer within ${timeoutMs}ms`), {
+        name: 'TimeoutError',
+      });
+    }
+    throw error;
+  } finally {
+    clearTimeout(deadline);
+    signal?.removeEventListener('abort', abortUpstream);
+  }
+}
+
 /** Cap on a fetched underlay image. Gemini accepts more, but a 20MB floor plan
  *  base64-encoded is 27MB of request body for no extra detail. */
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
@@ -174,19 +214,28 @@ export async function* streamChat({
 }
 
 /** One-shot, non-streaming completion — the vision path uses this. */
-export async function chatOnce({ system, messages, model, maxTokens = 800, signal }) {
+export async function chatOnce({
+  system,
+  messages,
+  model,
+  maxTokens = 800,
+  signal,
+  timeoutMs = ONE_SHOT_TIMEOUT_MS,
+}) {
   const { contents, systemInstruction } = await toRequest({ system, messages, signal });
 
-  const response = await gemini().models.generateContent({
-    model: model || config.gemini.model,
-    contents,
-    config: {
-      systemInstruction,
-      temperature: 0.2,
-      maxOutputTokens: maxTokens,
-      abortSignal: signal,
-    },
-  });
+  const response = await withDeadline(signal, timeoutMs, (abortSignal) =>
+    gemini().models.generateContent({
+      model: model || config.gemini.model,
+      contents,
+      config: {
+        systemInstruction,
+        temperature: 0.2,
+        maxOutputTokens: maxTokens,
+        abortSignal,
+      },
+    })
+  );
 
   return response.text || '';
 }
@@ -221,22 +270,25 @@ export async function callWithTools({
   model,
   maxTokens = 800,
   signal,
+  timeoutMs = ONE_SHOT_TIMEOUT_MS,
 }) {
   const { contents, systemInstruction } = await toRequest({ system, messages, signal });
 
-  const response = await gemini().models.generateContent({
-    model: model || config.gemini.model,
-    contents,
-    config: {
-      systemInstruction,
-      temperature: 0.2,
-      maxOutputTokens: maxTokens,
-      abortSignal: signal,
-      ...(tools.length
-        ? { tools: [{ functionDeclarations: tools.map(toDeclaration) }] }
-        : {}),
-    },
-  });
+  const response = await withDeadline(signal, timeoutMs, (abortSignal) =>
+    gemini().models.generateContent({
+      model: model || config.gemini.model,
+      contents,
+      config: {
+        systemInstruction,
+        temperature: 0.2,
+        maxOutputTokens: maxTokens,
+        abortSignal,
+        ...(tools.length
+          ? { tools: [{ functionDeclarations: tools.map(toDeclaration) }] }
+          : {}),
+      },
+    })
+  );
 
   return {
     text: response.text || '',

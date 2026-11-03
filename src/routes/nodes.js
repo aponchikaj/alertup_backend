@@ -159,7 +159,8 @@ router.post('/api/nodes', ...guard, async (req, res) => {
     });
   } catch (error) {
     console.error('Error creating node:', error);
-    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+    // FX-090: internals go to the log, never to the client.
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
@@ -184,7 +185,8 @@ router.get('/api/nodes/building/:buildingId', ...guard, async (req, res) => {
     res.status(200).json({ success: true, nodes: shaped });
   } catch (error) {
     console.error('Error fetching nodes:', error);
-    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+    // FX-090: internals go to the log, never to the client.
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 

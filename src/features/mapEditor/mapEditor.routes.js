@@ -388,7 +388,7 @@ router.patch(
           buffer: req.file.buffer,
           contentType: req.file.mimetype,
         });
-        if (floor.mapImageUrl) await deleteByUrl(floor.mapImageUrl).catch(() => {});
+        if (floor.mapImageUrl) await deleteByUrl(floor.mapImageUrl, { buildingId: req.building.id }).catch(() => {});
       }
 
       const updated = await prisma.$transaction(async (tx) => {
@@ -437,7 +437,7 @@ router.delete(
         });
         await tx.floor.delete({ where: { id: floor.id } });
       });
-      if (floor.mapImageUrl) await deleteByUrl(floor.mapImageUrl).catch(() => {});
+      if (floor.mapImageUrl) await deleteByUrl(floor.mapImageUrl, { buildingId: req.building.id }).catch(() => {});
       invalidate(req.building.id);
       return ok(res, { message: 'Floor deleted.' });
     } catch (err) {

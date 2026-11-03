@@ -1435,4 +1435,20 @@ describe('emergency v2 API', () => {
     expect(event.evacuated).toBe(2);
     expect(event.calledEmergency).toBe(1);
   });
+
+  // FX-051: with no emergency running, an anonymous "I evacuated" is noise —
+  // it must not land in the building's log feed, where it would show up as
+  // fake activity (and anyone could spam it).
+  test('occupant actions with no active emergency record nothing', async () => {
+    const { building } = await createOwnerWithBuilding();
+
+    const evac = await request(app).post(`/api/emergency/buildings/${building.id}/evacuated`);
+    const called = await request(app)
+      .post('/api/building/emergencyCall')
+      .send({ buildingId: building.id });
+
+    expect(evac.status).toBe(200);
+    expect(called.status).toBe(200);
+    expect(await prisma.log.count({ where: { buildingId: building.id } })).toBe(0);
+  });
 });

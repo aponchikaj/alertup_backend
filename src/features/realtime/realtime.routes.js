@@ -6,7 +6,7 @@ import { fail } from '../../utils/respond.js';
 import { isId } from '../../utils/ids.js';
 import { sseConnectLimiter } from '../../services/rateLimiter.js';
 import { getStatus } from '../emergency/emergencyService.js';
-import { subscribe, atCapacity, registerCloser } from './broadcaster.js';
+import { subscribe, makeRoom, registerCloser } from './broadcaster.js';
 import { replaySince, currentSeq, currentPublicSeq, MEMBER_ONLY_EVENTS } from './eventLog.js';
 import { initSse, sendEvent, startHeartbeat } from './sseHelpers.js';
 
@@ -54,7 +54,10 @@ export async function openStream(
   buildingId,
   { includeLogs = false, heartbeatIntervalMs } = {}
 ) {
-  if (atCapacity(buildingId)) {
+  // D15 (research 004): a full building makes room — the oldest stream of
+  // the IP holding the most slots is moved to polling — rather than refusing
+  // the newest occupant. 503 only when nothing could be evicted.
+  if (!makeRoom(buildingId)) {
     res.set('Retry-After', '30');
     return fail(res, 503, 'Too many live connections for this building. Falling back to polling.');
   }
@@ -89,11 +92,28 @@ export async function openStream(
   // rather than the only place this ever gets enforced for buffered frames.
   let buffering = true;
   const buffered = [];
-  const unsubscribe = subscribe(buildingId, (msg) => {
-    if (!forwardable(msg.event)) return;
-    if (buffering) buffered.push(msg);
-    else deliverLive(msg);
-  });
+  const unsubscribe = subscribe(
+    buildingId,
+    (msg) => {
+      if (!forwardable(msg.event)) return;
+      if (buffering) buffered.push(msg);
+      else deliverLive(msg);
+    },
+    {
+      ip: req.ip,
+      // Evicted to make room for a newer occupant: tell the client to fall
+      // back to polling (it backs off before trying a stream again), then end.
+      onEvict: () => {
+        try {
+          sendEvent(res, 'resync_required', { reason: 'capacity' });
+          res.end();
+        } catch {
+          // socket already gone
+        }
+        cleanup(); // eslint-disable-line no-use-before-define
+      },
+    }
+  );
 
   let cleaned = false;
   let stopHeartbeat = () => {};

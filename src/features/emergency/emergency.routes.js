@@ -3,11 +3,11 @@ import whoami from '../../middlewares/whoami.js';
 import { requirePermission } from '../../middlewares/requireBuildingPermission.js';
 import { ok, fail } from '../../utils/respond.js';
 import { PERMISSIONS } from '../../auth/permissions.js';
-import { emergencyActionLimiter, publicReadLimiter } from '../../services/rateLimiter.js';
+import { emergencyActionLimiter, statusPollLimiter } from '../../services/rateLimiter.js';
 import { isId } from '../../utils/ids.js';
 import prisma from '../../db/prisma.js';
 import {
-  getStatus,
+  getStatusCached,
   triggerEmergency,
   resolveEmergency,
   recordAction,
@@ -99,13 +99,17 @@ router.post(
 
 router.get(
   '/api/emergency/buildings/:buildingId/status',
-  publicReadLimiter,
+  // D15 (research 004): the polling fallback for every phone that cannot hold
+  // a live stream — sized for a building's shared Wi-Fi, answered from a 1 s
+  // per-building cache, and briefly cacheable so a CDN can absorb it later.
+  statusPollLimiter,
   async (req, res) => {
     try {
       const { buildingId } = req.params;
       if (!isId(buildingId)) return fail(res, 400, 'Invalid building id.');
-      const status = await getStatus(buildingId);
+      const status = await getStatusCached(buildingId);
       if (!status) return fail(res, 404, 'Building not found.');
+      res.set('Cache-Control', 'public, max-age=2, stale-while-revalidate=10');
       return ok(res, { data: status });
     } catch (err) {
       console.error('Emergency status error:', err);
@@ -130,8 +134,10 @@ async function handleAction(req, res, action) {
     });
     if (!building) return fail(res, 404, 'Building not found.');
 
-    await recordAction(buildingId, action);
-    return ok(res, { message: 'Recorded.' });
+    // 200 either way: deployed clients and printed instructions post here,
+    // and an occupant must never see an error for reporting themselves safe.
+    const { recorded } = await recordAction(buildingId, action);
+    return ok(res, { message: recorded ? 'Recorded.' : 'No active emergency.' });
   } catch (err) {
     console.error(`Emergency ${action} error:`, err);
     return fail(res, 500, 'Server error.');

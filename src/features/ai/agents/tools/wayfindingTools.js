@@ -1,7 +1,7 @@
 import prisma from '../../../../db/prisma.js';
 import { getGraph } from '../../../wayfinding/graphCache.js';
-import { findRoute, findEvacuationRoute } from '../../../wayfinding/dijkstra.js';
-import { assembleRoute } from '../../../wayfinding/routeAssembler.js';
+import { getActiveClosures } from '../../../wayfinding/closures.js';
+import { planEvacuation, planRoute } from '../../../wayfinding/planning.js';
 import { recordRouteRequest } from '../../../wayfinding/routeRequests.js';
 import { defineTool } from '../toolRegistry.js';
 
@@ -26,26 +26,13 @@ import { defineTool } from '../toolRegistry.js';
 const SEARCH_LIMIT = 8;
 
 /**
- * A path is only useful to the model as a shape: how far, how many floors,
- * how long.
- *
- * B16 tried threading a `profileName` STRING through to `assembleRoute` here,
- * on the theory that the AI surface's ETA should reflect the same named
- * profile as the HTTP surfaces. That was a regression, not an improvement:
- * `assembleRoute`'s `normalizeProfile` resolves a bare string with NO
- * building overrides (`resolveProfile(null, name)`), whereas passing nothing
- * at all falls back to `resolveProfile(graph.routingProfile ?? null, 'walk')`
- * — which DOES pick up the building's own calibrated `routingProfile` (e.g. a
- * custom `walkSpeedMps`). The string form silently discarded that. It also
- * bought nothing even done correctly: `etaProfileOf` (routeAssembler.js)
- * strips `transitMultiplier`, `floorChangePenaltySec` and `blockedTransit`
- * for ETA purposes — exactly the three knobs that distinguish one named
- * profile's physics from another — so no profile name can change the ETA
- * either way. Left at the default (no `profile` passed) instead: simpler,
- * and correct today and if that stripping ever changes.
+ * A route is only useful to the model as a shape: how far, how many floors,
+ * how long. The route itself comes from `planning.js` — the same planner, with
+ * the same closures and visibility rules, that drew the line on the visitor's
+ * screen (FX-002). Handing the model anything it computed on its own would
+ * let the two disagree, and during an evacuation the model would be wrong.
  */
-function summarizeRoute(graph, path, { mode, accessible, destinationPoi }) {
-  const route = assembleRoute(graph, path, { mode, accessible, destinationPoi });
+function summarizeRoute(route) {
   if (!route) return { found: false };
 
   const transitions = route.transitions || [];
@@ -64,6 +51,8 @@ function summarizeRoute(graph, path, { mode, accessible, destinationPoi }) {
     // being told the whole path.
     transitTypes: [...new Set(transitions.map((transition) => transition.transitType))],
     accessibleRouteUnavailable: Boolean(route.accessibleRouteUnavailable),
+    // D14: the only way out crosses a closed area. The agent must warn.
+    ...(route.closuresIgnored ? { closuresIgnored: true } : {}),
   };
 }
 
@@ -141,8 +130,16 @@ const find_nearest_exit = defineTool({
     // 'walk', which is the WAYFINDING-mode default and means a different
     // profile entirely on this shared column.
     const profile = args.accessible ? 'wheelchair' : 'emergency';
-    const result = findEvacuationRoute(graph, ctx.nodeId, { accessible: Boolean(args.accessible) });
-    if (!result) {
+    // Same planner as /evacuate and the QR scan route: emergency visibility
+    // and blocking, active closures, wheelchair layered on top.
+    const plan = planEvacuation({
+      graph,
+      activeClosures: await getActiveClosures(ctx.buildingId),
+      originId: ctx.nodeId,
+      query: { name: args.accessible ? 'wheelchair' : null },
+      withAlternatives: false,
+    });
+    if (!plan.ok || !plan.found) {
       recordRouteRequest({
         buildingId: ctx.buildingId,
         fromNodeId: ctx.nodeId,
@@ -155,11 +152,8 @@ const find_nearest_exit = defineTool({
       return { found: false, reason: 'no_exit' };
     }
 
-    const exitNode = graph.nodes.get(result.path[result.path.length - 1]);
-    const summary = summarizeRoute(graph, result.path, {
-      mode: 'EVACUATION',
-      accessible: Boolean(args.accessible),
-    });
+    const exitNode = graph.nodes.get(plan.result.path[plan.result.path.length - 1]);
+    const summary = summarizeRoute(plan.route);
     recordRouteRequest({
       buildingId: ctx.buildingId,
       fromNodeId: ctx.nodeId,
@@ -255,10 +249,18 @@ const get_route = defineTool({
       });
       return { found: false, reason: 'unknown_destination' };
     }
-    const result = findRoute(graph, ctx.nodeId, targetNodeId, {
-      accessible: Boolean(args.accessible),
+    // Same planner as GET /api/wayfinding/route: closures and the profile's
+    // visibility rules apply, so the model is never told a closed corridor
+    // is open.
+    const plan = planRoute({
+      graph,
+      activeClosures: await getActiveClosures(ctx.buildingId),
+      originId: ctx.nodeId,
+      targetId: targetNodeId,
+      query: { name: profile },
+      destinationPoi,
     });
-    if (!result) {
+    if (!plan.ok || !plan.found) {
       recordRouteRequest({
         buildingId: ctx.buildingId,
         fromNodeId: ctx.nodeId,
@@ -271,11 +273,7 @@ const get_route = defineTool({
       return { found: false, reason: 'no_route' };
     }
 
-    const summary = summarizeRoute(graph, result.path, {
-      mode: 'WAYFINDING',
-      accessible: Boolean(args.accessible),
-      destinationPoi,
-    });
+    const summary = summarizeRoute(plan.route);
     recordRouteRequest({
       buildingId: ctx.buildingId,
       fromNodeId: ctx.nodeId,
