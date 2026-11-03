@@ -1,7 +1,6 @@
 import express from 'express';
 import { buildingLimitFor, floorLimitFor } from '../../services/plans.js';
 import QRCode from 'qrcode';
-import jwt from 'jsonwebtoken';
 import { Filter } from 'bad-words';
 import prisma from '../../db/prisma.js';
 import config from '../../config/index.js';
@@ -13,6 +12,9 @@ import {
 } from '../../middlewares/requireBuildingPermission.js';
 import { PERMISSIONS, SYSTEM_ROLES } from '../../auth/permissions.js';
 import { isId } from '../../utils/ids.js';
+import { resolveSession } from '../../utils/session.js';
+import { reservedFloorNameError } from '../../services/floorNames.js';
+import { ok, fail } from '../../utils/respond.js';
 import { uploadBuffer, deleteByUrl, keys } from '../../services/storage.js';
 import { displayName } from '../../services/displayName.js';
 import { publicReadLimiter } from '../../services/rateLimiter.js';
@@ -37,6 +39,21 @@ export const legacyMapEntry = (floor) => ({
   scanned: floor.scanCount,
   createdAt: floor.createdAt,
 });
+
+/**
+ * The Floor columns legacyMapEntry/legacyBuilding read. Floor rows also carry
+ * svgContent and drawing, the largest columns in the database, so these
+ * routes must never load whole rows (FX-093).
+ */
+const LEGACY_FLOOR_SELECT = {
+  id: true,
+  name: true,
+  floorNumber: true,
+  mapImageUrl: true,
+  qrCodeUrl: true,
+  scanCount: true,
+  createdAt: true,
+};
 
 /**
  * Legacy building document synthesized from a Building row plus its Floor
@@ -114,19 +131,15 @@ const deleteAssetQuietly = async (url, buildingId) => {
 router.post('/api/building/new', whoami, upload.array('maps'), async (req, res) => {
   try {
     if (req.user.verified === false)
-      return res.send({ Success: false, Message: 'Verify account first.' });
+      return fail(res, 200, 'Verify account first.');
 
     // Capacity per plan: the free tier maps one building end to end; paid
-    // tiers scale out. Floors are capped separately at floor creation.
-    const [ownedCount, planLimits] = await Promise.all([
-      prisma.building.count({ where: { ownerId: req.user.id } }),
-      Promise.resolve(buildingLimitFor(req.user.plan)),
-    ]);
-    if (ownedCount >= planLimits) {
-      return res.send({
-        Success: false,
-        Message: `Your plan allows up to ${planLimits} building${planLimits === 1 ? '' : 's'}. Upgrade to add more.`,
-      });
+    // tiers scale out. Checked again under a lock inside the transaction
+    // below; this early read only spares a doomed request the validation.
+    const planLimits = buildingLimitFor(req.user.plan);
+    const planLimitMessage = `Your plan allows up to ${planLimits} building${planLimits === 1 ? '' : 's'}. Upgrade to add more.`;
+    if ((await prisma.building.count({ where: { ownerId: req.user.id } })) >= planLimits) {
+      return fail(res, 200, planLimitMessage);
     }
 
     // Plan floor cap applies to the floors created with the building too.
@@ -134,187 +147,104 @@ router.post('/api/building/new', whoami, upload.array('maps'), async (req, res) 
 
     const { buildingName } = req.body;
     if (!buildingName || typeof buildingName !== 'string')
-      return res.send({ Success: false, Message: 'Invalid building name.' });
+      return fail(res, 200, 'Invalid building name.');
 
     const floorNames = normalizeFloorNames(req.body.floorNames);
     if (floorNames.length === 0)
-      return res.send({ Success: false, Message: 'Invalid floor names.' });
+      return fail(res, 200, 'Invalid floor names.');
 
     if (floorNames.length > floorCap) {
-      return res.send({
-        Success: false,
-        Message: `Your plan allows up to ${floorCap} floors per building. Upgrade to add more.`,
-      });
+      return fail(res, 200, `Your plan allows up to ${floorCap} floors per building. Upgrade to add more.`,);
+    }
+
+    for (const name of floorNames) {
+      const reserved = reservedFloorNameError(name);
+      if (reserved) return fail(res, 200, reserved);
     }
 
     const normalizedFloors = floorNames.map((f) => f.toLowerCase());
     if (new Set(normalizedFloors).size !== normalizedFloors.length)
-      return res.send({ Success: false, Message: 'Floor names must be unique.' });
+      return fail(res, 200, 'Floor names must be unique.');
 
     const nameCheck = await checkBuildingName(req.user.id, buildingName);
-    if (nameCheck !== true) return res.send({ Success: false, Message: nameCheck });
+    if (nameCheck !== true) return fail(res, 200, nameCheck);
 
     const files = req.files || [];
     if (files.length > floorNames.length)
-      return res.send({ Success: false, Message: 'Too many map files uploaded.' });
+      return fail(res, 200, 'Too many map files uploaded.');
 
-    // Building + its four system roles in one transaction: RBAC on a building
-    // without roles cannot delegate anything, so they are inseparable.
-    const building = await prisma.building.create({
-      data: {
-        name: buildingName.trim(),
-        ownerId: req.user.id,
-        roles: {
-          create: SYSTEM_ROLES.map((role) => ({
-            name: role.name,
-            permissions: [...role.permissions],
-            isSystem: true,
-          })),
-        },
-      },
-    });
+    // Building, its four system roles and every floor commit together or not
+    // at all (BE-38): a half-created building is a stuck state for its owner.
+    // The owner's User row is locked first, so parallel creates by the same
+    // user serialize and the plan count below cannot be raced past.
+    const created = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${req.user.id} FOR UPDATE`;
+      if ((await tx.building.count({ where: { ownerId: req.user.id } })) >= planLimits) {
+        return null;
+      }
 
-    for (let i = 0; i < floorNames.length; i++) {
-      const floorName = floorNames[i];
-      const floor = await prisma.floor.create({
+      const building = await tx.building.create({
         data: {
-          buildingId: building.id,
-          floorNumber: i + 1,
-          name: floorName,
-          qrCodeUrl: await floorQrDataUrl(building.id, floorName),
+          name: buildingName.trim(),
+          ownerId: req.user.id,
+          roles: {
+            create: SYSTEM_ROLES.map((role) => ({
+              name: role.name,
+              permissions: [...role.permissions],
+              isSystem: true,
+            })),
+          },
         },
       });
 
-      const file = files[i];
-      if (file) {
-        try {
-          const ext = imageExtFor(file.mimetype) || 'bin';
-          const mapUrl = await uploadBuffer({
-            key: keys.floorMap(building.id, floor.id, ext),
-            buffer: file.buffer,
-            contentType: file.mimetype,
-          });
-          await prisma.floor.update({
-            where: { id: floor.id },
-            data: { mapImageUrl: mapUrl },
-          });
-        } catch (error) {
-          // Same policy as the Cloudinary era: a failed upload leaves the map
-          // null rather than failing the whole creation.
-          console.error(`Failed to upload floor ${floorName} map:`, error);
-        }
-      }
-    }
-
-    return res.send({
-      Success: true,
-      Message: 'Building created successfully.',
-      buildingID: building.id,
-    });
-  } catch (error) {
-    console.error(error);
-    return res.send({ Success: false, Message: 'Server error.' });
-  }
-});
-
-/* ---------------- UPDATE BUILDING (replace floors/maps) ---------------- */
-router.put('/api/building/:id', whoami, requireOwner, upload.array('maps'), async (req, res) => {
-  try {
-    const building = req.building;
-
-    let { buildingName, floorNames } = req.body;
-    floorNames = normalizeFloorNames(floorNames);
-
-    const nameCheck = await checkBuildingName(req.user.id, buildingName, building.id);
-    if (nameCheck !== true) return res.send({ Success: false, Message: nameCheck });
-
-    const normalizedFloors = floorNames.map((f) => f.toLowerCase());
-    if (floorNames.length === 0 || new Set(normalizedFloors).size !== normalizedFloors.length)
-      return res.send({ Success: false, Message: 'Floor names must be unique.' });
-
-    const files = req.files || [];
-    if (files.length !== floorNames.length)
-      return res.send({ Success: false, Message: 'Each floor must have one map.' });
-
-    // Reconcile against Floor rows. Floors are matched by name (legacy maps[]
-    // preserved scan counts by floor name), unmatched floors are deleted
-    // (their nodes cascade), and the survivors are renumbered by position.
-    const existing = await prisma.floor.findMany({ where: { buildingId: building.id } });
-    const byName = new Map(existing.map((f) => [f.name || String(f.floorNumber), f]));
-
-    const plans = floorNames.map((name, index) => ({
-      name,
-      index,
-      row: byName.get(name) || null,
-    }));
-
-    const keepIds = plans.filter((p) => p.row).map((p) => p.row.id);
-    const dropped = existing.filter((f) => !keepIds.includes(f.id));
-    await prisma.floor.deleteMany({
-      where: { buildingId: building.id, id: { notIn: keepIds } },
-    });
-    for (const f of dropped) await deleteAssetQuietly(f.mapImageUrl, building.id);
-
-    // Two-phase renumbering keeps @@unique(buildingId, floorNumber) happy
-    // while floors move positions.
-    await prisma.$transaction(
-      plans
-        .filter((p) => p.row)
-        .map((p) =>
-          prisma.floor.update({
-            where: { id: p.row.id },
-            data: { floorNumber: -(p.index + 1) },
+      const floors = [];
+      for (let i = 0; i < floorNames.length; i++) {
+        floors.push(
+          await tx.floor.create({
+            data: {
+              buildingId: building.id,
+              floorNumber: i + 1,
+              name: floorNames[i],
+              qrCodeUrl: await floorQrDataUrl(building.id, floorNames[i]),
+            },
+            select: { id: true, name: true },
           })
-        )
-    );
-    for (const p of plans) {
-      if (!p.row) {
-        p.row = await prisma.floor.create({
-          data: { buildingId: building.id, floorNumber: -(p.index + 1), name: p.name },
-        });
+        );
       }
-    }
-
-    for (const p of plans) {
-      let mapUrl = null;
-      const file = files[p.index];
-      if (file) {
-        try {
-          const ext = imageExtFor(file.mimetype) || 'bin';
-          mapUrl = await uploadBuffer({
-            key: keys.floorMap(building.id, p.row.id, ext),
-            buffer: file.buffer,
-            contentType: file.mimetype,
-          });
-        } catch (error) {
-          console.error(`Failed to upload floor ${p.name} map:`, error);
-          mapUrl = null;
-        }
-      }
-      if (mapUrl) await deleteAssetQuietly(p.row.mapImageUrl, building.id);
-
-      await prisma.floor.update({
-        where: { id: p.row.id },
-        data: {
-          floorNumber: p.index + 1,
-          name: p.name,
-          mapImageUrl: mapUrl,
-          // Same URL shape the create route uses — building id + floor name.
-          qrCodeUrl: await floorQrDataUrl(building.id, p.name),
-        },
-      });
-    }
-
-    await prisma.building.update({
-      where: { id: building.id },
-      data: { name: buildingName.trim() },
+      return { building, floors };
     });
-    invalidate(building.id);
+    if (!created) return fail(res, 200, planLimitMessage);
+    const { building, floors } = created;
 
-    res.send({ Success: true, Message: 'Building updated.' });
+    // Uploads run after commit: storage is not transactional, and a failed
+    // upload leaves that floor's map null rather than failing the creation.
+    for (let i = 0; i < floors.length; i++) {
+      const file = files[i];
+      if (!file) continue;
+      const floor = floors[i];
+      try {
+        const ext = imageExtFor(file.mimetype) || 'bin';
+        const mapUrl = await uploadBuffer({
+          key: keys.floorMap(building.id, floor.id, ext),
+          buffer: file.buffer,
+          contentType: file.mimetype,
+        });
+        await prisma.floor.update({
+          where: { id: floor.id },
+          data: { mapImageUrl: mapUrl },
+        });
+      } catch (error) {
+        console.error(`Failed to upload floor ${floor.name} map:`, error);
+      }
+    }
+
+    return ok(res, {
+      message: 'Building created successfully.',
+      extra: { buildingID: building.id },
+    });
   } catch (error) {
     console.error(error);
-    res.status(500).send({ Success: false, Message: 'Server error.' });
+    return fail(res, 200, 'Server error.');
   }
 });
 
@@ -323,36 +253,37 @@ router.put('/api/building/:id', whoami, requireOwner, upload.array('maps'), asyn
 // frontend BuildingOwnerGuard compares `Message.owner` against the current
 // user id. So the building stays readable, but the owner is reduced to an id
 // plus a display name — never their email, phone, or scan history.
-router.get('/api/building/id/:buildingID', async (req, res) => {
+router.get('/api/building/id/:buildingID', publicReadLimiter, async (req, res) => {
   const { buildingID } = req.params;
 
   try {
     if (!buildingID || !isId(buildingID)) {
-      return res.send({ Success: false, Message: 'Invalid building ID.' });
+      return fail(res, 200, 'Invalid building ID.');
     }
 
     const building = await prisma.building.findUnique({
       where: { id: buildingID },
       include: {
-        floors: { orderBy: { floorNumber: 'asc' } },
+        floors: { orderBy: { floorNumber: 'asc' }, select: LEGACY_FLOOR_SELECT },
         owner: { select: { id: true, name: true, lastname: true, company: true, userType: true } },
       },
     });
-    if (!building) return res.send({ Success: false, Message: 'Building not found.' });
-    if (!building.owner) return res.send({ Success: false, Message: 'Owner data missing.' });
+    if (!building) return fail(res, 200, 'Building not found.');
+    if (!building.owner) return fail(res, 200, 'Owner data missing.');
 
-    return res.send({
-      Success: true,
-      Message: legacyBuilding(building, building.floors),
-      Owner: {
-        _id: building.owner.id,
-        displayName: displayName(building.owner),
-        userType: building.owner.userType,
+    return ok(res, {
+      data: legacyBuilding(building, building.floors),
+      extra: {
+        Owner: {
+          _id: building.owner.id,
+          displayName: displayName(building.owner),
+          userType: building.owner.userType,
+        },
       },
     });
   } catch (error) {
     console.error('GET /api/building/id/:buildingID error:', error);
-    return res.send({ Success: false, Message: 'Server error.' });
+    return fail(res, 200, 'Server error.');
   }
 });
 
@@ -361,7 +292,7 @@ router.get('/api/building/my', whoami, async (req, res) => {
   try {
     const owned = await prisma.building.findMany({
       where: { ownerId: req.user.id },
-      include: { floors: { orderBy: { floorNumber: 'asc' } } },
+      include: { floors: { orderBy: { floorNumber: 'asc' }, select: LEGACY_FLOOR_SELECT } },
       orderBy: { createdAt: 'desc' },
     });
 
@@ -370,31 +301,32 @@ router.get('/api/building/my', whoami, async (req, res) => {
     const memberships = await prisma.buildingMember.findMany({
       where: { userId: req.user.id },
       include: {
-        building: { include: { floors: { orderBy: { floorNumber: 'asc' } } } },
+        building: { include: { floors: { orderBy: { floorNumber: 'asc' }, select: LEGACY_FLOOR_SELECT } } },
         role: { select: { name: true, permissions: true } },
       },
     });
 
-    return res.send({
-      Success: true,
-      Message: owned.map((b) => legacyBuilding(b, b.floors)),
-      memberBuildings: memberships.map((m) => ({
-        ...legacyBuilding(m.building, m.building.floors),
-        role: m.role.name,
-        permissions: m.role.permissions,
-      })),
+    return ok(res, {
+      data: owned.map((b) => legacyBuilding(b, b.floors)),
+      extra: {
+        memberBuildings: memberships.map((m) => ({
+          ...legacyBuilding(m.building, m.building.floors),
+          role: m.role.name,
+          permissions: m.role.permissions,
+        })),
+      },
     });
   } catch (err) {
     console.error(err);
-    return res.send({ Success: false, Message: 'Server error' });
+    return fail(res, 200, 'Server error');
   }
 });
 
 /** The signed-in user id from a session cookie, or null. Never throws. */
-const userIdFromToken = (token) => {
+const userIdFromToken = async (token) => {
   if (!token) return null;
   try {
-    return jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'] })?.userID || null;
+    return (await resolveSession(token)).user?.id || null;
   } catch {
     return null;
   }
@@ -405,20 +337,20 @@ router.get('/api/building/scan/:id/:floor', publicReadLimiter, async (req, res) 
   const { id, floor } = req.params;
   try {
     if (!id || !isId(id))
-      return res.status(400).send({ Success: false, Message: 'Invalid building id.' });
+      return fail(res, 400, 'Invalid building id.');
 
     const building = await prisma.building.findUnique({
       where: { id },
-      include: { floors: { orderBy: { floorNumber: 'asc' } } },
+      include: { floors: { orderBy: { floorNumber: 'asc' }, select: LEGACY_FLOOR_SELECT } },
     });
     if (!building)
-      return res.status(404).send({ Success: false, Message: 'Building not found.' });
+      return fail(res, 404, 'Building not found.');
 
     // A deactivated building is honored rather than silently switched back on.
     // This endpoint is anonymous, so reactivating here would let any passer-by
     // undo the owner-only deactivation and get served stale evacuation data.
     if (building.isDeactivated) {
-      return res.status(410).send({ Success: false, Message: 'This building is currently deactivated.' });
+      return fail(res, 410, 'This building is currently deactivated.');
     }
 
     // The printed floor QR carries the floor NAME. Resolve by name first, then
@@ -433,13 +365,13 @@ router.get('/api/building/scan/:id/:floor', publicReadLimiter, async (req, res) 
     }
     if (!floorRow) floorRow = building.floors[0] || null;
     if (!floorRow)
-      return res.status(404).send({ Success: false, Message: 'Floor not found.' });
+      return fail(res, 404, 'Floor not found.');
 
     // FX-022: this page is both the landing page for a printed floor QR AND
     // the admin floor view. Only a visitor's scan counts — the building's own
     // owner or members looking at their map in the dashboard must not inflate
     // scanCount, ScanEvents, or (during an emergency) the incident log.
-    const viewerId = userIdFromToken(req.cookies?.['userToken']);
+    const viewerId = await userIdFromToken(req.cookies?.['userToken']);
     const isStaffView =
       Boolean(viewerId) &&
       (building.ownerId === viewerId ||
@@ -450,9 +382,8 @@ router.get('/api/building/scan/:id/:floor', publicReadLimiter, async (req, res) 
           })
         ));
     if (isStaffView) {
-      return res.send({
-        Success: true,
-        Message: {
+      return ok(res, {
+        data: {
           buildingName: building.name,
           floorData: legacyMapEntry(floorRow),
           scannedCount: floorRow.scanCount,
@@ -461,6 +392,7 @@ router.get('/api/building/scan/:id/:floor', publicReadLimiter, async (req, res) 
     }
 
     const updatedFloor = await prisma.floor.update({
+      select: LEGACY_FLOOR_SELECT,
       where: { id: floorRow.id },
       data: { scanCount: { increment: 1 } },
     });
@@ -487,30 +419,26 @@ router.get('/api/building/scan/:id/:floor', publicReadLimiter, async (req, res) 
       }
     }
 
-    // Same reasoning as the QR scan route: an invalid token must not turn a
-    // successful floor lookup into a 500 for the person standing in the building.
-    const userToken = req.cookies['userToken'];
-    if (userToken) {
-      try {
-        const decoded = jwt.verify(userToken, config.jwt.secret, { algorithms: ['HS256'] });
-        if (decoded?.userID) {
-          await prisma.scanEvent.create({
-            data: {
-              buildingId: building.id,
-              userId: decoded.userID,
-              buildingName: building.name,
-            },
-          });
-        }
-      } catch (tokenErr) {
-        console.warn('Scan history not recorded (invalid token):', tokenErr.message);
-      }
+    // Same rule as the QR scan route: every visitor scan is recorded (FX-094),
+    // attributed only through a valid session, and a failure here must never
+    // turn a successful floor lookup into a 500.
+    try {
+      const userToken = req.cookies['userToken'];
+      const session = userToken ? await resolveSession(userToken) : null;
+      await prisma.scanEvent.create({
+        data: {
+          buildingId: building.id,
+          userId: session?.user?.id ?? null,
+          buildingName: building.name,
+        },
+      });
+    } catch (scanErr) {
+      console.warn('Scan event not recorded:', scanErr.message);
     }
 
     const floorData = legacyMapEntry(updatedFloor);
-    return res.send({
-      Success: true,
-      Message: {
+    return ok(res, {
+      data: {
         buildingName: building.name,
         floorData,
         scannedCount: updatedFloor.scanCount,
@@ -518,7 +446,7 @@ router.get('/api/building/scan/:id/:floor', publicReadLimiter, async (req, res) 
     });
   } catch (error) {
     console.error('GET /api/building/scan/:id/:floor error:', error);
-    return res.status(500).send({ Success: false, Message: 'Server error.' });
+    return fail(res, 500, 'Server error.');
   }
 });
 
@@ -551,17 +479,18 @@ router.delete('/api/building/delete/:buildingId', whoami, requireOwner, async (r
     // just storage cost, so failures are logged and ignored.
     for (const f of floors) await deleteAssetQuietly(f.mapImageUrl, building.id);
 
-    return res.send({
-      Success: true,
-      Message: 'Building and all related data deleted successfully.',
-      DeletedCounts: {
-        nodes: nodeCount,
-        floors: floors.length,
+    return ok(res, {
+      message: 'Building and all related data deleted successfully.',
+      extra: {
+        DeletedCounts: {
+          nodes: nodeCount,
+          floors: floors.length,
+        },
       },
     });
   } catch (err) {
     console.error('Delete Error:', err);
-    return res.status(500).send({ Success: false, Message: 'Server error.' });
+    return fail(res, 500, 'Server error.');
   }
 });
 
@@ -573,7 +502,7 @@ router.delete(
   async (req, res) => {
     const floorNum = parseInt(req.params.floorNumber, 10);
     if (Number.isNaN(floorNum) || floorNum < 1) {
-      return res.status(400).send({ Success: false, Message: 'Invalid floor number.' });
+      return fail(res, 400, 'Invalid floor number.');
     }
 
     try {
@@ -595,17 +524,18 @@ router.delete(
         invalidate(req.building.id);
       }
 
-      return res.send({
-        Success: true,
-        Message: 'Floor and all related data deleted successfully.',
-        DeletedCounts: {
-          nodes: nodeCount,
-          floorMap: floorDeleted,
+      return ok(res, {
+        message: 'Floor and all related data deleted successfully.',
+        extra: {
+          DeletedCounts: {
+            nodes: nodeCount,
+            floorMap: floorDeleted,
+          },
         },
       });
     } catch (err) {
       console.error('Floor Delete Error:', err);
-      return res.status(500).send({ Success: false, Message: 'Server error.' });
+      return fail(res, 500, 'Server error.');
     }
   }
 );
@@ -629,10 +559,10 @@ router.put('/api/building/deactivate/:id', whoami, requireOwner, async (req, res
       });
     }
 
-    res.send({ Success: true, Message: 'Building deactivated.' });
+    ok(res, { message: 'Building deactivated.' });
   } catch (err) {
     console.error('PUT /api/building/deactivate/:id error:', err);
-    res.send({ Success: false, Message: 'Server error.' });
+    fail(res, 200, 'Server error.');
   }
 });
 

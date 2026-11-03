@@ -3,6 +3,7 @@ import prisma from "../db/prisma.js";
 import whoami from "../middlewares/whoami.js";
 import sendMail from "../services/sendEmail.js";
 import { ok, fail } from "../utils/respond.js";
+import { escapeHtml } from '../services/escapeHtml.js';
 
 const router = express.Router();
 
@@ -11,8 +12,9 @@ router.post("/api/review/alertup", whoami, async (req, res) => {
 
   try {
     // Validate stars
-    if (typeof stars !== "number" || stars < 1 || stars > 5) {
-      return fail(res, 400, "Stars must be between 1 and 5.");
+    // FX-027-2: the column is an integer; 4.5 used to reach the insert and 500.
+    if (!Number.isInteger(stars) || stars < 1 || stars > 5) {
+      return fail(res, 400, "Stars must be a whole number from 1 to 5.");
     }
 
     // Validate comment length
@@ -55,7 +57,7 @@ router.post("/api/review/alertup", whoami, async (req, res) => {
         <div style="background-color: #ffffff; padding: 30px; border-radius: 8px;">
           <h1 style="color: #FF7B22;">🙏 Thank You for Your Feedback</h1>
 
-          <p>Hello <strong>${displayName}</strong>,</p>
+          <p>Hello <strong>${escapeHtml(displayName)}</strong>,</p>
 
           <p>
             Thank you for taking the time to leave a review about

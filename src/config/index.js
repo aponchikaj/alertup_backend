@@ -113,7 +113,6 @@ const config = {
   },
 
   flags: {
-    enableDebugRoutes: env.ENABLE_DEBUG_ROUTES === 'true',
     maintenanceMode: env.MAINTENANCE_MODE === 'true',
   },
 };

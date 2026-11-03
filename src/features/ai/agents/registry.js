@@ -171,4 +171,6 @@ export const AGENTS = Object.freeze({
   }),
 });
 
-export const getAgent = (id) => AGENTS[id] || null;
+// Own keys only: `AGENTS[id]` resolved 'constructor', 'toString', … to
+// Object.prototype functions, which then failed later with a 500 (BE-26).
+export const getAgent = (id) => (typeof id === 'string' && Object.hasOwn(AGENTS, id) ? AGENTS[id] : null);

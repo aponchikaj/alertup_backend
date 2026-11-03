@@ -305,3 +305,14 @@ export function publicClosure(row) {
     blocked: row.costMultiplier === null || row.costMultiplier === undefined,
   };
 }
+
+/**
+ * The `closure_changed` SSE payload. It reaches anonymous scan pages, so it is
+ * the public projection: no graph edge/node ids (BE-28). Clients treat it as
+ * a "re-route now" signal. `action` is created | updated | deleted from the
+ * editor, or started | ended when a scheduled closure takes or leaves effect.
+ */
+export function closureChangedEvent(row, action) {
+  const { id, floorId, reason, startsAt, endsAt, blocked } = publicClosure(row);
+  return { closureId: id, action, blocked, floorId, reason, startsAt, endsAt };
+}

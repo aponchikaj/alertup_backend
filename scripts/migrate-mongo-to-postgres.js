@@ -25,6 +25,7 @@ import dotenv from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 import { SYSTEM_ROLES } from '../src/auth/permissions.js';
 import { buildQrSlug } from '../src/features/qr/qrPayload.js';
+import { assertLocalDatabase } from '../src/utils/dbGuard.js';
 
 dotenv.config();
 
@@ -71,6 +72,8 @@ const toDate = (v) => {
 };
 
 async function wipe() {
+  // FX-070: --wipe truncates every table. Never against a shared database.
+  assertLocalDatabase(process.env.DATABASE_URL, 'the --wipe truncate');
   const tables = await prisma.$queryRawUnsafe(
     `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'`
   );

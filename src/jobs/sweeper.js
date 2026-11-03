@@ -23,10 +23,33 @@ export const AI_CONVERSATION_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 // text sits around.
 export const SEARCH_EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
+// FX-019: registration does not prove the registrant owns the address, so an
+// account that never verifies its email would otherwise hold that address
+// forever — blocking the real owner from signing up or accepting an invite.
+// After a week unverified, an account that holds nothing (no buildings,
+// memberships or sent invites) is removed and the address is free again.
+export const UNVERIFIED_ACCOUNT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+// FX-054: retention for every table that grows with traffic. Audit rows
+// (Log.entity set) and emergency logs are the incident record — never swept
+// here; they leave only with their building, via IncidentArchive (D3).
+export const ROUTE_REQUEST_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+export const SYSTEM_LOG_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+export const ENDED_CLOSURE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+export const SCAN_EVENT_RETENTION_MS = 365 * 24 * 60 * 60 * 1000;
+export const INBOX_RETENTION_MS = 365 * 24 * 60 * 60 * 1000;
+
+const before = (now, ms) => new Date(now.getTime() - ms);
+
 async function sweep() {
   const now = new Date();
   try {
     await prisma.verification.deleteMany({
+      where: { expiresAt: { lt: now } },
+    });
+    // A revocation outlives its token by nothing: once the JWT's own exp has
+    // passed it is rejected regardless (FX-083).
+    await prisma.revokedToken.deleteMany({
       where: { expiresAt: { lt: now } },
     });
     // Expired PENDING invites older than ~30 days; expiry itself is derived
@@ -53,6 +76,25 @@ async function sweep() {
     await prisma.searchEvent.deleteMany({
       where: { createdAt: { lt: new Date(now.getTime() - SEARCH_EVENT_RETENTION_MS) } },
     });
+    // Squatted / abandoned sign-ups (see UNVERIFIED_ACCOUNT_TTL_MS above).
+    await prisma.user.deleteMany({
+      where: {
+        verified: false,
+        createdAt: { lt: new Date(now.getTime() - UNVERIFIED_ACCOUNT_TTL_MS) },
+        ownedBuildings: { none: {} },
+        memberships: { none: {} },
+        invitesSent: { none: {} },
+      },
+    });
+    // Traffic-proportional tables (FX-054, constants above).
+    await prisma.routeRequest.deleteMany({ where: { createdAt: { lt: before(now, ROUTE_REQUEST_RETENTION_MS) } } });
+    await prisma.log.deleteMany({
+      where: { entity: null, isEmergency: false, createdAt: { lt: before(now, SYSTEM_LOG_RETENTION_MS) } },
+    });
+    await prisma.closure.deleteMany({ where: { endsAt: { lt: before(now, ENDED_CLOSURE_RETENTION_MS) } } });
+    await prisma.scanEvent.deleteMany({ where: { scannedAt: { lt: before(now, SCAN_EVENT_RETENTION_MS) } } });
+    await prisma.contact.deleteMany({ where: { createdAt: { lt: before(now, INBOX_RETENTION_MS) } } });
+    await prisma.report.deleteMany({ where: { createdAt: { lt: before(now, INBOX_RETENTION_MS) } } });
     // Durable SSE replay backlog — see eventLog.js for the retention window.
     await purgeRealtimeEvents();
   } catch (err) {

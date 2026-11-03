@@ -1,12 +1,17 @@
 import express from 'express';
 import prisma from '../db/prisma.js';
 import whoami from '../middlewares/whoami.js';
+import { ok, fail } from '../utils/respond.js';
 
 const router = express.Router();
 
 // Legacy envelope + keys (MyBuildings, scanned, myBuildingsScanned,
 // lastScanned, recentScans, scanActivity) — the deployed dashboard reads them.
-// premiumStatus/premiumExpires are gone with the premium system.
+// premiumStatus/premiumExpires now carry the account plan (the plan card
+// read them after they had stopped being sent, so every account showed as
+// paid with an empty value). Plans have no expiry yet, so it is null.
+
+const PLAN_LABELS = { FREE: 'Free', STARTER: 'Starter', BUSINESS: 'Business' };
 
 router.get('/api/dashboard', whoami, async (req, res) => {
   try {
@@ -17,12 +22,17 @@ router.get('/api/dashboard', whoami, async (req, res) => {
     activityStart.setUTCHours(0, 0, 0, 0);
     activityStart.setUTCDate(activityStart.getUTCDate() - (DAYS - 1));
 
-    const [myBuildings, ownedScanSum, totalScans, recent, activityRows] =
+    const [myBuildings, floorScanSum, nodeScanSum, totalScans, recent, activityRows] =
       await Promise.all([
         prisma.building.count({ where: { ownerId: userId } }),
-        // Sum of every floor scan across the user's own buildings — the old
-        // maps.scanned aggregation, now a Floor.scanCount sum.
+        // Every scan across the user's own buildings: floor QR codes count on
+        // Floor.scanCount, sticker (node) QR codes, the main path, on
+        // Node.scanCount. It used to sum floors only (BE-32).
         prisma.floor.aggregate({
+          _sum: { scanCount: true },
+          where: { building: { ownerId: userId } },
+        }),
+        prisma.node.aggregate({
           _sum: { scanCount: true },
           where: { building: { ownerId: userId } },
         }),
@@ -62,16 +72,18 @@ router.get('/api/dashboard', whoami, async (req, res) => {
     const dashboardData = {
       MyBuildings: myBuildings,
       scanned: totalScans,
-      myBuildingsScanned: ownedScanSum._sum.scanCount || 0,
+      myBuildingsScanned: (floorScanSum._sum.scanCount || 0) + (nodeScanSum._sum.scanCount || 0),
+      premiumStatus: PLAN_LABELS[req.user.plan] || PLAN_LABELS.FREE,
+      premiumExpires: null,
       lastScanned: recentScans[0]?.buildingName || null,
       recentScans,
       scanActivity,
     };
 
-    return res.send({ Success: true, Message: dashboardData });
+    return ok(res, { data: dashboardData });
   } catch (err) {
     console.error(err);
-    return res.send({ Success: false, Message: 'Server error.' });
+    return fail(res, 200, 'Server error.');
   }
 });
 

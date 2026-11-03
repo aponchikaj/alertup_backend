@@ -1,4 +1,17 @@
-import {
+import { jest } from '@jest/globals';
+
+// The broadcaster is in-memory routing; the durable append is eventLog's job
+// (covered by eventLog.test.js). Without this mock every publish() here wrote
+// a RealtimeEvent for a building id that does not exist ('bldA', 'bld'), and
+// the FK violation was logged as console noise in an otherwise green run
+// (FX-063).
+let seq = 0;
+jest.unstable_mockModule('./eventLog.js', () => ({
+  nextSeq: () => ++seq,
+  append: () => Promise.resolve(),
+}));
+
+const {
   publish,
   subscribe,
   subscriberCount,
@@ -6,7 +19,7 @@ import {
   registerCloser,
   closeAll,
   MAX_SUBSCRIBERS_PER_BUILDING,
-} from './broadcaster.js';
+} = await import('./broadcaster.js');
 
 afterEach(() => {
   closeAll();

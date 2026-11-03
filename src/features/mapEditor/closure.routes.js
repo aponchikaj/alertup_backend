@@ -7,7 +7,7 @@ import { isId } from '../../utils/ids.js';
 import { PERMISSIONS } from '../../auth/permissions.js';
 import { editorWriteLimiter } from '../../services/rateLimiter.js';
 import { publish } from '../realtime/broadcaster.js';
-import { invalidateClosures, publicClosure } from '../wayfinding/closures.js';
+import { invalidateClosures, publicClosure, closureChangedEvent } from '../wayfinding/closures.js';
 import { writeAudit, actorFromReq } from '../../services/audit.js';
 
 /**
@@ -193,22 +193,12 @@ async function readClosureBody(body = {}, { buildingId, current = null }) {
   return { data, error: null };
 }
 
-/** The `closure_changed` SSE payload, per the wire contract. */
-const changedEvent = (row, action) => ({
-  closureId: row.id,
-  action,
-  blocked: row.costMultiplier === null,
-  edgeIds: row.edgeIds,
-  nodeIds: row.nodeIds,
-  reason: row.reason ?? null,
-  endsAt: row.endsAt ? row.endsAt.toISOString() : null,
-});
 
 /** Invalidate then announce — in that order, so a client that re-routes the
  *  instant it sees the event never reads a stale cache. */
 const announce = (buildingId, row, action) => {
   invalidateClosures(buildingId);
-  publish(buildingId, 'closure_changed', changedEvent(row, action));
+  publish(buildingId, 'closure_changed', closureChangedEvent(row, action));
 };
 
 // ------------------------------------------------------------------ read ---

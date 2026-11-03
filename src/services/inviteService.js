@@ -6,6 +6,14 @@ import { inviteEmail } from './emailTemplates.js';
 
 export const INVITE_TTL_HOURS = 48;
 
+/** The invite was rolled back because the mail provider refused the email. */
+export class InviteMailError extends Error {
+  constructor(cause) {
+    super('The invitation email could not be sent.', { cause });
+    this.name = 'InviteMailError';
+  }
+}
+
 // The raw token (256 bits, base64url) appears only in the emailed link; at
 // rest we keep its SHA-256. Brute force is not the threat at this entropy —
 // constant-time lookup by hash is the point.
@@ -62,7 +70,7 @@ export async function createAndSendInvite({ building, role, email, invitedBy }) 
     await sendMail(normalized, mail.subject, mail.text, undefined, mail.html);
   } catch (err) {
     await prisma.buildingInvite.delete({ where: { id: invite.id } }).catch(() => {});
-    throw err;
+    throw new InviteMailError(err);
   }
 
   return invite;
@@ -134,5 +142,9 @@ export async function resendInvite(invite, building, role, invitedBy) {
     acceptUrl: acceptUrlFor(token),
     expiresHours: INVITE_TTL_HOURS,
   });
-  await sendMail(invite.email, mail.subject, mail.text, undefined, mail.html);
+  try {
+    await sendMail(invite.email, mail.subject, mail.text, undefined, mail.html);
+  } catch (err) {
+    throw new InviteMailError(err);
+  }
 }

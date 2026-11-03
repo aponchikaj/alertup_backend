@@ -14,6 +14,7 @@ import {
     LONG_CODE_TTL_MS,
 } from "../../services/verificationCodes.js";
 import { escapeHtml } from '../../services/escapeHtml.js';
+import { checkNewPassword } from "../../services/passwordPolicy.js";
 
 const router = express.Router();
 
@@ -118,6 +119,9 @@ router.post("/api/reset/verify-code", authLimiter, async (req, res) => {
     try {
         const result = await findUser(user);
         if (!result.success) {
+            // FX-081: an unknown address gets the reply a known address with
+            // no pending code gets, so this step is not an account oracle.
+            if (result.status === 404) return fail(res, 400, "Invalid or expired code.");
             return fail(res, result.status, result.message);
         }
 
@@ -174,15 +178,10 @@ router.post("/api/reset/verify-code", authLimiter, async (req, res) => {
 router.post("/api/reset/password", authLimiter, async (req, res) => {
     const { user, newPassword, code } = req.body;
 
-    if (!user || typeof newPassword !== "string" || newPassword.length < 6) {
-        return fail(res, 400, "Password must be at least 6 characters.");
-    }
+    if (!user) return fail(res, 400, "Invalid fields.");
 
-    // bcrypt silently truncates past 72 bytes, so a longer password would have
-    // its tail ignored rather than rejected.
-    if (Buffer.byteLength(newPassword) > 72) {
-        return fail(res, 400, "Password must be at most 72 bytes.");
-    }
+    const passwordError = checkNewPassword(newPassword);
+    if (passwordError) return fail(res, 400, passwordError);
 
     if (!code) {
         return fail(res, 400, "Reset verification required.");
@@ -191,6 +190,8 @@ router.post("/api/reset/password", authLimiter, async (req, res) => {
     try {
         const result = await findUser(user);
         if (!result.success) {
+            // FX-081: same reply as a known address without a verified code.
+            if (result.status === 404) return fail(res, 400, "Reset verification required.");
             return fail(res, result.status, result.message);
         }
 

@@ -78,7 +78,7 @@ router.post(
         size: 300,
         margin: 2,
         color: { dark: '#000000', light: '#FFFFFF' },
-        key: keys.nodeQr(req.building.id, node.id, format),
+        key: keys.nodeQr(req.building.id, node.id, format, qrData),
       };
 
       const result =
@@ -105,7 +105,8 @@ router.post(
         data: {
           qrData,
           format,
-          filename: result.filename || null,
+          // A clean download name; the stored key also carries a content hash (BE-36).
+          filename: `${node.id}.${format}`,
           url: result.publicUrl || result.url,
           svgContent: result.svgContent || null,
           dimensions: result.dimensions,

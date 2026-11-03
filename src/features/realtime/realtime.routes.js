@@ -101,6 +101,17 @@ export async function openStream(
     },
     {
       ip: req.ip,
+      // Member feed only: lets a removal close this user's stream (FX-056).
+      userId: includeLogs ? (req.user?.id ?? null) : null,
+      onRevoke: () => {
+        try {
+          sendEvent(res, 'access_revoked', {});
+          res.end();
+        } catch {
+          // socket already gone
+        }
+        cleanup(); // eslint-disable-line no-use-before-define
+      },
       // Evicted to make room for a newer occupant: tell the client to fall
       // back to polling (it backs off before trying a stream again), then end.
       onEvict: () => {

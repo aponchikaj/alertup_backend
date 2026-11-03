@@ -254,8 +254,13 @@ export async function purgeOlderThan(ms = REALTIME_EVENT_RETENTION_MS) {
   });
 }
 
-/** TEST-ONLY. Reset in-memory sequence/chain/seed state between test files. */
-export function _resetForTests() {
+/**
+ * TEST-ONLY. Reset in-memory sequence/chain/seed state between tests.
+ * Waits for queued writes first: dropping a live chain left setup.js's
+ * flush with nothing to await, so TRUNCATE raced the INSERT (FX-063).
+ */
+export async function _resetForTests() {
+  await Promise.allSettled([...chains.values()]);
   lastSeq.clear();
   lastPublicSeq.clear();
   chains.clear();

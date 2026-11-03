@@ -127,6 +127,35 @@ export function briefTemplate(facts, locale = 'en') {
   return text;
 }
 
+/* FX-041: phrased sentences cached by their exact facts + language. A repeat
+   question during an incident costs no model call; different facts (a new
+   closure, another exit) are a different key, so a stale exit is impossible. */
+const BRIEF_CACHE_TTL_MS = 10 * 60 * 1000;
+const BRIEF_CACHE_MAX = 1000;
+const briefCache = new Map();
+
+const briefKey = (facts, lang) => `${lang}|${JSON.stringify(facts)}`;
+
+function cachedBrief(key) {
+  const hit = briefCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at > BRIEF_CACHE_TTL_MS) {
+    briefCache.delete(key);
+    return null;
+  }
+  return hit.text;
+}
+
+function storeBrief(key, text) {
+  if (briefCache.size >= BRIEF_CACHE_MAX) briefCache.delete(briefCache.keys().next().value);
+  briefCache.set(key, { text, at: Date.now() });
+}
+
+/** TEST-ONLY. */
+export function _clearBriefCacheForTests() {
+  briefCache.clear();
+}
+
 /** Ask the model to phrase the facts it is handed. Never to find them. */
 async function phraseBrief(facts, locale, signal) {
   const system = [
@@ -172,15 +201,22 @@ router.post('/api/ai/evacuation-brief', publicReadLimiter, async (req, res) => {
 
   // The template is the answer unless a model improves on it. It is never the
   // other way round: nothing here waits on a provider to produce a sentence.
-  if (!aiAvailable()) {
+  // No route: the template already says everything there is to say, so the
+  // model is never asked (FX-041).
+  if (!aiAvailable() || !facts.found) {
     return ok(res, { data: { ...facts, text: template, fallback: true } });
   }
+
+  const key = briefKey(facts, lang);
+  const cached = cachedBrief(key);
+  if (cached) return ok(res, { data: { ...facts, text: cached, fallback: false } });
 
   const abort = new AbortController();
   req.on('close', () => abort.abort());
 
   try {
     const phrased = await phraseBrief(facts, lang, abort.signal);
+    if (phrased) storeBrief(key, phrased);
     return ok(res, {
       data: { ...facts, text: phrased || template, fallback: !phrased },
     });

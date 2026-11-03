@@ -7,7 +7,7 @@ import { requirePermission } from '../../../middlewares/requireBuildingPermissio
 import { aiChatLimiter, aiDailyLimiter } from '../../../services/rateLimiter.js';
 import { checkAiBudget } from '../../../services/aiBudget.js';
 import { initSse, sendData } from '../../realtime/sseHelpers.js';
-import { aiAvailable, activeProvider } from '../aiClient.js';
+import { aiAvailable } from '../aiClient.js';
 import { validateChatBody } from '../aiGuards.js';
 import { fenceUserContent } from '../promptBuilder.js';
 import { getAgent, TOOL_REGISTRY } from './registry.js';
@@ -200,6 +200,7 @@ router.post(
     );
 
     let answer = '';
+    let answeredBy = null; // null when the canned fallback text was sent
     const toolRows = [];
 
     try {
@@ -218,6 +219,8 @@ router.post(
           sendData(res, { tool: { name: event.name, ok: event.ok } });
         } else if (event.type === 'action') {
           sendData(res, { action: event.action });
+        } else if (event.type === 'done') {
+          answeredBy = event.provider ?? null;
         }
       }
 
@@ -255,7 +258,7 @@ router.post(
             conversationId: conversation.id,
             role: 'assistant',
             content: answer,
-            provider: activeProvider(),
+            provider: answeredBy,
           },
         ],
       });

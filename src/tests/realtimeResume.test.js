@@ -147,8 +147,8 @@ function collectSseEvents(server, path, { headers = {}, count, timeoutMs = 5000 
 }
 
 describe('eventLog: per-building durable sequence', () => {
-  afterEach(() => {
-    _resetForTests();
+  afterEach(async () => {
+    await _resetForTests();
   });
 
   test('nextSeq is monotonically increasing per building and independent across buildings', () => {
@@ -241,6 +241,26 @@ describe('eventLog: per-building durable sequence', () => {
 
     const final = await replaySince(building.id, 0);
     expect(final.events.map((r) => r.seq)).toEqual(seqs);
+  });
+
+  test('_resetForTests waits for in-flight writes instead of forgetting them (FX-063)', async () => {
+    // Describe-level afterEach hooks run BEFORE setup.js's global one. If the
+    // reset just cleared the chain map, setup's flushEventLog() found nothing
+    // to wait on and TRUNCATE raced the still-running INSERT, logging an FK
+    // violation into an otherwise green run.
+    const building = await seedBuilding();
+    const realCreate = prisma.realtimeEvent.create.bind(prisma.realtimeEvent);
+    const spy = jest.spyOn(prisma.realtimeEvent, 'create').mockImplementation(async (args) => {
+      await new Promise((r) => setTimeout(r, 50));
+      return realCreate(args);
+    });
+    try {
+      append(building.id, nextSeq(building.id, 'closure_changed'), 'closure_changed', {});
+      await _resetForTests();
+      expect(await prisma.realtimeEvent.count({ where: { buildingId: building.id } })).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('a rejected persist does not stop the next append for the same building', async () => {
@@ -389,9 +409,9 @@ describe('eventLog: per-building durable sequence', () => {
 });
 
 describe('broadcaster: seq attached to every published frame', () => {
-  afterEach(() => {
+  afterEach(async () => {
     closeAll();
-    _resetForTests();
+    await _resetForTests();
   });
 
   test('publish delivers to subscribers synchronously with a seq, before persistence settles', async () => {
@@ -462,9 +482,9 @@ describe('selectBufferedToForward: buffer dedup against replay', () => {
 });
 
 describe('heartbeat watermark: per stream type, not building-wide', () => {
-  afterEach(() => {
+  afterEach(async () => {
     closeAll();
-    _resetForTests();
+    await _resetForTests();
   });
 
   test('the public stream heartbeat reports the highest PUBLIC-forwardable seq, not the building-wide one', async () => {
@@ -571,7 +591,7 @@ describe('realtime resume over HTTP (public status stream)', () => {
 
   afterEach(async () => {
     closeAll();
-    _resetForTests();
+    await _resetForTests();
     // The SSE responses are kept alive deliberately; destroying the client
     // sockets on the test side isn't always enough for `server.close()`'s own
     // bookkeeping to see them gone in time, so force every connection shut

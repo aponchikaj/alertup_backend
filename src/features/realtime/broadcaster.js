@@ -100,7 +100,7 @@ export function publish(buildingId, event, data = {}) {
  * @param {(msg: {event: string, data: object}) => void} listener
  * @returns {() => void} unsubscribe
  */
-export function subscribe(buildingId, listener, { ip = null, onEvict = null } = {}) {
+export function subscribe(buildingId, listener, { ip = null, userId = null, onEvict = null, onRevoke = null } = {}) {
   const key = channelKey(buildingId);
   const id = String(buildingId);
   emitter.on(key, listener);
@@ -111,7 +111,9 @@ export function subscribe(buildingId, listener, { ip = null, onEvict = null } = 
   const slot = {
     buildingId: id,
     ip,
+    userId,
     onEvict,
+    onRevoke,
     // Evicting always releases the slot, whatever the stream does with the
     // notice — a newcomer must never be left waiting on a slow socket.
     evict() {
@@ -120,6 +122,9 @@ export function subscribe(buildingId, listener, { ip = null, onEvict = null } = 
       } finally {
         unsubscribe();
       }
+    },
+    release() {
+      unsubscribe();
     },
   };
   slots.add(slot);
@@ -139,6 +144,28 @@ export function subscribe(buildingId, listener, { ip = null, onEvict = null } = 
 }
 
 const closers = new Set();
+
+/**
+ * FX-056: end every member-feed stream `userId` holds for `buildingId` — the
+ * user was just removed from the building and must stop receiving its
+ * member-only events (logs, counters). Public status streams carry no userId
+ * and are untouched.
+ * @returns {number} streams closed
+ */
+export function closeUserStreams(buildingId, userId) {
+  const id = String(buildingId);
+  let closed = 0;
+  for (const slot of [...slots]) {
+    if (slot.buildingId !== id || !slot.userId || slot.userId !== userId) continue;
+    try {
+      slot.onRevoke?.();
+    } finally {
+      slot.release();
+    }
+    closed += 1;
+  }
+  return closed;
+}
 
 /** SSE routes register a closer so SIGTERM can end open streams cleanly. */
 export function registerCloser(close) {

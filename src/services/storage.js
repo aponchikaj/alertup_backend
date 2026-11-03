@@ -1,5 +1,5 @@
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import config from '../config/index.js';
 
 // S3-compatible asset storage. Maps, QR images and SVGs are public on these
@@ -78,6 +78,14 @@ export function contentTypeFor(filenameOrExt) {
  * @param {{key: string, buffer: Buffer, contentType: string, cacheControl?: string}} params
  * @returns {Promise<string>} public URL
  */
+/**
+ * FX-040 defence in depth: an SVG opened directly from the asset host would
+ * run any script it carries on that origin. `attachment` makes a direct visit
+ * download the file instead; <img> tags and fetch() are unaffected.
+ */
+export const svgDisposition = (contentType) =>
+  contentType === 'image/svg+xml' ? { ContentDisposition: 'attachment' } : {};
+
 export async function uploadBuffer({ key, buffer, contentType, cacheControl }) {
   if (!ALLOWED_PREFIXES.some((p) => key.startsWith(p))) {
     throw new Error(`Refusing to upload outside known prefixes: ${key}`);
@@ -97,6 +105,7 @@ export async function uploadBuffer({ key, buffer, contentType, cacheControl }) {
       ContentType: contentType,
       // Keys embed timestamps/random suffixes, so long-lived caching is safe.
       CacheControl: cacheControl || 'public, max-age=31536000, immutable',
+      ...svgDisposition(contentType),
     })
   );
   return publicUrl(key);
@@ -108,7 +117,11 @@ export const keys = {
     `buildings/${buildingId}/floors/${floorId}/map-${Date.now()}-${randomBytes(4).toString('hex')}.${ext}`,
   shopLogo: (buildingId, ext) =>
     `buildings/${buildingId}/logos/${Date.now()}-${randomBytes(4).toString('hex')}.${ext}`,
-  nodeQr: (buildingId, nodeId, ext) => `buildings/${buildingId}/qr/${nodeId}.${ext}`,
+  // Versioned by what the code encodes (BE-36): the URL carries the floor
+  // number, so a renumbered floor gets a new key instead of a stale copy
+  // served from the year-long immutable cache.
+  nodeQr: (buildingId, nodeId, ext, encoded) =>
+    `buildings/${buildingId}/qr/${nodeId}-${createHash('sha256').update(String(encoded)).digest('hex').slice(0, 10)}.${ext}`,
   floorQr: (buildingId, floorId) => `buildings/${buildingId}/qr/floor-${floorId}.png`,
   conversion: (ext) =>
     `conversions/${Date.now()}-${randomBytes(6).toString('hex')}.${ext}`,

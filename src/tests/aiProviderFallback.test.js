@@ -87,6 +87,16 @@ describe('streaming fallback', () => {
     expect(await collect(streamChat({ system: 's', messages: [] }))).toEqual(['rescued']);
   });
 
+  test('reports which provider actually answered (BE-27)', async () => {
+    geminiStream.mockImplementation(generator([], httpError(429)));
+    groqStream.mockImplementation(generator(['rescued']));
+    const seen = [];
+    await collect(streamChat({ system: 's', messages: [], onProvider: (name) => seen.push(name) }));
+    expect(seen).toEqual(['groq']);
+    // The callback is the router's, never forwarded to a provider client.
+    expect(groqStream.mock.calls[0][0]).not.toHaveProperty('onProvider');
+  });
+
   test('does NOT fall back once a token has been emitted', async () => {
     // Half the answer is already rendered in the browser; restarting would
     // append a second, differently-worded answer to the first half.

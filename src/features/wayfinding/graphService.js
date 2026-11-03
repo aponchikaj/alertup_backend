@@ -10,6 +10,18 @@ export { ASSUMED_PIXELS_PER_METER };
 const isManualWeight = (edge) => Math.abs(edge.weight - edge.distance) > 1e-6;
 
 /**
+ * Thrown when a building holds more nodes than the router will search. Routing
+ * on a truncated graph could silently drop the exits, so refuse instead
+ * (FX-093). The editor stops a building reaching this size in the first place.
+ */
+export class GraphTooLargeError extends Error {
+  constructor(buildingId) {
+    super(`Building ${buildingId} has more than ${MAX_NODES} nodes.`);
+    this.name = 'GraphTooLargeError';
+  }
+}
+
+/**
  * Load a building's routing graph in four flat queries and index it for the
  * pathfinder. Edges are stored once (source < target) and expanded here
  * according to `direction` — mirroring is a load-time concern, not a
@@ -26,6 +38,13 @@ const isManualWeight = (edge) => Math.abs(edge.weight - edge.distance) > 1e-6;
  *   radj: Map<nodeId, Array<entry>>  incoming traversals, `to` pointing back
  *         at the predecessor so a reverse search reuses the same Dijkstra
  */
+/** True once a building holds as many nodes as the router will search. */
+export async function nodeCapReached(buildingId) {
+  return (await prisma.node.count({ where: { buildingId } })) >= MAX_NODES;
+}
+
+export const NODE_CAP_MESSAGE = `This building has reached the ${MAX_NODES}-point limit.`;
+
 export async function loadBuildingGraph(buildingId) {
   const [floors, nodes, edges, building] = await Promise.all([
     prisma.floor.findMany({
@@ -46,7 +65,8 @@ export async function loadBuildingGraph(buildingId) {
     }),
     prisma.node.findMany({
       where: { buildingId },
-      take: MAX_NODES,
+      orderBy: { id: 'asc' },
+      take: MAX_NODES + 1, // one extra row detects an over-cap graph
       select: {
         id: true,
         x: true,
@@ -82,6 +102,8 @@ export async function loadBuildingGraph(buildingId) {
       select: { routingProfile: true },
     }),
   ]);
+
+  if (nodes.length > MAX_NODES) throw new GraphTooLargeError(buildingId);
 
   const floorMap = new Map(floors.map((f) => [f.id, f]));
   const unscaledFloorIds = new Set(

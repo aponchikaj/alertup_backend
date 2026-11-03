@@ -63,8 +63,10 @@ router.get(
       };
 
       const [pois, nodes, floors] = await Promise.all([
+        // PUBLIC only (BE-29): STAFF and EMERGENCY_ONLY points are not public
+        // destinations, and public routing cannot reach them anyway.
         prisma.poi.findMany({
-          where: { node: { buildingId } },
+          where: { node: { buildingId, visibility: 'PUBLIC' } },
           take: CAP,
           orderBy: { name: 'asc' },
           include: {
@@ -72,7 +74,7 @@ router.get(
           },
         }),
         prisma.node.findMany({
-          where: { buildingId },
+          where: { buildingId, visibility: 'PUBLIC' },
           select: {
             id: true,
             x: true,
@@ -260,7 +262,9 @@ router.get(
       });
       if (!building) return fail(res, 404, 'Building not found.');
 
-      const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+      // Capped (BE-34): matched with `contains` and stored in SearchEvent, and
+      // no real destination name comes near 100 characters.
+      const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 100) : '';
       const floorNumber =
         req.query.floor !== undefined ? Number(req.query.floor) : null;
 
@@ -281,6 +285,7 @@ router.get(
       const where = {
         node: {
           buildingId,
+          visibility: 'PUBLIC', // BE-29, as in the directory above
           ...(Number.isInteger(floorNumber)
             ? { floor: { floorNumber } }
             : {}),

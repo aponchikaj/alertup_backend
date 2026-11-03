@@ -4,6 +4,7 @@ import whoami from '../../middlewares/whoami.js';
 import { requirePermission, requireMembership } from '../../middlewares/requireBuildingPermission.js';
 import { ok, fail } from '../../utils/respond.js';
 import { PERMISSIONS, isValidPermission, isSubset } from '../../auth/permissions.js';
+import { recheckEditors } from '../../features/collab/collab.js';
 
 const router = Router();
 
@@ -125,6 +126,7 @@ router.patch(
           ...(parsed.permissions ? { permissions: parsed.permissions } : {}),
         },
       });
+      void recheckEditors(req.building.id); // FX-056: editors who lost CAN_EDIT_MAP leave the room
       return ok(res, { message: 'Role updated.', data: { role: updated } });
     } catch (err) {
       if (err.code === 'P2002') {

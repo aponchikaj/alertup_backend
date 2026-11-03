@@ -20,8 +20,11 @@ import {
   signSessionToken,
   setSessionCookie,
   wantsTokenInBody,
+  isTrustedDevice,
+  setTrustedDevice,
 } from '../../utils/session.js';
 import { escapeHtml } from '../../services/escapeHtml.js';
+import { checkNewPassword } from '../../services/passwordPolicy.js';
 
 // A bcrypt hash to compare against when no user matched, so a missing account
 // and a wrong password take the same amount of time. Returning early on a miss
@@ -57,13 +60,6 @@ const checkEmail = async (email) => {
   return null;
 };
 
-const checkPassword = (password) => {
-  if (typeof password !== 'string') return "Invalid password.";
-  // The 16-character ceiling is kept for the signup form, but bcrypt's own
-  // 72-byte truncation point is the limit that actually matters elsewhere.
-  if (password.length < 6 || password.length > 16) return "Password must be from 6 to 16 characters.";
-  return null;
-};
 
 router.post('/api/auth/register', registerLimiter, async (req, res) => {
   try {
@@ -83,7 +79,7 @@ router.post('/api/auth/register', registerLimiter, async (req, res) => {
     const emailError = await checkEmail(email);
     if (emailError) return fail(res, emailError === "Email already exists." ? 409 : 400, emailError);
 
-    const passwordError = checkPassword(password);
+    const passwordError = checkNewPassword(password);
     if (passwordError) return fail(res, 400, passwordError);
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -126,7 +122,7 @@ router.post('/api/auth/register', registerLimiter, async (req, res) => {
             <h1 style="color: #FF7B22; margin-top: 0;">Welcome to AlertUp!</h1>
             <p style="color: #333; font-size: 16px;">Hello <strong>${escapeHtml(newUserName)}</strong>,</p>
             <p style="color: #666;">Thank you for joining AlertUp! We're excited to have you on board.</p>
-            <p style="color: #666;">To get started and access all features, please verify your email address.</p>
+            <p style="color: #666;">To get started and access all features, please verify your email address within 7 days. Unverified accounts are removed after that, so the address stays free for its owner.</p>
             <div style="background-color: #e3f2fd; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #2196f3;">
               <p style="margin: 0; color: #1976d2; font-weight: bold;">📧 Next Step: Verify Your Email</p>
               <p style="margin: 5px 0 0 0; color: #666; font-size: 14px;">Go to your account settings to verify your email and unlock all features.</p>
@@ -139,7 +135,7 @@ router.post('/api/auth/register', registerLimiter, async (req, res) => {
       await sendMail(
         email,
         "Welcome - AlertUp",
-        `Hello ${newUserName}, welcome! Please verify your email to use AlertUp features.`,
+        `Hello ${newUserName}, welcome! Please verify your email within 7 days to keep your AlertUp account.`,
         undefined,
         welcomeHTML
       );
@@ -171,7 +167,8 @@ router.post('/api/auth/login', loginLimiter, async (req, res) => {
     const isPasswordValid = await bcrypt.compare(password, USER?.password || DUMMY_HASH);
     if (!USER || !USER.password || !isPasswordValid) return fail(res, 401, "Invalid credentials.");
 
-    if (USER.twoFactorEnabled && !USER.trustedIps.includes(clientIp(req))) {
+    // FX-082: only a device that completed 2FA before skips it; an IP never does.
+    if (USER.twoFactorEnabled && !isTrustedDevice(req, USER)) {
       // Replaces any pending 2FA code with a fresh 5-minute one.
       const { code: VERIFICATION_CODE } = await issueVerification({
         userId: USER.id,
@@ -216,8 +213,9 @@ router.post('/api/auth/login', loginLimiter, async (req, res) => {
     }
 
     const ip = clientIp(req);
-    // Recorded once — the includes() check keeps trustedIps from accumulating
-    // duplicates without bound.
+    // trustedIps only decides whether to send the "new login" email; it no
+    // longer skips 2FA (FX-082, see isTrustedDevice). Recorded once, so the
+    // list does not grow with duplicates.
     const isNewIp = !USER.trustedIps.includes(ip);
     if (isNewIp) {
       await prisma.user.update({
@@ -301,6 +299,7 @@ router.post('/api/auth/login/2fa', authLimiter, async (req, res) => {
     }
 
     await prisma.verification.deleteMany({ where: { userId: USER.id, type: '2fa' } });
+    setTrustedDevice(req, res, USER);
 
     const ip = clientIp(req);
     if (!USER.trustedIps.includes(ip)) {

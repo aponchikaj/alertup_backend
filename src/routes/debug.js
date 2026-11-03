@@ -1,4 +1,5 @@
 import express from 'express';
+import { ok, fail } from '../utils/respond.js';
 const router = express.Router();
 
 // Debug endpoints require an explicit opt-in rather than merely "not
@@ -6,6 +7,8 @@ const router = express.Router();
 // also re-enables the permissive *.vercel.app CORS branch in server.js — so a
 // deploy that forgot to set it would let any page on a free Vercel account read
 // this response with credentials attached.
+// Read from process.env on purpose, not config: config/index.js throws in
+// production when secrets are missing, and this switch must not depend on that.
 if (process.env.ENABLE_DEBUG_ROUTES === 'true' && process.env.NODE_ENV !== 'production') {
   // Simple debug endpoint to inspect headers and cookies from client
   router.get('/api/debug', (req, res) => {
@@ -24,10 +27,10 @@ if (process.env.ENABLE_DEBUG_ROUTES === 'true' && process.env.NODE_ENV !== 'prod
           'user-agent': req.headers['user-agent'] || null,
         },
       };
-      res.send({ Success: true, Message: info });
+      ok(res, { data: info });
     } catch (err) {
       console.error('DEBUG ERROR:', err);
-      res.send({ Success: false, Message: 'Server error' });
+      fail(res, 200, 'Server error');
     }
   });
 
@@ -44,10 +47,10 @@ if (process.env.ENABLE_DEBUG_ROUTES === 'true' && process.env.NODE_ENV !== 'prod
       cookieOptions.sameSite = reqIsSecure ? 'None' : 'Lax';
 
       res.cookie('debug_test', 'ok', cookieOptions);
-      res.send({ Success: true, Message: 'cookie_set', cookieOptions });
+      ok(res, { message: 'cookie_set', extra: { cookieOptions } });
     } catch (err) {
       console.error('SETCOOKIE ERROR:', err);
-      res.send({ Success: false, Message: 'Server error' });
+      fail(res, 200, 'Server error');
     }
   });
 }

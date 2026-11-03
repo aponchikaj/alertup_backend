@@ -6,3 +6,6 @@ node_modules/
 .env.*
 !.env.example
 coverage/
+
+# pg_dump output from `npm run db:backup` — real data, never committed.
+backups/

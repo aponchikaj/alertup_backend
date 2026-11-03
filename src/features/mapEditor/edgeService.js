@@ -135,24 +135,27 @@ export async function createEdge({
 /**
  * A node moved: recompute distance (and weight where weight tracked distance)
  * for every same-floor edge touching it.
+ *
+ * Pass the move's transaction client as `db` so the move and its edge
+ * distances commit or roll back together. One query reads every edge with
+ * both endpoints (it used to look the far node up once per edge, FX-091).
  */
-export async function recomputeEdgesForNode(nodeId) {
-  const node = await prisma.node.findUnique({ where: { id: nodeId } });
-  if (!node) return;
-
-  const edges = await prisma.edge.findMany({
+export async function recomputeEdgesForNode(nodeId, db = prisma) {
+  const endpoint = { select: { id: true, x: true, y: true, floorId: true } };
+  const edges = await db.edge.findMany({
     where: { OR: [{ sourceNodeId: nodeId }, { targetNodeId: nodeId }] },
+    include: { source: endpoint, target: endpoint },
   });
 
   for (const edge of edges) {
-    const otherId = edge.sourceNodeId === nodeId ? edge.targetNodeId : edge.sourceNodeId;
-    const other = await prisma.node.findUnique({ where: { id: otherId } });
+    const [node, other] =
+      edge.sourceNodeId === nodeId ? [edge.source, edge.target] : [edge.target, edge.source];
     if (!other || other.floorId !== node.floorId) continue; // cross-floor: fixed cost
 
     const distance = calculateDistance(node.x, node.y, other.x, other.y);
     // If weight was tracking distance (no manual override), keep tracking it.
     const weightTrackedDistance = Math.abs(edge.weight - edge.distance) < 1e-6;
-    await prisma.edge.update({
+    await db.edge.update({
       where: { id: edge.id },
       data: {
         distance,

@@ -11,6 +11,7 @@ import { ok, fail } from '../utils/respond.js';
 import { isId } from '../utils/ids.js';
 import { legacyBuilding } from './buildings/buildings.js';
 import { archiveIncidents } from '../services/incidentArchive.js';
+import { createHash, timingSafeEqual } from 'node:crypto';
 
 /**
  * Normalize a search query: `?q=a&q=b` arrives as an array, and unbounded
@@ -47,20 +48,37 @@ router.get('/api/admin/isAdmin', isAdmin, async (req, res) => {
 
 // ########################################### LOGIN SECTION ###########################################
 
+export const ADMIN_TOKEN_AUDIENCE = 'alertup-admin';
+
+/**
+ * FX-046: constant-time credential check. Both sides are hashed first so
+ * timingSafeEqual always compares equal-length buffers and the comparison
+ * time says nothing about how many leading characters matched. With no
+ * credentials configured, admin login is disabled rather than accepting an
+ * empty pair.
+ */
+export function adminCredentialsMatch(user, password, admin = config.admin) {
+  if (!admin?.user || !admin?.pass) return false;
+  if (typeof user !== 'string' || typeof password !== 'string') return false;
+  const digest = (value) => createHash('sha256').update(value).digest();
+  const userOk = timingSafeEqual(digest(user), digest(admin.user));
+  const passOk = timingSafeEqual(digest(password), digest(admin.pass));
+  return userOk && passOk;
+}
+
 router.post('/api/admin/login', authLimiter, async (req, res) => {
   const { user, password } = req.body;
 
   try {
-    if (!user || !password) {
+    if (!adminCredentialsMatch(user, password)) {
       return fail(res, 401, 'Invalid credentials.');
     }
 
-    if (user !== config.admin.user || password !== config.admin.pass) {
-      return fail(res, 401, 'Invalid credentials.');
-    }
-
+    // Its own audience: no other token signed with the shared secret can
+    // pass isAdmin (FX-046).
     const adminToken = jwt.sign({ isAdmin: true }, config.jwt.secret, {
       algorithm: 'HS256',
+      audience: ADMIN_TOKEN_AUDIENCE,
       expiresIn: '1h',
     });
 
@@ -319,6 +337,17 @@ router.put('/api/admin/user/:id', isAdmin, async (req, res) => {
       return fail(res, 400, 'Invalid user ID.');
     }
 
+    // FX-027-3: wrongly typed fields used to reach Prisma and come back as 500.
+    const strings = { name, lastname, company, country, countryCode, phoneNumber };
+    for (const [field, value] of Object.entries(strings)) {
+      if (value !== undefined && value !== null && typeof value !== 'string') {
+        return fail(res, 422, `${field} must be a string.`);
+      }
+    }
+    if (verified !== undefined && typeof verified !== 'boolean') {
+      return fail(res, 422, 'verified must be true or false.');
+    }
+
     const updates = {};
     if (name !== undefined) updates.name = name;
     if (lastname !== undefined) updates.lastname = lastname;
@@ -443,13 +472,30 @@ router.delete('/api/admin/buildings/:id', isAdmin, async (req, res) => {
   }
 });
 
+/**
+ * Page an admin inbox (reports, contacts): newest first, 100 per page by
+ * default and at most. `data` stays the row array that existing clients read;
+ * page info rides alongside it (FX-093).
+ */
+async function inboxPage(model, query) {
+  const page = Math.max(parseInt(query.page) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(query.limit) || 100, 1), 100);
+  const [rows, total] = await Promise.all([
+    prisma[model].findMany({
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+    prisma[model].count(),
+  ]);
+  return { data: rows, extra: { page, totalPages: Math.ceil(total / limit), total } };
+}
+
 // ########################################### REPORTS SECTION ###########################################
 
 router.get('/api/admin/reports', isAdmin, async (req, res) => {
   try {
-    const reports = await prisma.report.findMany({ orderBy: { createdAt: 'desc' } });
-
-    return ok(res, { data: reports });
+    return ok(res, await inboxPage('report', req.query));
   } catch (err) {
     console.error('Admin reports list error:', err);
     return fail(res, 500, 'Server error.');
@@ -480,9 +526,7 @@ router.delete('/api/admin/reports/:id', isAdmin, async (req, res) => {
 
 router.get('/api/admin/contacts', isAdmin, async (req, res) => {
   try {
-    const contacts = await prisma.contact.findMany({ orderBy: { createdAt: 'desc' } });
-
-    return ok(res, { data: contacts });
+    return ok(res, await inboxPage('contact', req.query));
   } catch (err) {
     console.error('Admin contacts list error:', err);
     return fail(res, 500, 'Server error.');

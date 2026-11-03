@@ -31,4 +31,18 @@ describe('emergency arming challenge', () => {
     const stale = `${Number(exp) - 10 * 60 * 1000}.${sig}`;
     expect(verifyChallenge(stale, a + b)).toBe(false);
   });
+
+  test('a solved token is single-use, so a replayed request cannot arm twice (BE-25)', () => {
+    const { question, token } = createChallenge();
+    const [a, b] = question.split(' + ').map(Number);
+    expect(verifyChallenge(token, a + b)).toBe(true);
+    expect(verifyChallenge(token, a + b)).toBe(false);
+  });
+
+  test('a wrong answer does not use the token up', () => {
+    const { question, token } = createChallenge();
+    const [a, b] = question.split(' + ').map(Number);
+    expect(verifyChallenge(token, a + b + 1)).toBe(false);
+    expect(verifyChallenge(token, a + b)).toBe(true);
+  });
 });

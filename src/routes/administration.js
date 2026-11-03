@@ -7,6 +7,7 @@ import {
 } from '../middlewares/requireBuildingPermission.js';
 import { PERMISSIONS } from '../auth/permissions.js';
 import { isId } from '../utils/ids.js';
+import { ok, fail } from '../utils/respond.js';
 import {
   triggerEmergency,
   resolveEmergency,
@@ -17,7 +18,8 @@ const router = express.Router();
 
 // LEGACY COMPATIBILITY LAYER for the deployed administration UI. The new
 // endpoints live in src/features/emergency/emergency.routes.js; these keep the
-// old paths, the {Success, Message} envelope and the toggle semantics working
+// old paths and the toggle semantics working (FX-067: now on the standard
+// { success, message, data } envelope; the frontend shim mirrors it)
 // on top of emergencyService and the Prisma tables.
 
 /** Map a Prisma Log row to the legacy log document shape. */
@@ -50,7 +52,7 @@ const legacyEmergency = (event, { includeBuildingId = true } = {}) => ({
 const liftBuildingID = (req, res, next) => {
   const buildingID = req.body?.buildingID;
   if (!buildingID || !isId(String(buildingID))) {
-    return res.status(400).send({ Success: false, Message: 'Invalid building ID.' });
+    return fail(res, 400, 'Invalid building ID.');
   }
   req.body.buildingId = String(buildingID);
   next();
@@ -72,10 +74,10 @@ router.post(
       // the client to run the challenge flow; 403 means the answer was wrong.
       const challenge = req.body?.challenge;
       if (!challenge?.token) {
-        return res.status(428).send({ Success: false, Message: 'CHALLENGE_REQUIRED' });
+        return fail(res, 428, 'CHALLENGE_REQUIRED');
       }
       if (!verifyChallenge(challenge.token, challenge.answer)) {
-        return res.status(403).send({ Success: false, Message: 'CHALLENGE_FAILED' });
+        return fail(res, 403, 'CHALLENGE_FAILED');
       }
 
       if (req.building.emergencyMode === false) {
@@ -87,10 +89,10 @@ router.post(
         await resolveEmergency(req.building.id, { userId: req.user.id });
       }
 
-      return res.send({ Success: true, Message: 'Saved.' });
+      return ok(res, { message: 'Saved.' });
     } catch (err) {
       console.error('Emergency toggle error:', err);
-      return res.status(500).send({ Success: false, Message: 'Server error.' });
+      return fail(res, 500, 'Server error.');
     }
   }
 );
@@ -101,7 +103,7 @@ router.get('/api/administration/logs/:id', whoami, requireMembership, async (req
     const building = req.building;
 
     if (building.emergencyMode === false) {
-      return res.send({ Success: false, Message: 'Emergency mode is off.' });
+      return fail(res, 200, 'Emergency mode is off.');
     }
 
     const emergency = await prisma.emergencyEvent.findFirst({
@@ -109,7 +111,7 @@ router.get('/api/administration/logs/:id', whoami, requireMembership, async (req
       orderBy: { startedAt: 'desc' },
     });
     if (!emergency) {
-      return res.send({ Success: false, Message: 'No active emergency found.' });
+      return fail(res, 200, 'No active emergency found.');
     }
 
     const logs = await prisma.log.findMany({
@@ -121,10 +123,10 @@ router.get('/api/administration/logs/:id', whoami, requireMembership, async (req
       orderBy: { createdAt: 'asc' },
     });
 
-    return res.send({ Success: true, Message: logs.map(legacyLog) });
+    return ok(res, { data: logs.map(legacyLog) });
   } catch (err) {
     console.error(err);
-    return res.send({ Success: false, Message: 'Server error.' });
+    return fail(res, 200, 'Server error.');
   }
 });
 
@@ -150,10 +152,10 @@ router.get(
         orderBy: { createdAt: 'desc' },
       });
 
-      return res.send({ Success: true, Message: emergencies.map(legacyEmergency) });
+      return ok(res, { data: emergencies.map(legacyEmergency) });
     } catch (err) {
       console.error('Error occured while getting analytics.', err);
-      return res.send({ Success: false, Message: 'Server error.' });
+      return fail(res, 200, 'Server error.');
     }
   }
 );
@@ -166,7 +168,7 @@ router.get(
   async (req, res) => {
     const { emergencyID } = req.params;
     if (!emergencyID || !isId(emergencyID)) {
-      return res.status(400).send({ Success: false, Message: 'Invalid parameters.' });
+      return fail(res, 400, 'Invalid parameters.');
     }
     const { logType, dateFrom, dateTo } = req.query;
 
@@ -175,7 +177,7 @@ router.get(
         where: { id: emergencyID, buildingId: req.building.id, status: 'RESOLVED' },
       });
       if (!emergency) {
-        return res.status(404).send({ Success: false, Message: 'Invalid emergency.' });
+        return fail(res, 404, 'Invalid emergency.');
       }
 
       const STARTED_DATE = dateFrom ? new Date(dateFrom) : emergency.startedAt;
@@ -187,7 +189,7 @@ router.get(
         isNaN(STARTED_DATE.getTime()) ||
         isNaN(FINISHED_DATE.getTime())
       ) {
-        return res.status(400).send({ Success: false, Message: 'Invalid date format.' });
+        return fail(res, 400, 'Invalid date format.');
       }
 
       // Legacy clients filter with the lowercase vocabulary ('scan',
@@ -200,7 +202,7 @@ router.get(
         typeFilter = LOG_TYPES.includes(mapped) ? mapped : '__NONE__';
       }
       if (typeFilter === '__NONE__') {
-        return res.send({ Success: false, Message: 'Logs not found.' });
+        return fail(res, 200, 'Logs not found.');
       }
 
       // isEmergency: true, matching GET /api/administration/logs/:id — this is
@@ -221,19 +223,18 @@ router.get(
       });
 
       if (!logs || logs.length === 0) {
-        return res.send({ Success: false, Message: 'Logs not found.' });
+        return fail(res, 200, 'Logs not found.');
       }
 
-      return res.send({
-        Success: true,
-        Message: {
+      return ok(res, {
+        data: {
           logs: logs.map(legacyLog),
           emergency: legacyEmergency(emergency, { includeBuildingId: false }),
         },
       });
     } catch (e) {
       console.error('Error occured while getting emergency analytics.', e);
-      return res.status(500).send({ Success: false, Message: 'Server error.' });
+      return fail(res, 500, 'Server error.');
     }
   }
 );
@@ -251,17 +252,25 @@ router.post(
   requirePermission(PERMISSIONS.CAN_TRIGGER_EMERGENCY),
   async (req, res) => {
     try {
+      // FX-050: only the CURRENT incident's feed. Deleting every isEmergency
+      // row also wiped the feeds of past, resolved emergencies — the record
+      // emergency analytics reads by time window.
+      const active = await prisma.emergencyEvent.findFirst({
+        where: { buildingId: req.building.id, status: 'ACTIVE' },
+        orderBy: { startedAt: 'desc' },
+        select: { startedAt: true },
+      });
+      if (!active) {
+        return fail(res, 409, 'No active emergency to clear.');
+      }
       const result = await prisma.log.deleteMany({
-        where: { buildingId: req.building.id, isEmergency: true },
+        where: { buildingId: req.building.id, isEmergency: true, createdAt: { gte: active.startedAt } },
       });
 
-      return res.send({
-        Success: true,
-        Message: `${result.count} logs deleted`,
-      });
+      return ok(res, { message: `${result.count} logs deleted` });
     } catch (err) {
       console.error(err);
-      return res.send({ Success: false, Message: 'Server error.' });
+      return fail(res, 200, 'Server error.');
     }
   }
 );

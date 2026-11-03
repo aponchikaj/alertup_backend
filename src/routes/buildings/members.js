@@ -6,6 +6,8 @@ import { ok, fail } from '../../utils/respond.js';
 import { PERMISSIONS, isSubset } from '../../auth/permissions.js';
 import sendMail from '../../services/sendEmail.js';
 import { roleChangedEmail, removedFromBuildingEmail } from '../../services/emailTemplates.js';
+import { closeUserStreams } from '../../features/realtime/broadcaster.js';
+import { recheckEditors } from '../../features/collab/collab.js';
 
 const router = Router();
 
@@ -117,6 +119,7 @@ router.patch(
         // Notification failure must not fail the role change.
       }
 
+      void recheckEditors(req.building.id); // FX-056: a downgraded editor leaves the room
       return ok(res, { message: 'Role updated.', data: { member: memberShape(updated) } });
     } catch (err) {
       console.error('Update member error:', err);
@@ -160,6 +163,10 @@ router.delete(
       }
 
       await prisma.buildingMember.delete({ where: { id: membership.id } });
+      // FX-056: their live member feed and editor socket end now, not at
+      // their next reconnect.
+      closeUserStreams(req.building.id, userId);
+      void recheckEditors(req.building.id);
 
       if (!removingSelf) {
         try {

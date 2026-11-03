@@ -1,9 +1,9 @@
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 
 /**
  * Shared rate limiters.
  *
- * Every limiter returns the same { Success, Message } envelope the rest of the
+ * Every limiter returns the same { success, message } envelope the rest of the
  * API uses, so the frontend error handling does not need a special case for 429.
  *
  * Note: server.js sets `trust proxy` to 1 (single proxy hop on Render/Vercel),
@@ -11,7 +11,7 @@ import rateLimit from 'express-rate-limit';
  * than the proxy's.
  */
 
-const deny = (Message) => ({ Success: false, Message });
+const deny = (message) => ({ success: false, message });
 
 const baseOptions = {
   standardHeaders: 'draft-7',
@@ -121,8 +121,20 @@ export const editorWriteLimiter = rateLimit({
  * The public AI concierge. Every request costs real Groq tokens, so two
  * stacked limiters: a per-minute burst cap and a daily budget per IP.
  */
+/**
+ * FX-042: AI allowances are per building + client address. Keyed by IP alone,
+ * everyone behind one building's Wi-Fi (or carrier NAT) shared a single
+ * allowance across every building. Routes with no building (the public
+ * product assistant) key by address alone.
+ */
+const aiKey = (req) => {
+  const building = req.building?.id || req.params?.buildingId || req.body?.buildingId || '-';
+  return `${String(building).slice(0, 64)}:${ipKeyGenerator(req.ip)}`;
+};
+
 export const aiChatLimiter = rateLimit({
   ...baseOptions,
+  keyGenerator: aiKey,
   windowMs: 60 * 1000,
   limit: 10,
   message: deny('Too many messages. Please wait a moment.'),
@@ -130,6 +142,7 @@ export const aiChatLimiter = rateLimit({
 
 export const aiDailyLimiter = rateLimit({
   ...baseOptions,
+  keyGenerator: aiKey,
   windowMs: 24 * 60 * 60 * 1000,
   limit: 150,
   message: deny('Daily assistant limit reached. Please try again tomorrow.'),

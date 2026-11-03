@@ -3,7 +3,7 @@ import { jest } from '@jest/globals';
 // Mock the mailer before anything imports it: mail keys are blanked in
 // tests, and the invite service deliberately rolls invites back when the
 // email cannot be handed off.
-const sendMailMock = jest.fn().mockResolvedValue({ Success: true });
+const sendMailMock = jest.fn().mockResolvedValue({ success: true });
 jest.unstable_mockModule('../services/sendEmail.js', () => ({
   default: sendMailMock,
 }));

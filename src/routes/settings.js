@@ -21,9 +21,11 @@ import {
   signSessionToken,
   setSessionCookie,
   clearSessionCookie,
+  revokeSession,
 } from '../utils/session.js';
 import { escapeHtml } from '../services/escapeHtml.js';
 import { archiveIncidents } from '../services/incidentArchive.js';
+import { checkNewPassword } from '../services/passwordPolicy.js';
 
 // GET /api/settings
 router.get('/api/settings', whoami, async (req, res) => {
@@ -92,9 +94,8 @@ router.put('/api/settings/changePassword', whoami, async (req, res) => {
   const { oldPassword, newPassword } = req.body;
 
   if (!oldPassword || !newPassword) return fail(res, 400, "Invalid fields.");
-  if (typeof newPassword !== 'string' || newPassword.length < 6 || newPassword.length > 16) {
-    return fail(res, 400, "Password must be 6-16 characters.");
-  }
+  const passwordError = checkNewPassword(newPassword);
+  if (passwordError) return fail(res, 400, passwordError);
 
   try {
     // password is globally omitted, so it must be opted back in here.
@@ -444,6 +445,9 @@ router.post('/api/settings/account', whoami, async (req, res) => {
 // POST /api/settings/logout
 router.post('/api/settings/logout', whoami, async (req, res) => {
   try {
+    // FX-083: revoke this token server-side; clearing the cookie alone left
+    // it valid for its full 7 days (and in localStorage on Safari/iOS).
+    await revokeSession(req.session);
     // Attributes must match the ones login set, or the browser keeps the cookie.
     clearSessionCookie(req, res);
     return ok(res, { message: "Logged out successfully." });

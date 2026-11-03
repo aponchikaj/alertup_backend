@@ -1,7 +1,6 @@
 import { Server } from 'socket.io';
-import jwt from 'jsonwebtoken';
 import prisma from '../../db/prisma.js';
-import config from '../../config/index.js';
+import { resolveSession } from '../../utils/session.js';
 import { PERMISSIONS } from '../../auth/permissions.js';
 
 /* ============================================================================
@@ -99,15 +98,11 @@ const authenticate = async (socket) => {
     null;
   if (!token) throw new Error('Authentication required.');
 
-  const data = jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'] });
-  if (!data || !data.userID) throw new Error('Invalid token.');
-
-  const user = await prisma.user.findUnique({ where: { id: data.userID } });
-  if (!user) throw new Error('Invalid token.');
-  if ((user.tokenVersion || 0) !== (data.tokenVersion || 0)) {
-    throw new Error('Session expired.');
-  }
-  return user;
+  // Same check as whoami: signature, user, tokenVersion, revocation.
+  const session = await resolveSession(token);
+  if (session.error === 'invalid') throw new Error('Invalid token.');
+  if (session.error) throw new Error('Session expired.');
+  return session.user;
 };
 
 /** Owner, or member whose role carries CAN_EDIT_MAP — the same rule the REST
@@ -252,6 +247,33 @@ export function initCollab(server, corsOptions = {}) {
   });
 
   return io;
+}
+
+/**
+ * FX-056: edit rights are checked on `editor:join` only, so a user whose
+ * membership or role was just taken away kept receiving every live edit in
+ * the room. Called after any membership or role change for the building:
+ * re-runs the join check for each connected editor and drops anyone who
+ * fails it (they get `editor:revoked`).
+ *
+ * @returns {Promise<number>} editors removed
+ */
+export async function recheckEditors(buildingId) {
+  if (!io) return 0;
+  const key = roomKey(buildingId);
+  const peers = [...(rooms.get(key)?.values() ?? [])];
+  let removed = 0;
+  for (const peer of peers) {
+    const allowed = await canEditBuilding(peer.userId, buildingId).catch(() => false);
+    if (allowed) continue;
+    const socket = io.sockets.sockets.get(peer.socketId);
+    if (!socket) continue;
+    socket.emit('editor:revoked', { buildingId });
+    leaveRoom(socket);
+    socket.leave(key);
+    removed += 1;
+  }
+  return removed;
 }
 
 /** Close all sockets (deploy shutdown). Safe to call when never initialized. */

@@ -97,7 +97,7 @@ function isRetryable(error) {
  * @param {{system: string, messages: Array, signal?: AbortSignal,
  *          maxTokens?: number, role?: 'chat'|'design'}} params
  */
-export async function* streamChat({ role = 'chat', ...params }) {
+export async function* streamChat({ role = 'chat', onProvider, ...params }) {
   const providers = chain();
   if (!providers.length) throw new Error('No AI provider is configured');
 
@@ -108,6 +108,9 @@ export async function* streamChat({ role = 'chat', ...params }) {
     try {
       const model = params.model || modelFor(name, role);
       for await (const delta of PROVIDERS[name].streamChat({ ...params, model })) {
+        // The provider that produced the first token is the one answering;
+        // after a fallback that is not activeProvider() (BE-27).
+        if (!yielded) onProvider?.(name);
         yielded = true;
         yield delta;
       }

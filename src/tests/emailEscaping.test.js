@@ -25,7 +25,7 @@ test('the welcome email escapes HTML in the user\'s name', async () => {
       name: '<a href=//x.co>Hi</a>',
       lastname: 'Doe',
       email: `esc-${Date.now()}@example.com`,
-      password: 'secret1',
+      password: 'secret12',
       country: 'Georgia',
       countryCode: '+995',
       phone: '500123456',
@@ -36,4 +36,17 @@ test('the welcome email escapes HTML in the user\'s name', async () => {
   const html = sent.map((args) => args[4]).filter(Boolean).join('\n');
   expect(html).toContain('&lt;a href=//x.co&gt;');
   expect(html).not.toContain('<a href=//x.co>');
+});
+
+test('the review thank-you email escapes HTML in the user\'s name (BE-35)', async () => {
+  const { createUser } = await import('./helpers.js');
+  const { cookie } = await createUser({ name: '<a href=//y.co>Hi</a>' });
+  sent.length = 0;
+  const res = await request(app).post('/api/review/alertup').set('Cookie', cookie).send({ stars: 5 });
+  expect(res.status).toBe(200);
+  await new Promise((r) => setTimeout(r, 50));
+
+  const html = sent.map((args) => args[4]).filter(Boolean).join('\n');
+  expect(html).toContain('&lt;a href=//y.co&gt;');
+  expect(html).not.toContain('<a href=//y.co>');
 });

@@ -12,6 +12,7 @@ import { initCollab, closeCollab } from './src/features/collab/collab.js'
 import editorAssistantRouter from './src/features/ai/editorAssistant.routes.js'
 import publicAssistantRouter from './src/features/ai/publicAssistant.routes.js'
 import { startSweeper } from './src/jobs/sweeper.js'
+import { startClosureTransitions } from './src/jobs/closureTransitions.js'
 
 import adminRoutes from './src/routes/admin.js'
 import authRoutes from './src/routes/auth/auth.js'
@@ -153,6 +154,11 @@ app.use('/uploads', express.static('uploads', {
   setHeaders: (res, path) => {
     if (path.endsWith('.svg')) {
       res.setHeader('Content-Type', 'image/svg+xml');
+      // FX-086: this is the API origin (session cookie). Opened directly, an
+      // SVG is a script-capable document, so sandbox it and force a download;
+      // <img src> rendering is unaffected. Same rule as R2 uploads (FX-056).
+      res.setHeader('Content-Disposition', 'attachment');
+      res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
     } else if (path.endsWith('.png')) {
       res.setHeader('Content-Type', 'image/png');
     } else if (path.endsWith('.jpg') || path.endsWith('.jpeg')) {
@@ -298,6 +304,7 @@ const startServer = async () => {
 
   installProcessGuards();
   startSweeper();
+  startClosureTransitions();
 
   const server = app.listen(PORT, () => {
     console.log(`🚀 Server is running on port ${PORT}`);

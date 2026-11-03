@@ -55,6 +55,8 @@ const MAX_REPLY_CHARS = 60_000;
 /** Room for a whole drawing — the concierge default (~300 tokens) truncated
  *  designs mid-JSON, which is how raw braces ended up in the chat. */
 const DESIGN_MAX_TOKENS = 6000;
+/** A Free-plan reply is advice text only, like the chat assistant's. */
+const ADVICE_MAX_TOKENS = 700;
 
 const DESIGN_FAILED = {
   en: 'The design came back incomplete. Ask again — smaller floors and fewer shops generate more reliably.',
@@ -492,8 +494,10 @@ router.post(
         system,
         messages: chatMessages,
         signal: abort.signal,
-        maxTokens: DESIGN_MAX_TOKENS,
-        role: 'design',
+        // The Free plan may not receive a drawing, so it gets an advice-sized
+        // chat call rather than the design model's full budget (BE-39).
+        maxTokens: designAllowed ? DESIGN_MAX_TOKENS : ADVICE_MAX_TOKENS,
+        role: designAllowed ? 'design' : 'chat',
       })) {
         raw += delta;
         if (raw.length > MAX_REPLY_CHARS) break;

@@ -193,6 +193,10 @@ describe('audit trail', () => {
 describe('POST /api/administration/logs/clear/:id', () => {
   test('removes emergency logs but keeps audit rows', async () => {
     const { cookie, user, building } = await createOwnerWithBuilding();
+    // FX-050: clearing applies to the ACTIVE incident's feed only.
+    await prisma.emergencyEvent.create({
+      data: { buildingId: building.id, status: 'ACTIVE', startedAt: new Date(Date.now() - 60_000) },
+    });
 
     // An operational emergency-feed log (what the live incident view reads).
     await prisma.log.create({
@@ -224,7 +228,7 @@ describe('POST /api/administration/logs/clear/:id', () => {
       .post(`/api/administration/logs/clear/${building.id}`)
       .set('Cookie', cookie)
       .send({ buildingID: building.id });
-    expect(res.body.Success).toBe(true);
+    expect(res.body.success).toBe(true);
 
     const remaining = await prisma.log.findMany({ where: { buildingId: building.id } });
     expect(remaining).toHaveLength(1);
@@ -281,8 +285,8 @@ describe('GET /api/administration/analytics/:buildingId/:emergencyID', () => {
       .get(`/api/administration/analytics/${building.id}/${emergency.id}`)
       .set('Cookie', cookie);
 
-    expect(res.body.Success).toBe(true);
-    const logs = res.body.Message.logs;
+    expect(res.body.success).toBe(true);
+    const logs = res.body.data.logs;
     expect(logs).toHaveLength(1);
     expect(logs[0].logType).toBe('scan');
   });

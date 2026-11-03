@@ -71,7 +71,7 @@ describe('openStream: nothing published during snapshot/replay setup is lost', (
 
   afterEach(async () => {
     closeAll();
-    _resetForTests();
+    await _resetForTests();
     server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
   });

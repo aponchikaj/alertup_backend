@@ -1,7 +1,6 @@
 import express from 'express';
-import jwt from 'jsonwebtoken';
 import prisma from '../../db/prisma.js';
-import config from '../../config/index.js';
+import { resolveSession } from '../../utils/session.js';
 import { isId } from '../../utils/ids.js';
 import { publicReadLimiter } from '../../services/rateLimiter.js';
 import { parseQrSlug } from '../../features/qr/qrPayload.js';
@@ -269,25 +268,23 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
       }
     }
 
-    // Record the scan against a logged-in user's history. An expired or
-    // malformed token must never stop an occupant getting their route.
-    const userToken = req.cookies?.['userToken'];
-    if (userToken) {
-      try {
-        const decoded = jwt.verify(userToken, config.jwt.secret, { algorithms: ['HS256'] });
-        if (decoded?.userID) {
-          await prisma.scanEvent.create({
-            data: {
-              buildingId,
-              userId: decoded.userID,
-              buildingName: building.name,
-              nodeId: node.id,
-            },
-          });
-        }
-      } catch (tokenErr) {
-        console.warn('Scan history not recorded (invalid token):', tokenErr.message);
-      }
+    // Every scan is recorded (FX-094: anonymous scans, most of them, used to
+    // be dropped from analytics). It is attributed to a user only through the
+    // same session check as whoami (FX-087). Nothing here may stop an
+    // occupant getting their route.
+    try {
+      const userToken = req.cookies?.['userToken'];
+      const session = userToken ? await resolveSession(userToken) : null;
+      await prisma.scanEvent.create({
+        data: {
+          buildingId,
+          userId: session?.user?.id ?? null,
+          buildingName: building.name,
+          nodeId: node.id,
+        },
+      });
+    } catch (scanErr) {
+      console.warn('Scan event not recorded:', scanErr.message);
     }
 
     return res.status(200).json({

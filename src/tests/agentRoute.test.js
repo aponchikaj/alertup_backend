@@ -40,6 +40,16 @@ describe('authorization', () => {
     expect(res.status).toBe(404);
   });
 
+  test.each(['constructor', 'toString', '__proto__', 'hasOwnProperty'])(
+    '404s the prototype key %s instead of resolving it to a function (BE-26)',
+    async (key) => {
+      const { user, cookie } = await createUser();
+      const { building } = await createBuilding(user.id);
+      const res = await post(key, { ...turn(), buildingId: building.id }, cookie);
+      expect(res.status).toBe(404);
+    },
+  );
+
   test('refuses a member who lacks the agent’s permission', async () => {
     const { user: owner } = await createUser();
     const { building, roles } = await createBuilding(owner.id);

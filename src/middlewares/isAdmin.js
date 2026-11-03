@@ -19,7 +19,12 @@ const isAdmin = (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(adminToken, config.jwt.secret, { algorithms: ['HS256'] });
+    // Audience must be the admin one (FX-046) — kept as a literal here so the
+    // middleware does not import the admin router.
+    const decoded = jwt.verify(adminToken, config.jwt.secret, {
+      algorithms: ['HS256'],
+      audience: 'alertup-admin',
+    });
 
     if (!decoded || decoded.isAdmin !== true) {
       req.isAdmin = false;

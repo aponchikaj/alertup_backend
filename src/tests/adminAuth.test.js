@@ -62,7 +62,9 @@ describe('admin authentication', () => {
       .get('/api/admin/users')
       .set('Cookie', [`adminToken=${userToken}`]);
 
-    expect(res.status).toBe(403);
+    // FX-046: it now fails the admin-audience check outright (401), before
+    // the isAdmin claim (403) is even looked at. Either way: no access.
+    expect(res.status).toBe(401);
   });
 
   test('a real admin session reaches the protected endpoints', async () => {

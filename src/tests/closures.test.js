@@ -449,13 +449,17 @@ describe('closure CRUD', () => {
           closureId: res.body.data.closure.id,
           action: 'created',
           blocked: true,
-          edgeIds: [edge.id],
-          nodeIds: [],
+          floorId: floor.id,
           reason: 'Flooded',
+          startsAt: expect.any(String),
           endsAt: null,
         }),
       },
     ]);
+    // BE-28: the public stream carries the public projection only, like the
+    // REST read; graph ids stay with authorised editors.
+    expect(seen[0].data).not.toHaveProperty('edgeIds');
+    expect(seen[0].data).not.toHaveProperty('nodeIds');
     // The write invalidated the closure cache, so the router sees it at once.
     expect(await getActiveClosures(building.id)).toHaveLength(1);
     stop();

@@ -43,7 +43,10 @@ export const createUser = async (overrides = {}) => {
 };
 
 export const adminCookie = () => {
-  const token = jwt.sign({ isAdmin: true }, process.env.JWT_SECRET, { expiresIn: '1h' });
+  const token = jwt.sign({ isAdmin: true }, process.env.JWT_SECRET, {
+    expiresIn: '1h',
+    audience: 'alertup-admin',
+  });
   return [`adminToken=${token}`];
 };
 

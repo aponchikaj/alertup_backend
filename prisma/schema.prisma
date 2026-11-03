@@ -210,6 +210,8 @@ model BuildingInvite {
 
   @@index([buildingId, status])
   @@index([email])
+  @@index([roleId])
+  @@index([invitedById])
 }
 
 model Floor {
@@ -350,6 +352,7 @@ model EmergencyEvent {
   updatedAt       DateTime         @updatedAt
 
   @@index([buildingId, status])
+  @@index([triggeredById])
 }
 
 model Log {
@@ -630,4 +633,15 @@ model IncidentArchive {
   @@index([buildingId])
   @@index([ownerId])
   @@index([emergencyId])
+}
+
+/// A session token revoked before its natural expiry (logout, FX-083).
+/// Keyed by the JWT's `jti`; `expiresAt` mirrors the token's own `exp`, after
+/// which the row is useless and the sweeper drops it.
+model RevokedToken {
+  jti       String   @id
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
 }

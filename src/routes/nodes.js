@@ -7,6 +7,7 @@ import { isId } from '../utils/ids.js';
 import { createEdge, recomputeEdgesForNode, normalizePair } from '../features/mapEditor/edgeService.js';
 import { invalidate } from '../features/wayfinding/graphCache.js';
 import { writeAudit, actorFromReq } from '../services/audit.js';
+import { nodeCapReached, NODE_CAP_MESSAGE } from '../features/wayfinding/graphService.js';
 
 const router = express.Router();
 
@@ -98,6 +99,10 @@ router.post('/api/nodes', ...guard, async (req, res) => {
         message: 'Validation failed',
         errors: validationErrors,
       });
+    }
+
+    if (await nodeCapReached(req.building.id)) {
+      return res.status(422).json({ success: false, message: NODE_CAP_MESSAGE });
     }
 
     const floor = await floorFor(req.building.id, floorNumber);
@@ -242,15 +247,16 @@ router.put('/api/nodes/:nodeId', ...guard, async (req, res) => {
         action: 'update',
         payload: updateData,
       });
-      return tx.node.update({
+      const moved = await tx.node.update({
         where: { id: node.id },
         data: updateData,
       });
+      // Same transaction: a move never commits with stale edge distances.
+      if (updateData.x !== undefined || updateData.y !== undefined) {
+        await recomputeEdgesForNode(node.id, tx);
+      }
+      return moved;
     });
-
-    if (updateData.x !== undefined || updateData.y !== undefined) {
-      await recomputeEdgesForNode(node.id);
-    }
 
     // Diff the connections list against current edges, symmetric by table design.
     let finalConnections;

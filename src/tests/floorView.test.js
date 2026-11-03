@@ -20,7 +20,7 @@ test("the owner viewing their floor does not count as a scan", async () => {
   const res = await request(app).get(`/api/building/scan/${building.id}/Ground`).set('Cookie', cookie);
 
   expect(res.status).toBe(200);
-  expect(res.body.Message.floorData).toBeTruthy();
+  expect(res.body.data.floorData).toBeTruthy();
   const after = await prisma.floor.findUnique({ where: { id: floor.id } });
   expect(after.scanCount).toBe(floor.scanCount);
   expect(await prisma.scanEvent.count({ where: { buildingId: building.id } })).toBe(0);

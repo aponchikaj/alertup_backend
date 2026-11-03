@@ -1,21 +1,12 @@
 import express from 'express';
-const router = express.Router()
+import { ok } from '../utils/respond.js';
 
-router.get('/api/connect',(req,res)=>{
-    try{
-        return res.send({
-            Success: true,
-            Message: 'Connected.',
-            timestamp: new Date().toISOString()
-        });
-    }catch(err){
-        console.error('[Connect] Error:', err);
-        return res.send({
-            Success: false,
-            Message: "Something went wrong.",
-            error: err.message
-        });
-    }
-})
+const router = express.Router();
+
+// Liveness probe for the frontend's server gate. No failure branch: the old
+// catch could only fire on a bug and echoed err.message to the client.
+router.get('/api/connect', (req, res) =>
+  ok(res, { message: 'Connected.', extra: { timestamp: new Date().toISOString() } }),
+);
 
 export default router;

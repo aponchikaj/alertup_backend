@@ -8,6 +8,7 @@ import { emailLimiter, publicReadLimiter } from '../../services/rateLimiter.js';
 import { checkEmailFormat } from '../../services/validation.js';
 import {
   createAndSendInvite,
+  InviteMailError,
   findValidInvite,
   acceptInvite,
   resendInvite,
@@ -108,7 +109,12 @@ router.post(
       });
     } catch (err) {
       console.error('Create invite error:', err);
-      return fail(res, 502, 'The invitation email could not be sent. Please try again.');
+      // Only a mail-provider refusal is a 502 (BE-37); a database error is
+      // not the email's fault and must not be reported as one.
+      if (err instanceof InviteMailError) {
+        return fail(res, 502, 'The invitation email could not be sent. Please try again.');
+      }
+      return fail(res, 500, 'Server error.');
     }
   }
 );
@@ -137,7 +143,10 @@ router.post(
       return ok(res, { message: 'Invitation re-sent.' });
     } catch (err) {
       console.error('Resend invite error:', err);
-      return fail(res, 502, 'The invitation email could not be sent. Please try again.');
+      if (err instanceof InviteMailError) {
+        return fail(res, 502, 'The invitation email could not be sent. Please try again.');
+      }
+      return fail(res, 500, 'Server error.');
     }
   }
 );

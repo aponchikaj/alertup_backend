@@ -105,6 +105,16 @@ describe('answering without tools', () => {
   });
 });
 
+test('the done event names the provider that streamed the answer (BE-27)', async () => {
+  callWithTools.mockResolvedValue({ toolCalls: [] });
+  streamChat.mockImplementation(async function* ({ onProvider }) {
+    onProvider?.('groq');
+    yield 'hi';
+  });
+  const events = await drain(runAgent({ agent, ctx, messages: [], registry }));
+  expect(events.at(-1)).toMatchObject({ type: 'done', provider: 'groq' });
+});
+
 describe('running tools', () => {
   test('executes the tool the model asked for and feeds the result back', async () => {
     callWithTools

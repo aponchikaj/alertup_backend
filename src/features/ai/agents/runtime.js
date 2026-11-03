@@ -86,15 +86,19 @@ export async function* runAgent({ agent, ctx, messages, registry, signal }) {
 
   // The final answer. Tools are withheld so this call can only produce prose —
   // the loop is over, and a further tool request here would have nowhere to go.
+  let provider = null;
   for await (const delta of streamChat({
     role: agent.modelRole,
     system,
     messages: working,
     maxTokens: agent.maxTokens,
     signal,
+    onProvider: (name) => {
+      provider = name;
+    },
   })) {
     yield { type: 'delta', text: delta };
   }
 
-  yield { type: 'done', iterations };
+  yield { type: 'done', iterations, provider };
 }

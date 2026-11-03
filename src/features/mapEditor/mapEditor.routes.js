@@ -31,6 +31,9 @@ import {
   resolveProfile,
   DEFAULT_ROUTING_PROFILE,
 } from '../wayfinding/costModel.js';
+import { rejectUnsafeSvg } from '../../services/svgSafety.js';
+import { nodeCapReached, NODE_CAP_MESSAGE } from '../wayfinding/graphService.js';
+import { reservedFloorNameError } from '../../services/floorNames.js';
 
 const router = Router();
 
@@ -203,6 +206,7 @@ router.post(
   ...canEditMap,
   editorWriteLimiter,
   imageUpload.single('map'),
+  rejectUnsafeSvg,
   async (req, res) => {
     try {
       const floorNumber = Number(req.body.floorNumber);
@@ -210,6 +214,8 @@ router.post(
         return fail(res, 422, 'floorNumber must be a non-negative integer.');
       }
       const name = typeof req.body.name === 'string' ? req.body.name.trim() : null;
+      const reserved = reservedFloorNameError(name);
+      if (reserved) return fail(res, 422, reserved);
       const scale = req.body.scalePixelsPerMeter
         ? Number(req.body.scalePixelsPerMeter)
         : null;
@@ -338,6 +344,7 @@ router.patch(
   ...canEditMap,
   editorWriteLimiter,
   imageUpload.single('map'),
+  rejectUnsafeSvg,
   async (req, res) => {
     try {
       const floor = await prisma.floor.findFirst({
@@ -346,7 +353,11 @@ router.patch(
       if (!floor) return fail(res, 404, 'Floor not found.');
 
       const data = {};
-      if (req.body.name !== undefined) data.name = String(req.body.name).trim();
+      if (req.body.name !== undefined) {
+        const reserved = reservedFloorNameError(String(req.body.name));
+        if (reserved) return fail(res, 422, reserved);
+        data.name = String(req.body.name).trim();
+      }
       if (req.body.floorNumber !== undefined) {
         const n = Number(req.body.floorNumber);
         if (!Number.isInteger(n) || n < 0) {
@@ -536,6 +547,7 @@ router.post(
   ...canEditMap,
   editorWriteLimiter,
   imageUpload.single('logo'),
+  rejectUnsafeSvg,
   async (req, res) => {
     try {
       if (!req.file) return fail(res, 400, 'No logo uploaded.');
@@ -579,6 +591,7 @@ router.post(
       if (!NODE_TYPES.includes(type)) {
         return fail(res, 422, `type must be one of ${NODE_TYPES.join(', ')}.`);
       }
+      if (await nodeCapReached(req.building.id)) return fail(res, 422, NODE_CAP_MESSAGE);
 
       const nodeData = {
         buildingId: req.building.id,
@@ -700,11 +713,13 @@ router.patch(
           action: 'update',
           payload: data,
         });
-        return tx.node.update({ where: { id: node.id }, data });
+        const moved = await tx.node.update({ where: { id: node.id }, data });
+        // Same transaction: a move never commits with stale edge distances.
+        if (data.x !== undefined || data.y !== undefined) {
+          await recomputeEdgesForNode(node.id, tx);
+        }
+        return moved;
       });
-      if (data.x !== undefined || data.y !== undefined) {
-        await recomputeEdgesForNode(node.id);
-      }
       invalidate(req.building.id);
       return ok(res, { message: 'Node updated.', data: { node: updated } });
     } catch (err) {
