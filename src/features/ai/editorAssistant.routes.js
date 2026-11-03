@@ -6,6 +6,8 @@ import { requirePermission } from '../../middlewares/requireBuildingPermission.j
 import { PERMISSIONS } from '../../auth/permissions.js';
 import { ok, fail } from '../../utils/respond.js';
 import { aiChatLimiter, aiDailyLimiter } from '../../services/rateLimiter.js';
+import { checkAiBudget } from '../../services/aiBudget.js';
+import prismaClient from '../../db/prisma.js';
 import { aiDesignerAllowed } from '../../services/plans.js';
 import { validateChatBody } from './aiGuards.js';
 import { fenceUserContent } from './promptBuilder.js';
@@ -300,7 +302,7 @@ export const designerSystemPrompt = ({
     '',
     'ARCHITECTURE RULES — sizes at 50 units = 1 metre:',
     '- Doors ~50 units wide. Typical office/room 200x150; shop 200-400 wide; WC 100x150; stair core ~150x150.',
-    '- CIRCULATION IS OPEN FLOOR, NOT A SHAPE: the empty background between rooms IS the corridor — visitors walk on it and routes are drawn over it. NEVER output a room or shop box named "Corridor", "Hall", "Walkway" or similar (the server deletes them). Instead LEAVE a continuous band of empty floor at least 100 units (2 m) wide — 150-200 for main circulation — linking the ENTRANCE to every EXIT and touching every room.',
+    '- CIRCULATION IS OPEN FLOOR, NOT A SHAPE: the empty background between rooms IS the corridor — visitors walk on it and routes are drawn over it. NEVER output a room or shop box named "Corridor", "Hallway", "Walkway" or similar (the server deletes them). Instead LEAVE a continuous band of empty floor at least 100 units (2 m) wide — 150-200 for main circulation — linking the ENTRANCE to every EXIT and touching every room.',
     '- Every room and shop gets a DOOR icon on the edge facing the open floor; never make a room reachable only through another room.',
     '- Evacuation: at least one ENTRANCE and one EXIT per floor; two EXITs on opposite sides once a floor is wider than 1000 units; keep every point within ~2000 units (40 m) of an exit; STAIRS near the core on multi-floor buildings; elevators are never evacuation routes.',
     '- Geometry: every coordinate inside 0..' + canvasW + ' x 0..' + canvasH + '; align positions and sizes to the 25-unit grid; rooms and shops must NOT partially overlap each other (a small kiosk fully inside a much larger hall is the only exception); leave open walking space — do not tile every free unit.',
@@ -335,6 +337,31 @@ export const designerSystemPrompt = ({
   return lines.filter(Boolean).join('\n');
 };
 
+const BUDGET_SPENT = {
+  en: "You have reached today's design assistant limit. Drawing by hand still works, and the limit resets tomorrow.",
+  ka: 'თქვენ ამოწურეთ დღევანდელი ლიმიტი. ხელით დახატვა კვლავ მუშაობს, ლიმიტი ხვალ განახლდება.',
+};
+
+/**
+ * Record the turn. Best-effort on purpose: the drawing is what the user asked
+ * for, and a transcript write must never be the reason they do not get it.
+ */
+async function recordDesignerTurn({ buildingId, userId, locale, question, reply }) {
+  try {
+    const conversation = await prismaClient.aiConversation.create({
+      data: { agentId: 'designer', buildingId, userId, locale },
+    });
+    await prismaClient.aiMessage.createMany({
+      data: [
+        { conversationId: conversation.id, role: 'user', content: question },
+        { conversationId: conversation.id, role: 'assistant', content: reply || '' },
+      ],
+    });
+  } catch (err) {
+    console.error('Designer transcript write failed:', err?.message);
+  }
+}
+
 router.post(
   '/api/ai/editor',
   whoami,
@@ -349,6 +376,15 @@ router.post(
       });
       if (!parsed.ok) return fail(res, 422, parsed.error);
       const { messages, locale } = parsed;
+
+      // The most expensive call in the product: 6000 tokens against the
+      // concierge's 300. The per-IP limiter never expressed that, and a shared
+      // office NAT made it worse rather than better.
+      const budget = await checkAiBudget({
+        buildingId: req.building.id,
+        userId: req.user.id,
+      });
+      if (!budget.ok) return fail(res, 429, BUDGET_SPENT[locale] || BUDGET_SPENT.en);
 
       const floorId = typeof req.body.floorId === 'string' ? req.body.floorId : null;
       const floor = floorId
@@ -366,6 +402,13 @@ router.post(
       const designAllowed = aiDesignerAllowed(owner?.plan);
 
       if (!aiAvailable()) {
+        await recordDesignerTurn({
+          buildingId: req.building.id,
+          userId: req.user.id,
+          locale,
+          question: messages[messages.length - 1].content,
+          reply: FALLBACKS[locale],
+        });
         return ok(res, {
           data: { reply: FALLBACKS[locale], drawing: null, designAllowed },
         });
@@ -506,9 +549,18 @@ router.post(
         reply = [reply, adjustedNote(locale, repairStats)].filter(Boolean).join('\n\n');
       }
 
+      const finalReply = reply || FALLBACKS[locale];
+      await recordDesignerTurn({
+        buildingId: req.building.id,
+        userId: req.user.id,
+        locale,
+        question: messages[messages.length - 1].content,
+        reply: finalReply,
+      });
+
       return ok(res, {
         data: {
-          reply: reply || FALLBACKS[locale],
+          reply: finalReply,
           drawing,
           designAllowed,
           actions: actionResult.actions,

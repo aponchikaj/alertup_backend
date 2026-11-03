@@ -30,7 +30,7 @@ export const signSessionToken = (user) =>
   jwt.sign(
     { userID: user.id, tokenVersion: user.tokenVersion || 0 },
     config.jwt.secret,
-    { expiresIn: '7d' }
+    { expiresIn: '7d', algorithm: 'HS256' }
   );
 
 export const setSessionCookie = (req, res, token) => {

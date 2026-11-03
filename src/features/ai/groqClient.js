@@ -63,3 +63,65 @@ export async function chatOnce({ system, messages, model, maxTokens = 800, signa
 export function aiAvailable() {
   return Boolean(config.groq.apiKey) && !config.ai.disabled;
 }
+
+/* ----------------------------------------------------------------------------
+   Tool calling, OpenAI dialect. Same return shape as the Gemini adapter so the
+   runtime never learns which provider answered.
+   -------------------------------------------------------------------------- */
+
+/** Models occasionally emit arguments that are not valid JSON. An unparseable
+ *  call becomes an empty argument object, which the tool's own validator then
+ *  rejects with a message the model can act on. */
+const parseArgs = (raw) => {
+  try {
+    const parsed = JSON.parse(raw || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+/**
+ * @returns {Promise<{text: string, toolCalls: Array<{id, name, args}>}>}
+ */
+export async function callWithTools({
+  system,
+  messages,
+  tools = [],
+  model,
+  maxTokens = 800,
+  signal,
+}) {
+  const completion = await groq().chat.completions.create(
+    {
+      model: model || config.groq.model,
+      max_tokens: maxTokens,
+      temperature: 0.2,
+      messages: system ? [{ role: 'system', content: system }, ...messages] : messages,
+      ...(tools.length
+        ? {
+            tools: tools.map((tool) => ({
+              type: 'function',
+              function: {
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.parameters,
+              },
+            })),
+            tool_choice: 'auto',
+          }
+        : {}),
+    },
+    { signal, timeout: 20000 }
+  );
+
+  const message = completion.choices?.[0]?.message;
+  return {
+    text: message?.content || '',
+    toolCalls: (message?.tool_calls || []).map((call, i) => ({
+      id: call.id || `call_${i}`,
+      name: call.function?.name,
+      args: parseArgs(call.function?.arguments),
+    })),
+  };
+}

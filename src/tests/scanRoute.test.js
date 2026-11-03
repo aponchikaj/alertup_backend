@@ -1,8 +1,10 @@
 import request from 'supertest';
 import app from '../../server.js';
 import prisma from '../db/prisma.js';
+import { subscribe } from '../features/realtime/broadcaster.js';
 import {
   createOwnerWithBuilding,
+  createUser,
   createFloor,
   createNode,
   connectNodes,
@@ -218,5 +220,163 @@ describe('GET /api/qr/scan/route/:qrId — legacy envelope contract', () => {
       'No exit route found from this location'
     );
     expect(res.body.data.route).toBeNull();
+  });
+});
+
+describe('GET /api/qr/scan/route/:qrId — routing-quality parity (B16)', () => {
+  test('scan during an active emergency publishes counters_updated and stores the scanned node on the history row', async () => {
+    const { building, floor1, start } = await seedScanScenario();
+    await prisma.building.update({
+      where: { id: building.id },
+      data: { emergencyMode: true, emergencyMessage: 'Fire drill in progress' },
+    });
+    await prisma.emergencyEvent.create({ data: { buildingId: building.id } });
+
+    const events = [];
+    const unsubscribe = subscribe(building.id, (msg) => events.push(msg));
+
+    const { user, cookie } = await createUser();
+    const qrId = qrIdFor(start, floor1.floorNumber);
+    const res = await request(app)
+      .get(`/api/qr/scan/route/${qrId}`)
+      .set('Cookie', cookie);
+
+    unsubscribe();
+
+    expect(res.status).toBe(200);
+    expect(events.some((msg) => msg.event === 'counters_updated')).toBe(true);
+
+    const scanEvent = await prisma.scanEvent.findFirst({ where: { userId: user.id } });
+    expect(scanEvent).not.toBeNull();
+    expect(scanEvent.nodeId).toBe(start.id);
+  });
+
+  test('?profile=wheelchair falls back to an inaccessible route with a warning, legacy fields untouched', async () => {
+    const { building } = await createOwnerWithBuilding();
+    const floor1 = await createFloor(building.id, { floorNumber: 1 });
+    const start = await createNode(building.id, floor1.id, {
+      x: 0,
+      y: 0,
+      type: 'NORMAL',
+      label: 'Lobby',
+    });
+    const mid = await createNode(building.id, floor1.id, { x: 100, y: 0, type: 'NORMAL' });
+    const exit = await createNode(building.id, floor1.id, {
+      x: 200,
+      y: 0,
+      type: 'EMERGENCY_EXIT',
+      label: 'Main Exit',
+    });
+    await connectNodes(start, mid);
+    // Only step-free path to the exit is blocked off, forcing the
+    // accessibility-drop fallback.
+    await connectNodes(mid, exit, { accessible: false });
+
+    const qrId = qrIdFor(start, floor1.floorNumber);
+    const res = await request(app).get(`/api/qr/scan/route/${qrId}?profile=wheelchair`);
+
+    expect(res.status).toBe(200);
+    const data = res.body.data;
+
+    expect(data.route.profile).toBe('wheelchair');
+    expect(data.route.accessibleRouteUnavailable).toBe(true);
+    expect(data.route.warnings.some((w) => w.code === 'INACCESSIBLE_STEP')).toBe(true);
+
+    // Legacy fields never branch on the requested profile.
+    expect(data.emergencyRoute.found).toBe(true);
+    expect(data.emergencyRoute.path).toEqual([start.id, mid.id, exit.id]);
+    expect(data.emergencyRoute.distance).toBe(2);
+  });
+
+  test('lists alternative exits and any active closures on the route', async () => {
+    const { building, floor1, start, mid } = await seedScanScenario();
+    const exit2 = await createNode(building.id, floor1.id, {
+      x: 300,
+      y: 0,
+      type: 'EMERGENCY_EXIT',
+      label: 'Side Exit',
+    });
+    await connectNodes(mid, exit2, { weight: 500, distance: 500 });
+
+    await prisma.closure.create({
+      data: {
+        buildingId: building.id,
+        floorId: floor1.id,
+        reason: 'Wet floor',
+        costMultiplier: 2,
+      },
+    });
+
+    const qrId = qrIdFor(start, floor1.floorNumber);
+    const res = await request(app).get(`/api/qr/scan/route/${qrId}`);
+
+    expect(res.status).toBe(200);
+    const data = res.body.data;
+
+    expect(data.closures).toHaveLength(1);
+    expect(data.closures[0]).toMatchObject({ reason: 'Wet floor', blocked: false });
+
+    expect(Array.isArray(data.route.alternatives)).toBe(true);
+    expect(data.route.alternatives.length).toBeGreaterThan(0);
+    expect(data.route.alternatives[0].exitNodeId).toBe(exit2.id);
+
+    expect(data.profile).toBe('emergency');
+  });
+
+  test('?profile=elevator_first steers the SAME cost preference /evacuate does, without discarding it', async () => {
+    const { building } = await createOwnerWithBuilding();
+    await prisma.building.update({
+      where: { id: building.id },
+      data: { routingProfile: { elevatorEvacuationRated: true } },
+    });
+    const f1 = await createFloor(building.id, { floorNumber: 1, scalePixelsPerMeter: 10 });
+    const f2 = await createFloor(building.id, { floorNumber: 2, scalePixelsPerMeter: 10 });
+    const entrance = await createNode(building.id, f1.id, { x: 0, y: 0, type: 'NORMAL' });
+
+    // Stairs: cheaper by default (16 s/floor vs the lift's 35 s/floor at the
+    // default profile constants).
+    const stairsBottom = await createNode(building.id, f1.id, { x: 10, y: 0, type: 'TRANSIT' });
+    const stairsTop = await createNode(building.id, f2.id, { x: 10, y: 0, type: 'TRANSIT' });
+    const stairsExit = await createNode(building.id, f2.id, { x: 20, y: 0, type: 'EMERGENCY_EXIT' });
+    await connectNodes(entrance, stairsBottom);
+    await connectNodes(stairsBottom, stairsTop, { transitType: 'STAIRS' });
+    await connectNodes(stairsTop, stairsExit);
+
+    // Lift: only cheaper once `elevator_first`'s 3x stairs multiplier applies
+    // — and only usable at all because this building rates its cars for
+    // evacuation.
+    const liftBottom = await createNode(building.id, f1.id, { x: 10, y: 100, type: 'TRANSIT' });
+    const liftTop = await createNode(building.id, f2.id, { x: 10, y: 100, type: 'TRANSIT' });
+    const liftExit = await createNode(building.id, f2.id, { x: 20, y: 100, type: 'EMERGENCY_EXIT' });
+    await connectNodes(entrance, liftBottom);
+    await connectNodes(liftBottom, liftTop, { transitType: 'ELEVATOR' });
+    await connectNodes(liftTop, liftExit);
+
+    const qrId = qrIdFor(entrance, f1.floorNumber);
+
+    const plain = await request(app).get(`/api/qr/scan/route/${qrId}`);
+    expect(plain.status).toBe(200);
+    expect(plain.body.data.emergencyRoute.exitNodeId).toBe(stairsExit.id);
+    expect(plain.body.data.route.preference).toBeNull();
+
+    const scanned = await request(app).get(
+      `/api/qr/scan/route/${qrId}?profile=elevator_first`
+    );
+    expect(scanned.status).toBe(200);
+    expect(scanned.body.data.route.profile).toBe('emergency');
+    expect(scanned.body.data.route.preference).toBe('elevator_first');
+    expect(scanned.body.data.emergencyRoute.exitNodeId).toBe(liftExit.id);
+
+    // The exact cross-surface parity the reviewer's repro exercised: the
+    // same origin, same query string, must land on the same exit as
+    // /evacuate — never a different, "safer-looking" answer that is really
+    // just a stale profile being discarded.
+    const evacuated = await request(app).get(
+      `/api/wayfinding/evacuate?from=${entrance.id}&profile=elevator_first`
+    );
+    expect(evacuated.status).toBe(200);
+    expect(evacuated.body.data.route.destination.nodeId).toBe(
+      scanned.body.data.emergencyRoute.exitNodeId
+    );
   });
 });

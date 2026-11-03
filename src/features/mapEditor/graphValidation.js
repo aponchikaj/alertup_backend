@@ -2,11 +2,15 @@
 // codes. Works on the same in-memory graph shape the router uses.
 
 /**
- * @param {{nodes: Map, adj: Map, floors: Map}} graph
+ * @param {{nodes: Map, adj: Map, radj?: Map, floors: Map}} graph `radj` is the
+ *   reverse adjacency the graph loader builds (incoming traversals, each
+ *   entry's `to` pointing back at the predecessor). It is optional: a caller
+ *   that predates it hands in a symmetric `adj`, and every directed check
+ *   below then degrades to the two-way behaviour it used to have.
  * @returns {{ok: boolean, issues: Array<{code, severity, message, nodeIds?}>}}
  */
 export function validateGraph(graph) {
-  const { nodes, adj, floors } = graph;
+  const { nodes, adj, radj, floors } = graph;
   const issues = [];
 
   if (nodes.size === 0) {
@@ -22,10 +26,17 @@ export function validateGraph(graph) {
     };
   }
 
-  const degree = (id) => (adj.get(id) || []).length;
+  // Directed graph, three views of it:
+  //   out      — traversals leaving a node
+  //   incoming — traversals arriving at it (`to` is the predecessor)
+  //   incident — either direction, for the questions that are about wiring
+  //              rather than about walking (orphans, floor links, sections)
+  const out = (id) => adj.get(id) || [];
+  const incoming = (id) => (radj ? radj.get(id) || [] : out(id));
+  const incident = (id) => (radj ? [...out(id), ...incoming(id)] : out(id));
 
-  // Orphan nodes (no edges at all)
-  const orphans = [...nodes.keys()].filter((id) => degree(id) === 0);
+  // Orphan nodes (no edges at all, in either direction)
+  const orphans = [...nodes.keys()].filter((id) => incident(id).length === 0);
   if (orphans.length > 0) {
     issues.push({
       code: 'ORPHAN_NODE',
@@ -35,7 +46,8 @@ export function validateGraph(graph) {
     });
   }
 
-  // Connected components via BFS
+  // Weakly connected components via BFS — "can these two points be wired
+  // together at all", so it ignores one-way arrows and walks both directions.
   const seen = new Set();
   const components = [];
   for (const id of nodes.keys()) {
@@ -46,7 +58,7 @@ export function validateGraph(graph) {
     while (queue.length) {
       const current = queue.shift();
       component.push(current);
-      for (const edge of adj.get(current) || []) {
+      for (const edge of incident(current)) {
         if (nodes.has(edge.to) && !seen.has(edge.to)) {
           seen.add(edge.to);
           queue.push(edge.to);
@@ -75,13 +87,16 @@ export function validateGraph(graph) {
       message: 'No emergency exits are marked. Evacuation routing cannot work.',
     });
   } else {
-    // Multi-source BFS from all exits; adjacency is symmetric so forward
-    // reachability equals reverse reachability.
+    // Multi-source BFS from all exits over the REVERSE adjacency: the
+    // question is "who can reach an exit", which is the set of nodes an exit
+    // is reachable *from*. With one-way edges that is no longer the same as
+    // what an exit can reach — a corridor you may only walk away from an exit
+    // strands everyone on it, and a forward BFS would call it healthy.
     const reached = new Set(exitIds);
     const queue = [...exitIds];
     while (queue.length) {
       const current = queue.shift();
-      for (const edge of adj.get(current) || []) {
+      for (const edge of incoming(current)) {
         if (nodes.has(edge.to) && !reached.has(edge.to)) {
           reached.add(edge.to);
           queue.push(edge.to);
@@ -99,11 +114,30 @@ export function validateGraph(graph) {
     }
   }
 
+  // One-way pockets: a node you can walk into but not out of. Its only way
+  // out is against the arrow, which is exactly the mistake a freshly drawn
+  // one-way corridor makes.
+  //
+  // Exits are exempt: a one-way door that only admits people into an exit is
+  // correct modelling, not a defect — leaving it is the whole point.
+  const oneWayDeadEnds = [...nodes.values()]
+    .filter((n) => n.type !== 'EMERGENCY_EXIT')
+    .map((n) => n.id)
+    .filter((id) => out(id).length === 0 && incoming(id).length > 0);
+  if (oneWayDeadEnds.length > 0) {
+    issues.push({
+      code: 'EDGE_ONE_WAY_DEAD_END',
+      severity: 'warning',
+      message: `${oneWayDeadEnds.length} node(s) can only be left against a one-way edge.`,
+      nodeIds: oneWayDeadEnds,
+    });
+  }
+
   // Transit nodes that never leave their floor
   const badTransit = [...nodes.values()]
     .filter((n) => n.type === 'TRANSIT')
     .filter((n) =>
-      (adj.get(n.id) || []).every((edge) => {
+      incident(n.id).every((edge) => {
         const other = nodes.get(edge.to);
         return !other || other.floorId === n.floorId;
       })

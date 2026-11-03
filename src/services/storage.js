@@ -115,17 +115,38 @@ export const keys = {
 };
 
 /**
+ * FX-014: a building-owned key must live under that building's own folder.
+ * The generic `buildings/` prefix check alone let a floor row that held
+ * another tenant's URL delete that tenant's file. Segment-exact (b1 never
+ * matches b10) and traversal-proof.
+ */
+export function assertKeyInBuilding(key, buildingId) {
+  if (!buildingId) throw new Error(`Refusing to delete without a building scope: ${key}`);
+  const segments = String(key).split('/');
+  if (segments.some((s) => s === '..' || s === '.' || s === '')) {
+    throw new Error(`Refusing to delete outside building ${buildingId}: ${key}`);
+  }
+  if (segments[0] !== 'buildings' || segments[1] !== String(buildingId) || segments.length < 3) {
+    throw new Error(`Refusing to delete outside building ${buildingId}: ${key}`);
+  }
+}
+
+/**
  * Delete by public URL. Refuses URLs outside this bucket or outside the known
- * prefixes — the tenant-safety guard the Cloudinary service had.
+ * prefixes — the tenant-safety guard the Cloudinary service had — and, for a
+ * building asset, anything outside that building's own folder (FX-014).
  * Non-S3 URLs (legacy Cloudinary) are ignored so mixed-era rows delete safely.
+ * @param {string} url
+ * @param {{buildingId?: string}} [scope] required for `buildings/` keys
  * @returns {Promise<'deleted'|'skipped'>}
  */
-export async function deleteByUrl(url) {
+export async function deleteByUrl(url, { buildingId } = {}) {
   const key = keyFromUrl(url);
   if (!key) return 'skipped';
   if (!ALLOWED_PREFIXES.some((p) => key.startsWith(p))) {
     throw new Error(`Refusing to delete outside known prefixes: ${key}`);
   }
+  if (key.startsWith('buildings/')) assertKeyInBuilding(key, buildingId);
   await s3().send(
     new DeleteObjectCommand({ Bucket: config.storage.bucket, Key: key })
   );

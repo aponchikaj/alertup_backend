@@ -85,6 +85,20 @@ export const emergencyActionLimiter = rateLimit({
  * (QR scan, floor lookup). Wide enough never to affect a real evacuation,
  * narrow enough to stop scripted enumeration.
  */
+/**
+ * D15 (research 004): the emergency status poll — the fallback every phone
+ * uses when it cannot hold a live stream. Sized for a building's shared Wi-Fi
+ * or carrier NAT: hundreds of real occupants polling every 10 s behind ONE
+ * IP. The 1 s per-building cache in front of it means even this ceiling costs
+ * one database read per second per building.
+ */
+export const statusPollLimiter = rateLimit({
+  ...baseOptions,
+  windowMs: 60 * 1000,
+  limit: 1200,
+  message: deny('Too many requests. Please wait a moment.'),
+});
+
 export const publicReadLimiter = rateLimit({
   ...baseOptions,
   windowMs: 60 * 1000, // 1 minute
@@ -119,6 +133,23 @@ export const aiDailyLimiter = rateLimit({
   windowMs: 24 * 60 * 60 * 1000,
   limit: 150,
   message: deny('Daily assistant limit reached. Please try again tomorrow.'),
+});
+
+/**
+ * The public SSE connect endpoint (`/api/realtime/buildings/:id/status`).
+ * No auth, so it's the one realtime endpoint an anonymous caller can hit
+ * directly and try to open many long-lived connections against. The limit
+ * is generous on purpose: a real emergency legitimately produces reconnect
+ * storms (a building's wifi flapping while people evacuate), and this must
+ * never be what turns that into a 429 during an evacuation. It backstops the
+ * broadcaster's own per-building/global subscriber caps — it is not the
+ * primary defense.
+ */
+export const sseConnectLimiter = rateLimit({
+  ...baseOptions,
+  windowMs: 60 * 1000,
+  limit: 300,
+  message: deny('Too many connection attempts. Please wait a moment.'),
 });
 
 /** The anonymous home-page design demo. A full design burns 10-20x the

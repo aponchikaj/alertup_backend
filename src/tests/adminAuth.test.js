@@ -92,3 +92,42 @@ describe('admin authentication', () => {
     expect(await prisma.user.count()).toBe(0);
   });
 });
+
+/* FX-011 — the admin user update referenced an undeclared `plan`, so every
+   call (plan change or not) threw a ReferenceError and returned 500. */
+describe('PUT /api/admin/user/:id', () => {
+  test('changes a user\'s plan', async () => {
+    const { user } = await createUser();
+
+    const res = await request(app)
+      .put(`/api/admin/user/${user.id}`)
+      .set('Cookie', adminCookie())
+      .send({ plan: 'BUSINESS' });
+
+    expect(res.status).toBe(200);
+    const updated = await prisma.user.findUnique({ where: { id: user.id } });
+    expect(updated.plan).toBe('BUSINESS');
+  });
+
+  test('updates a profile field without a plan', async () => {
+    const { user } = await createUser();
+
+    const res = await request(app)
+      .put(`/api/admin/user/${user.id}`)
+      .set('Cookie', adminCookie())
+      .send({ company: 'Acme' });
+
+    expect(res.status).toBe(200);
+  });
+
+  test('rejects an unknown plan', async () => {
+    const { user } = await createUser();
+
+    const res = await request(app)
+      .put(`/api/admin/user/${user.id}`)
+      .set('Cookie', adminCookie())
+      .send({ plan: 'PLATINUM' });
+
+    expect(res.status).toBe(422);
+  });
+});

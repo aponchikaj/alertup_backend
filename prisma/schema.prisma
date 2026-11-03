@@ -67,6 +67,29 @@ enum LogType {
   EMERGENCY
 }
 
+enum EdgeDirection {
+  BOTH
+  FORWARD
+  REVERSE
+}
+
+enum EdgeRank {
+  PRIMARY
+  SECONDARY
+}
+
+enum Visibility {
+  PUBLIC
+  STAFF
+  EMERGENCY_ONLY
+}
+
+enum ActorType {
+  USER
+  SYSTEM
+  INTEGRATION
+}
+
 model User {
   id               String    @id @default(cuid())
   email            String    @unique
@@ -88,13 +111,14 @@ model User {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
-  ownedBuildings Building[]       @relation("BuildingOwner")
-  memberships    BuildingMember[]
-  invitesSent    BuildingInvite[] @relation("InviteSender")
-  verifications  Verification[]
-  scanEvents     ScanEvent[]
-  emergencies    EmergencyEvent[] @relation("EmergencyTriggeredBy")
-  reviews        Review[]
+  ownedBuildings  Building[]       @relation("BuildingOwner")
+  memberships     BuildingMember[]
+  invitesSent     BuildingInvite[] @relation("InviteSender")
+  verifications   Verification[]
+  scanEvents      ScanEvent[]
+  aiConversations AiConversation[]
+  emergencies     EmergencyEvent[] @relation("EmergencyTriggeredBy")
+  reviews         Review[]
 }
 
 model Building {
@@ -105,18 +129,26 @@ model Building {
   isDeactivated    Boolean  @default(false)
   emergencyMode    Boolean  @default(false)
   emergencyMessage String?
+  // Per-building routing tuning (weights, tag rules, etc.) — free-form until
+  // the profile shape stabilizes; consumed by the wayfinding profile resolver.
+  routingProfile   Json?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
-  floors     Floor[]
-  nodes      Node[]
-  edges      Edge[]
-  roles      Role[]
-  members    BuildingMember[]
-  invites    BuildingInvite[]
-  emergencies EmergencyEvent[]
-  logs       Log[]
-  scanEvents ScanEvent[]
+  floors          Floor[]
+  nodes           Node[]
+  edges           Edge[]
+  roles           Role[]
+  members         BuildingMember[]
+  invites         BuildingInvite[]
+  emergencies     EmergencyEvent[]
+  logs            Log[]
+  scanEvents      ScanEvent[]
+  aiConversations AiConversation[]
+  closures        Closure[]
+  routeRequests   RouteRequest[]
+  searchEvents    SearchEvent[]
+  realtimeEvents  RealtimeEvent[]
 
   @@index([ownerId])
   @@index([name])
@@ -174,10 +206,10 @@ model BuildingInvite {
   acceptedById String?
   acceptedAt   DateTime?
   createdAt    DateTime     @default(now())
+  // partial unique (buildingId, lower(email)) WHERE status='PENDING' — raw SQL migration
 
   @@index([buildingId, status])
   @@index([email])
-  // partial unique (buildingId, lower(email)) WHERE status='PENDING' — raw SQL migration
 }
 
 model Floor {
@@ -186,6 +218,11 @@ model Floor {
   building            Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
   floorNumber         Int
   name                String?
+  // Display order for multi-floor UI (floor pickers, stepper) independent of
+  // floorNumber, which can be non-contiguous (basements, mezzanines).
+  verticalOrder       Int?
+  // Short label for compact UI (floor chips, breadcrumbs) — e.g. "G", "M2".
+  shortName           String?
   mapImageUrl         String?
   qrCodeUrl           String?
   svgContent          String?  @db.Text
@@ -217,15 +254,21 @@ model Node {
   y          Float
   type       NodeType
   label      String?
-  qrSlug     String?  @unique
-  scanCount  Int      @default(0)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  qrSlug     String?    @unique
+  // Integrator-supplied stable id (e.g. a booth code) for external references
+  // that must survive a map redraw; unique per building, reusable across them.
+  externalId String?
+  visibility Visibility @default(PUBLIC)
+  scanCount  Int        @default(0)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
 
-  poi       Poi?
-  edgesFrom Edge[] @relation("EdgeSource")
-  edgesTo   Edge[] @relation("EdgeTarget")
+  poi        Poi?
+  edgesFrom  Edge[]      @relation("EdgeSource")
+  edgesTo    Edge[]      @relation("EdgeTarget")
+  scanEvents ScanEvent[]
 
+  @@unique([buildingId, externalId])
   @@index([floorId])
   @@index([buildingId])
   @@index([buildingId, type])
@@ -235,13 +278,27 @@ model Poi {
   id          String   @id @default(cuid())
   nodeId      String   @unique
   node        Node     @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  // Denormalized from node.buildingId (backfilled in the migration) so a POI
+  // can be looked up/scoped without a join through Node, and so externalId
+  // uniqueness can be scoped per building. Not a Prisma relation — the map
+  // editor never reassigns a POI's building, so keeping it a plain column
+  // avoids a second FK to maintain alongside Node's.
+  buildingId  String?
+  // Integrator-supplied stable id (e.g. a catalog SKU), unique per building.
+  externalId  String?
   name        String
   category    String?
   description String?
   keywords    String[] @default([])
+  // Localized display names/aliases: { en?, ka?, aliases[] }.
+  names       Json?
+  // Precomputed lowercase search blob (name + keywords), backfilled in the
+  // migration; kept in sync by application code on writes.
+  searchText  String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  @@unique([buildingId, externalId])
   @@index([keywords], type: Gin)
   @@index([name])
 }
@@ -255,13 +312,20 @@ model Edge {
   source       Node        @relation("EdgeSource", fields: [sourceNodeId], references: [id], onDelete: Cascade)
   target       Node        @relation("EdgeTarget", fields: [targetNodeId], references: [id], onDelete: Cascade)
   buildingId   String
-  building     Building    @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  building     Building      @relation(fields: [buildingId], references: [id], onDelete: Cascade)
   distance     Float
   weight       Float
-  accessible   Boolean     @default(true)
-  transitType  TransitType @default(WALKWAY)
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
+  accessible   Boolean       @default(true)
+  transitType  TransitType   @default(WALKWAY)
+  // Real-world length in meters, independent of the px `distance`/`weight`
+  // used for on-canvas layout — populated once floors carry a known scale.
+  lengthM      Float?
+  direction    EdgeDirection @default(BOTH)
+  tags         String[]      @default([])
+  rank         EdgeRank      @default(PRIMARY)
+  visibility   Visibility    @default(PUBLIC)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
 
   @@unique([sourceNodeId, targetNodeId])
   @@index([buildingId])
@@ -289,15 +353,118 @@ model EmergencyEvent {
 }
 
 model Log {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   buildingId  String
-  building    Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
-  type        LogType  @default(SYSTEM)
+  building    Building  @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  type        LogType   @default(SYSTEM)
   message     String
-  isEmergency Boolean  @default(false)
+  isEmergency Boolean   @default(false)
+  // Who/what caused this log row — nullable because most historical rows and
+  // system-generated entries have no single actor.
+  actorUserId String?
+  actorType   ActorType @default(SYSTEM)
+  // What the log is about (e.g. "Closure", "Edge") plus its id, so an audit
+  // trail can be filtered per entity without parsing `message`.
+  entity      String?
+  entityId    String?
+  payload     Json?
+  createdAt   DateTime  @default(now())
+
+  @@index([buildingId, createdAt(sort: Desc)])
+  @@index([buildingId, entity, entityId])
+}
+
+// A temporary routing obstruction (maintenance, incident, drill) affecting a
+// set of edges/nodes on one floor. Referenced by id/edgeIds/nodeIds arrays
+// rather than a join table since a closure is short-lived and read far more
+// often than written — the router loads active closures per building/floor
+// and applies costMultiplier (or treats it as fully blocked when null).
+model Closure {
+  id             String    @id @default(cuid())
+  buildingId     String
+  building       Building  @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  floorId        String?
+  edgeIds        String[]  @default([])
+  nodeIds        String[]  @default([])
+  // Cost penalty multiplier applied to affected edges; null means blocked
+  // outright rather than merely penalized.
+  costMultiplier Float?
+  reason         String?
+  startsAt       DateTime  @default(now())
+  endsAt         DateTime?
+  createdById    String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([buildingId, endsAt])
+}
+
+// One routing computation, for quality/analytics (success rate, distance
+// distribution, which profiles get used) — deliberately lean, no PII beyond
+// what src/profile/mode already imply.
+// What visitors actually asked for (B13): every /route, /evacuate, QR scan
+// and AI-tool route search, success or failure — a failed row (found:false)
+// is the most valuable one, since it is how an owner learns people keep
+// asking for somewhere unreachable. Written via
+// src/features/wayfinding/routeRequests.js#recordRouteRequest, off the
+// response path through the analytics queue; never call prisma directly for
+// this table.
+model RouteRequest {
+  id         String   @id @default(cuid())
+  buildingId String
+  building   Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  fromNodeId String?
+  // The destination(s) requested. TWO SHAPES share this one column:
+  //   - a single-destination request stores the raw token as given: a node
+  //     id, a `poi:<poiId>` token, or an `ext:<code>` token.
+  //   - a multi-stop request (more than one `to` on the same call) stores
+  //     `JSON.stringify([...])` — EVERY requested token, IN REQUEST ORDER
+  //     (not the solved visiting order `multiStop.js` may pick). A reader
+  //     must `JSON.parse` when the value starts with `[`; this is not
+  //     ambiguous in practice because a destination token never begins with
+  //     `[`, but it IS a convention to know rather than a schema guarantee.
+  to          String?
+  profile     String
+  mode        String
+  src         String?
+  found       Boolean  @default(true)
+  distanceM   Float?
+  durationSec Float?
   createdAt   DateTime @default(now())
 
   @@index([buildingId, createdAt(sort: Desc)])
+}
+
+// One destination search, for search-quality analytics (zero-result queries,
+// which POI actually got picked). String @id (not cuid) because these are
+// written from a hot, unauthenticated path and the caller mints the id.
+model SearchEvent {
+  id          String   @id
+  buildingId  String
+  building    Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  query       String
+  resultCount Int
+  pickedPoiId String?
+  createdAt   DateTime @default(now())
+
+  @@index([buildingId, createdAt(sort: Desc)])
+}
+
+// Durable backlog for the SSE emergency/closure feed: every broadcast frame
+// is persisted here first so a reconnecting client can replay everything
+// after `sinceSeq`/`Last-Event-ID` instead of missing frames sent while it
+// was offline. seq is a per-building monotonic counter, not a global one.
+model RealtimeEvent {
+  id         String   @id @default(cuid())
+  buildingId String
+  building   Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  seq        BigInt
+  event      String
+  data       Json
+  createdAt  DateTime @default(now())
+
+  @@unique([buildingId, seq])
+  @@index([createdAt])
 }
 
 // Mongo TTL replacement: lookups always filter expiresAt > now(); the sweeper
@@ -325,11 +492,18 @@ model ScanEvent {
   building     Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
   userId       String?
   user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  // Which sticker was scanned. Nullable because every row written before this
+  // column existed has no answer, and SetNull because a re-drawn map deletes
+  // nodes while the scan history has to survive it. Without this, "which
+  // entrance do visitors actually use" is unanswerable.
+  nodeId       String?
+  node         Node?    @relation(fields: [nodeId], references: [id], onDelete: SetNull)
   buildingName String
   scannedAt    DateTime @default(now())
 
   @@index([userId, scannedAt(sort: Desc)])
   @@index([buildingId, scannedAt(sort: Desc)])
+  @@index([nodeId, scannedAt(sort: Desc)])
 }
 
 model Review {
@@ -357,4 +531,103 @@ model Report {
   reason    String?
   message   String?
   createdAt DateTime @default(now())
+}
+
+/**
+ * ============================================================================
+ * AI agent conversations.
+ * ----------------------------------------------------------------------------
+ * Persisted for three reasons, in descending order of weight:
+ * 1. Audit. After an incident an operator has to be able to answer "what did
+ * the assistant tell occupants?" Nothing else in the system records that.
+ * 2. Budget. Per-IP limits cannot express "this building has had enough
+ * today" — and a whole building behind one NAT shares a single IP, so the
+ * IP-shaped question is the wrong one.
+ * 3. Memory across turns, which is the least important of the three.
+ * Retention lives in jobs/sweeper.js: ordinary conversations are swept after
+ * 30 days, emergency ones are kept — they are the audit record.
+ * =========================================================================
+ */
+model AiConversation {
+  id      String @id @default(cuid())
+  agentId String
+
+  buildingId String?
+  building   Building? @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  // Null for anonymous visitors, who are most of the traffic: scan pages have
+  // no login and never will.
+  userId     String?
+  user       User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // Where the visitor scanned in, denormalized like ScanEvent.buildingName:
+  // the audit record must stay readable after the map is redrawn.
+  nodeId      String?
+  // Set when the conversation was opened while this emergency was ACTIVE. It
+  // is what makes a row an audit record rather than a transcript, so the
+  // sweeper keys retention on it.
+  emergencyId String?
+
+  locale    String   @default("en")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages AiMessage[]
+
+  @@index([buildingId, createdAt(sort: Desc)])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([emergencyId])
+}
+
+// One turn. Tool calls are rows here with role 'tool' rather than their own
+// model: they are read in sequence with the turns around them, and a separate
+// table would only add a join to every read.
+model AiMessage {
+  id             String         @id @default(cuid())
+  conversationId String
+  conversation   AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  // 'user' | 'assistant' | 'tool'
+  role    String
+  content String @db.Text
+
+  toolName String?
+  toolArgs Json?
+  toolOk   Boolean?
+
+  // Which provider actually answered — the fallback is invisible to the user
+  // by design, so without this an incident review cannot tell Gemini from Groq.
+  provider String?
+  model    String?
+  // True when the static localized fallback answered instead of a model.
+  fallback Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+/// D3 (founder decision 2026-11-03): incident history outlives the building.
+/// Written in the same transaction as any building delete (owner, account
+/// deletion, admin), BEFORE the cascade removes EmergencyEvent, Log and
+/// AiConversation rows. No foreign keys on purpose — a row must survive both
+/// the building and its owner.
+model IncidentArchive {
+  id           String   @id @default(cuid())
+  buildingId   String
+  buildingName String
+  ownerId      String?
+  /// 'INCIDENT' (one emergency, with its logs and AI transcripts) or 'AUDIT'
+  /// (the building's accountability log rows).
+  kind         String
+  emergencyId  String?
+  startedAt    DateTime?
+  endedAt      DateTime?
+  /// 'building_deleted' | 'account_deleted' | 'admin_deleted'
+  reason       String
+  snapshot     Json
+  archivedAt   DateTime @default(now())
+
+  @@index([buildingId])
+  @@index([ownerId])
+  @@index([emergencyId])
 }

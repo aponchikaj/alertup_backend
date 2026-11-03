@@ -99,7 +99,7 @@ const authenticate = async (socket) => {
     null;
   if (!token) throw new Error('Authentication required.');
 
-  const data = jwt.verify(token, config.jwt.secret);
+  const data = jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'] });
   if (!data || !data.userID) throw new Error('Invalid token.');
 
   const user = await prisma.user.findUnique({ where: { id: data.userID } });

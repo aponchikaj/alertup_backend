@@ -22,6 +22,8 @@ import {
   setSessionCookie,
   clearSessionCookie,
 } from '../utils/session.js';
+import { escapeHtml } from '../services/escapeHtml.js';
+import { archiveIncidents } from '../services/incidentArchive.js';
 
 // GET /api/settings
 router.get('/api/settings', whoami, async (req, res) => {
@@ -127,7 +129,7 @@ router.put('/api/settings/changePassword', whoami, async (req, res) => {
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
             <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
               <h1 style="color: #FF7B22; margin-top: 0;">✅ Password Changed Successfully</h1>
-              <p style="color: #333; font-size: 16px;">Hello <strong>${displayName(user)}</strong>,</p>
+              <p style="color: #333; font-size: 16px;">Hello <strong>${escapeHtml(displayName(user))}</strong>,</p>
               <p style="color: #666;">Your password has been successfully changed.</p>
               <div style="background-color: #e8f5e9; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #4caf50;">
                 <p style="margin: 0; color: #2e7d32; font-weight: bold;">✓ Security Update</p>
@@ -263,7 +265,7 @@ router.put('/api/settings/email', whoami, async (req, res) => {
             <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
               <h1 style="color: #FF7B22; margin-top: 0;">✅ Email Updated Successfully</h1>
               <p style="color: #333; font-size: 16px;">Hello,</p>
-              <p style="color: #666;">Your email address has been successfully updated to <strong>${normalizedEmail}</strong>.</p>
+              <p style="color: #666;">Your email address has been successfully updated to <strong>${escapeHtml(normalizedEmail)}</strong>.</p>
               <div style="background-color: #e8f5e9; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #4caf50;">
                 <p style="margin: 0; color: #2e7d32; font-weight: bold;">✓ Update Complete</p>
                 <p style="margin: 5px 0 0 0; color: #666; font-size: 14px;">All future notifications will be sent to this email address.</p>
@@ -299,7 +301,7 @@ router.post('/api/settings/verify', whoami, emailLimiter, async (req, res) => {
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
             <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
               <h1 style="color: #FF7B22; margin-top: 0;">🔐 Verify Your Account</h1>
-              <p style="color: #333; font-size: 16px;">Hello <strong>${displayName(user)}</strong>,</p>
+              <p style="color: #333; font-size: 16px;">Hello <strong>${escapeHtml(displayName(user))}</strong>,</p>
               <p style="color: #666;">Please verify your AlertUp account using the code below:</p>
               <div style="background-color: #f9f9f9; padding: 20px; border-radius: 5px; margin: 20px 0; text-align: center; border: 2px dashed #FF7B22;">
                 <p style="margin: 0; font-size: 32px; font-weight: bold; color: #FF7B22; letter-spacing: 5px;">${code}</p>
@@ -354,7 +356,7 @@ router.put('/api/settings/verify', whoami, authLimiter, async (req, res) => {
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
           <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
             <h1 style="color: #FF7B22; margin-top: 0;">🎉 Account Verified!</h1>
-            <p style="color: #333; font-size: 16px;">Hello <strong>${displayName(user)}</strong>,</p>
+            <p style="color: #333; font-size: 16px;">Hello <strong>${escapeHtml(displayName(user))}</strong>,</p>
             <p style="color: #666;">Your AlertUp account has been successfully verified!</p>
             <div style="background-color: #e8f5e9; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #4caf50;">
               <p style="margin: 0; color: #2e7d32; font-weight: bold;">✓ Verification Complete</p>
@@ -387,7 +389,9 @@ router.post('/api/settings/account', whoami, async (req, res) => {
     const validPassword = await bcrypt.compare(String(password), user.password || '');
     if (!validPassword) return fail(res, 401, "Incorrect password.");
 
-    // Removes their buildings, floors, nodes, logs, emergencies and reviews
+    // Removes their buildings, floors, nodes, logs, emergencies and reviews.
+    // D3: incident records (emergencies, their logs, AI transcripts) and the
+    // audit trail are first copied to IncidentArchive and kept.
     // too — the farewell email below promises exactly that.
     //
     // Postgres FK cascades handle everything hanging off a building and off the
@@ -401,6 +405,8 @@ router.post('/api/settings/account', whoami, async (req, res) => {
     await prisma.$transaction(async (tx) => {
       await tx.buildingMember.deleteMany({ where: { building: { ownerId: user.id } } });
       await tx.buildingInvite.deleteMany({ where: { building: { ownerId: user.id } } });
+      // D3: incident history outlives the account and its buildings.
+      await archiveIncidents(tx, { where: { ownerId: user.id }, reason: 'account_deleted' });
       await tx.building.deleteMany({ where: { ownerId: user.id } });
       await tx.buildingInvite.deleteMany({ where: { invitedById: user.id } });
       await tx.user.delete({ where: { id: user.id } });
@@ -414,11 +420,11 @@ router.post('/api/settings/account', whoami, async (req, res) => {
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
             <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
               <h1 style="color: #FF7B22; margin-top: 0;">👋 Goodbye</h1>
-              <p style="color: #333; font-size: 16px;">Hello <strong>${displayName(user)}</strong>,</p>
+              <p style="color: #333; font-size: 16px;">Hello <strong>${escapeHtml(displayName(user))}</strong>,</p>
               <p style="color: #666;">Your AlertUp account has been successfully deleted.</p>
               <div style="background-color: #fff3e0; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ff9800;">
                 <p style="margin: 0; color: #e65100; font-weight: bold;">Account Deleted</p>
-                <p style="margin: 5px 0 0 0; color: #666; font-size: 14px;">All your data has been permanently removed from our system.</p>
+                <p style="margin: 5px 0 0 0; color: #666; font-size: 14px;">Your account, buildings and personal details have been removed. Records of past emergencies in your buildings are kept as a safety record.</p>
               </div>
               <p style="color: #666; font-size: 14px;">We're sorry to see you go. If you change your mind, you're always welcome back!</p>
               <p style="color: #666; font-size: 14px; margin-top: 20px;">Best regards,<br><strong style="color: #FF7B22;">AlertUp Team</strong></p>

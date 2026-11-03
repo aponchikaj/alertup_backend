@@ -1,4 +1,8 @@
 node_modules/
+# Env files hold real secrets and must never be committed. Ignore every
+# .env variant rather than naming them one at a time: a stray .env.bak or
+# .env.old is exactly what a broad `git add -A` sweeps up by accident.
 .env
-.env.local
+.env.*
+!.env.example
 coverage/

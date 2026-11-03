@@ -3,6 +3,7 @@ const router = express.Router();
 
 import whoami from '../middlewares/whoami.js';
 import { ok, fail } from '../utils/respond.js';
+import prisma from '../db/prisma.js';
 
 router.get('/api/me', whoami, async (req, res) => {
     try {
@@ -30,6 +31,21 @@ router.get('/api/me', whoami, async (req, res) => {
             createdAt: user.createdAt,
             updatedAt: user.updatedAt,
         };
+
+        // FX-023: the frontend's permission model (`hasPermission`,
+        // PermissionGuard) reads these two. Without them every member was
+        // locked out in the UI of what the API itself allowed.
+        const [owned, memberships] = await Promise.all([
+            prisma.building.findMany({ where: { ownerId: user.id }, select: { id: true } }),
+            prisma.buildingMember.findMany({
+                where: { userId: user.id },
+                select: { buildingId: true, role: { select: { name: true, permissions: true } } },
+            }),
+        ]);
+        safeUser.Buildings = owned.map((b) => b.id);
+        safeUser.memberships = Object.fromEntries(
+            memberships.map((m) => [m.buildingId, { role: m.role.name, permissions: m.role.permissions }])
+        );
 
         return ok(res, { data: safeUser });
     } catch (err) {

@@ -121,7 +121,7 @@ export const generateQRCodeDataUrl = async (data, options = {}) => {
 };
 
 /** Delete a stored QR asset, scoped to the QR key namespace. */
-export const deleteQRCodeFile = async (url) => {
+export const deleteQRCodeFile = async (url, buildingId) => {
   const key = keyFromUrl(url);
   if (!key) {
     return { success: false, message: 'Not a managed asset URL' };
@@ -130,7 +130,7 @@ export const deleteQRCodeFile = async (url) => {
     return { success: false, message: 'Not a QR code asset' };
   }
   try {
-    await deleteByUrl(url);
+    await deleteByUrl(url, { buildingId });
     return { success: true, message: 'QR code deleted successfully' };
   } catch (error) {
     console.error('Error deleting QR code:', error);

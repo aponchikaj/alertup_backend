@@ -1,4 +1,5 @@
 import multer from 'multer';
+import { PLAN_LIMITS } from '../services/plans.js';
 
 // Building map uploads now live in S3 (src/services/storage.js), so multer
 // keeps the file in memory and the route streams the buffer straight to the
@@ -33,6 +34,10 @@ const upload = multer({
   fileFilter,
   limits: {
     fileSize: 10 * 1024 * 1024, // 10MB limit
+    // FX-048: every file is buffered in memory on the single machine. One map
+    // per floor, so no request needs more files than the largest plan has
+    // floors — anything beyond is a 400 (MulterError LIMIT_FILE_COUNT).
+    files: Math.max(...Object.values(PLAN_LIMITS).map((p) => p.maxFloorsPerBuilding)),
   },
 });
 

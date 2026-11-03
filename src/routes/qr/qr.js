@@ -148,7 +148,7 @@ router.delete(
         });
       }
 
-      const result = await deleteQRCodeFile(qrUrl);
+      const result = await deleteQRCodeFile(qrUrl, req.building.id);
       if (!result.success) {
         return res.status(404).json({ success: false, message: result.message });
       }

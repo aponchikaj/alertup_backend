@@ -69,7 +69,7 @@ router.post('/api/ai/chat', aiChatLimiter, aiDailyLimiter, async (req, res) => {
     sendData(res, { done: true });
   } catch (err) {
     if (!abort.signal.aborted) {
-      console.error('Groq stream error:', err.message);
+      console.error('AI stream error:', err.message);
       try {
         sendData(res, { delta: fallbackText, fallback: true });
         sendData(res, { done: true });
