@@ -6,10 +6,12 @@ import { isId } from '../../utils/ids.js';
 import { publicReadLimiter } from '../../services/rateLimiter.js';
 import { parseQrSlug } from '../../features/qr/qrPayload.js';
 import { getGraph } from '../../features/wayfinding/graphCache.js';
-import { findEvacuationRoute } from '../../features/wayfinding/dijkstra.js';
-import { assembleRoute } from '../../features/wayfinding/routeAssembler.js';
+import { parseRoutingQuery } from '../../features/wayfinding/profiles.js';
+import { getActiveClosures } from '../../features/wayfinding/closures.js';
+import { planEvacuation } from '../../features/wayfinding/planning.js';
 import { calculateDistance } from '../../features/wayfinding/dijkstra.js';
-import { publish } from '../../features/realtime/broadcaster.js';
+import { recordRouteRequest } from '../../features/wayfinding/routeRequests.js';
+import { recordAction } from '../../features/emergency/emergencyService.js';
 
 const router = express.Router();
 
@@ -72,6 +74,11 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
 
     if (!node) return res.status(404).json({ success: false, message: 'Node not found', qrId });
     if (!building) return res.status(404).json({ success: false, message: 'Building not found', qrId });
+    // FX-055: deactivating a building promises the owner its codes stop
+    // resolving — the floor-QR scan already honours it with 410.
+    if (building.isDeactivated) {
+      return res.status(410).json({ success: false, message: 'This building is currently deactivated.', qrId });
+    }
 
     // Whole-building graph (cached). Also the source for this floor's nodes.
     const graph = await getGraph(buildingId);
@@ -92,15 +99,51 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
       connections: neighbourIds(n.id),
     });
 
-    // Evacuation route to the nearest exit, across floors where necessary.
-    const evac = findEvacuationRoute(graph, node.id);
-    const found = Boolean(evac);
+    // B16: bring the scan endpoint up to the same routing contract as
+    // /api/wayfinding/evacuate — closures folded into an overlay, the cached
+    // distance-to-safety field for the common case, alternative exits, and
+    // real turn-by-turn instructions (assembleRoute builds those internally).
+    //
+    // LIFE-SAFETY RULE, same as /evacuate: this is an evacuation surface, so
+    // visibility (EMERGENCY_ONLY edges) and blocking always come from the
+    // `emergency` profile — never from an explicit `?profile=`. `wheelchair`
+    // (`?profile=wheelchair` or `?accessible=true`) layers an accessibility
+    // REQUIREMENT on top via `composeFilters`, with its own last-resort
+    // fallback that drops it. Any OTHER named profile contributes COST
+    // preferences only (`transitMultiplier`/`floorChangePenaltySec`, layered
+    // onto the emergency-resolved profile below) — it is never allowed to
+    // swap out the visibility/blocking rules a printed sticker's evacuation
+    // route depends on, exactly like `/evacuate`'s `costOverlayName`.
+    const parsedQuery = parseRoutingQuery(req.query);
+    if (!parsedQuery.ok) {
+      return res.status(400).json({ success: false, message: parsedQuery.error, qrId });
+    }
+    const activeClosures = await getActiveClosures(buildingId);
+    const plan = planEvacuation({
+      graph,
+      activeClosures,
+      originId: node.id,
+      query: {
+        name: parsedQuery.name,
+        explicitProfile: typeof req.query.profile === 'string' && Boolean(req.query.profile),
+        includeTags: parsedQuery.includeTags,
+        excludeTags: parsedQuery.excludeTags,
+        heading: parsedQuery.heading,
+      },
+    });
+    if (!plan.ok) {
+      return res.status(400).json({ success: false, message: plan.error, qrId });
+    }
+    const { result, closures, profileName } = plan;
+
+    const found = Boolean(result);
     const pathNodes = found
-      ? evac.path.map((id) => graph.nodes.get(id)).filter(Boolean)
+      ? result.path.map((id) => graph.nodes.get(id)).filter(Boolean)
       : [];
     const exitNode = found ? pathNodes[pathNodes.length - 1] : null;
 
-    // Legacy floorTransitions/walkingDistance semantics.
+    // Legacy floorTransitions/walkingDistance semantics — unchanged shape,
+    // now fed by the same search result the new `route` uses.
     const floorChanges = [];
     let walkingDistance = 0;
     for (let i = 1; i < pathNodes.length; i++) {
@@ -127,7 +170,7 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
       message: found ? null : 'No exit route found from this location',
       exitNodeId: exitNode ? exitNode.id : null,
       path: pathNodes.map((p) => p.id),
-      distance: found ? pathNodes.length - 1 : 0,
+      distance: found ? pathNodes.length - 1 : 0, // hop count — CONTRACT, never meters/seconds
       walkingDistance,
       exitNode: exitNode
         ? {
@@ -141,10 +184,27 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
         : null,
     };
 
-    // New stepper-shaped route for the redesigned viewer.
-    const route = found
-      ? assembleRoute(graph, evac.path, { mode: 'EVACUATION' })
-      : null;
+    // Stepper-shaped route for the redesigned viewer (instructions, warnings,
+    // alternative exits), from the SAME search the legacy fields above used.
+    const route = plan.route;
+
+    // B13/B16: every scan is a route request too — this is the highest-
+    // traffic call site (every printed sticker in the field), always an
+    // evacuation search from the scanned node with no explicit `to`. Records
+    // the profile actually used, not a hardcoded value — a scan under
+    // `?profile=wheelchair` that falls back is still worth telling apart from
+    // a plain `emergency` row.
+    recordRouteRequest({
+      buildingId,
+      fromNodeId: node.id,
+      to: null,
+      profile: profileName,
+      mode: 'EVACUATION',
+      src: 'scan',
+      found,
+      distanceM: route?.totalDistanceM ?? null,
+      durationSec: route?.totalDurationSec ?? null,
+    });
 
     let activeEmergencyId = null;
     if (building.emergencyMode) {
@@ -185,6 +245,8 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
       scanCount: (node.scanCount || 0) + 1,
       // ---- additions for the redesigned viewer ----
       route,
+      closures,
+      profile: profileName,
       emergency: {
         active: building.emergencyMode,
         message: building.emergencyMode ? building.emergencyMessage : null,
@@ -201,20 +263,7 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
     if (building.emergencyMode === true) {
       try {
         const message = `new Scan on ${node.floor?.floorNumber} Floor near ${node.label || 'a checkpoint'}`;
-        await prisma.$transaction([
-          prisma.log.create({
-            data: { buildingId, type: 'SCAN', isEmergency: true, message },
-          }),
-          prisma.emergencyEvent.updateMany({
-            where: { buildingId, status: 'ACTIVE' },
-            data: { scanned: { increment: 1 } },
-          }),
-        ]);
-        publish(buildingId, 'log_appended', {
-          message,
-          type: 'SCAN',
-          createdAt: new Date().toISOString(),
-        });
+        await recordAction(buildingId, 'scanned', { message, nodeId: node.id });
       } catch (logErr) {
         console.error('Failed to record emergency scan:', logErr.message);
       }
@@ -225,13 +274,14 @@ router.get('/route/:qrId', publicReadLimiter, async (req, res) => {
     const userToken = req.cookies?.['userToken'];
     if (userToken) {
       try {
-        const decoded = jwt.verify(userToken, config.jwt.secret);
+        const decoded = jwt.verify(userToken, config.jwt.secret, { algorithms: ['HS256'] });
         if (decoded?.userID) {
           await prisma.scanEvent.create({
             data: {
               buildingId,
               userId: decoded.userID,
               buildingName: building.name,
+              nodeId: node.id,
             },
           });
         }

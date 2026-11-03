@@ -155,11 +155,13 @@ router.delete(
         return fail(res, 409, 'Reassign the members using this role before deleting it.');
       }
 
+      // FX-012: BuildingInvite.role is ON DELETE RESTRICT, so ANY invite row
+      // that names this role — revoked or accepted ones included — blocked the
+      // delete with a 500. Invites for a deleted role can never be accepted
+      // again, and an accepted invite's lasting record is the membership it
+      // created, so the role's invite rows go with it.
       await prisma.$transaction(async (tx) => {
-        await tx.buildingInvite.updateMany({
-          where: { roleId: role.id, status: 'PENDING' },
-          data: { status: 'REVOKED' },
-        });
+        await tx.buildingInvite.deleteMany({ where: { roleId: role.id } });
         await tx.role.delete({ where: { id: role.id } });
       });
       return ok(res, { message: 'Role deleted.' });

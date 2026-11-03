@@ -2,11 +2,12 @@
 #
 # Debian slim rather than Alpine: Prisma's query engine wants glibc + openssl,
 # and the musl builds have been a recurring source of "engine not found" at boot.
-# Node 22 matches the local dev version.
+# Node 26 (current LTS, FX-026) — the same major as package.json `engines`,
+# .nvmrc and CI. Bump all four together.
 
 # ---- deps -------------------------------------------------------------------
 # Kept separate so a source-only change never reinstalls node_modules.
-FROM node:22-slim AS deps
+FROM node:26-slim AS deps
 
 RUN apt-get update -y \
   && apt-get install -y --no-install-recommends openssl ca-certificates \
@@ -22,7 +23,7 @@ COPY prisma ./prisma
 RUN npm ci --omit=dev
 
 # ---- runtime ----------------------------------------------------------------
-FROM node:22-slim AS runtime
+FROM node:26-slim AS runtime
 
 RUN apt-get update -y \
   && apt-get install -y --no-install-recommends openssl ca-certificates \

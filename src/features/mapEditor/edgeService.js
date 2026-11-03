@@ -3,6 +3,17 @@ import { calculateDistance, DEFAULT_TRANSIT_COST } from '../wayfinding/dijkstra.
 
 // Edge invariants live here: normalized pair order (source < target), computed
 // distance, and the weight actually used by the router.
+//
+// `direction` is ALWAYS relative to the edge's stored (and returned)
+// `sourceNodeId` → `targetNodeId`, never to the order a caller passed the two
+// nodes in. Storage sorts the pair, so about half of all calls have their ends
+// swapped on the way in; re-interpreting `direction` against the caller's
+// orientation would make it mean one thing on create and another on update,
+// and a client that PATCHed back the value it was just handed would flip a
+// one-way corridor. So: create and update both take it verbatim, and what the
+// API returns after a create is exactly what a later PATCH reproduces. A
+// client that tracks its own "as drawn A→B" orientation is responsible for
+// comparing against the returned `sourceNodeId`.
 
 export function normalizePair(aId, bId) {
   return aId < bId ? [aId, bId] : [bId, aId];
@@ -20,6 +31,12 @@ export function computeEdgeGeometry(nodeA, nodeB, { transitType = 'WALKWAY', wei
 
 /**
  * Create an edge between two nodes of the same building.
+ *
+ * `client` defaults to the module-level `prisma` but accepts a
+ * `prisma.$transaction(async (tx) => ...)` client too, so a caller that needs
+ * the create and its audit row to commit or roll back together can pass `tx`
+ * straight through instead of duplicating this function's logic inline.
+ *
  * @throws {Error} with .status for client errors
  */
 export async function createEdge({
@@ -28,10 +45,20 @@ export async function createEdge({
   transitType = 'WALKWAY',
   weight = null,
   accessible = null,
+  // Routing metadata, all plain pass-throughs — `direction` included: it reads
+  // against the STORED pair order (see the module header), not against the
+  // order these two arguments arrived in. `null`/`undefined` leaves the column
+  // at its schema default.
+  direction = null,
+  tags = null,
+  rank = null,
+  visibility = null,
+  lengthM = null,
   // Legacy /api/nodes shim: the old model connected nodes across floors with
   // no transit type. When set, cross-floor WALKWAY silently becomes STAIRS
   // (the old FLOOR_CHANGE semantics) instead of a validation error.
   inferCrossFloorTransit = false,
+  client = prisma,
 }) {
   if (sourceNodeId === targetNodeId) {
     const err = new Error('A node cannot connect to itself.');
@@ -40,8 +67,8 @@ export async function createEdge({
   }
 
   const [a, b] = await Promise.all([
-    prisma.node.findUnique({ where: { id: sourceNodeId } }),
-    prisma.node.findUnique({ where: { id: targetNodeId } }),
+    client.node.findUnique({ where: { id: sourceNodeId } }),
+    client.node.findUnique({ where: { id: targetNodeId } }),
   ]);
   if (!a || !b) {
     const err = new Error('Both nodes must exist.');
@@ -79,7 +106,7 @@ export async function createEdge({
     accessible ?? !(transitType === 'STAIRS' || transitType === 'ESCALATOR');
 
   try {
-    return await prisma.edge.create({
+    return await client.edge.create({
       data: {
         sourceNodeId: sourceId,
         targetNodeId: targetId,
@@ -88,6 +115,11 @@ export async function createEdge({
         weight: effectiveWeight,
         transitType,
         accessible: effectiveAccessible,
+        ...(direction ? { direction } : {}),
+        ...(tags ? { tags } : {}),
+        ...(rank ? { rank } : {}),
+        ...(visibility ? { visibility } : {}),
+        ...(lengthM === null || lengthM === undefined ? {} : { lengthM }),
       },
     });
   } catch (err) {

@@ -10,6 +10,7 @@ import { escapeHtml } from '../services/escapeHtml.js';
 import { ok, fail } from '../utils/respond.js';
 import { isId } from '../utils/ids.js';
 import { legacyBuilding } from './buildings/buildings.js';
+import { archiveIncidents } from '../services/incidentArchive.js';
 
 /**
  * Normalize a search query: `?q=a&q=b` arrives as an array, and unbounded
@@ -59,6 +60,7 @@ router.post('/api/admin/login', authLimiter, async (req, res) => {
     }
 
     const adminToken = jwt.sign({ isAdmin: true }, config.jwt.secret, {
+      algorithm: 'HS256',
       expiresIn: '1h',
     });
 
@@ -265,11 +267,13 @@ router.delete('/api/admin/user/:id', isAdmin, async (req, res) => {
     // logs/emergencies/scans via FK. Invites the user sent on OTHER buildings
     // are removed explicitly (invitedById is a required FK), then the user row
     // itself — memberships cascade, scan events and reviews null out.
-    await prisma.$transaction([
-      prisma.building.deleteMany({ where: { ownerId: user.id } }),
-      prisma.buildingInvite.deleteMany({ where: { invitedById: user.id } }),
-      prisma.user.delete({ where: { id: user.id } }),
-    ]);
+    await prisma.$transaction(async (tx) => {
+      // D3: incident history outlives the account and its buildings.
+      await archiveIncidents(tx, { where: { ownerId: user.id }, reason: 'admin_deleted' });
+      await tx.building.deleteMany({ where: { ownerId: user.id } });
+      await tx.buildingInvite.deleteMany({ where: { invitedById: user.id } });
+      await tx.user.delete({ where: { id: user.id } });
+    });
 
     ok(res, { message: 'Deleted.' });
 
@@ -308,7 +312,7 @@ router.delete('/api/admin/user/:id', isAdmin, async (req, res) => {
 
 router.put('/api/admin/user/:id', isAdmin, async (req, res) => {
   const userID = req.params.id;
-  const { name, lastname, company, country, countryCode, phoneNumber, verified } = req.body;
+  const { name, lastname, company, country, countryCode, phoneNumber, verified, plan } = req.body || {};
 
   try {
     if (!userID || !isId(userID)) {
@@ -422,7 +426,11 @@ router.delete('/api/admin/buildings/:id', isAdmin, async (req, res) => {
     // edges, roles, members, invites, logs, emergencies and scan events are
     // removed with the building. The old version deleted only the building
     // document and left all of that orphaned.
-    const result = await prisma.building.deleteMany({ where: { id: buildingID } });
+    // D3: incident history outlives the building.
+    const result = await prisma.$transaction(async (tx) => {
+      await archiveIncidents(tx, { where: { id: buildingID }, reason: 'admin_deleted' });
+      return tx.building.deleteMany({ where: { id: buildingID } });
+    });
 
     if (result.count === 0) {
       return fail(res, 404, 'Building not found.');

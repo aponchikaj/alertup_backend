@@ -13,6 +13,7 @@ import {
     recordFailedAttempt,
     LONG_CODE_TTL_MS,
 } from "../../services/verificationCodes.js";
+import { escapeHtml } from '../../services/escapeHtml.js';
 
 const router = express.Router();
 
@@ -75,7 +76,7 @@ router.post("/api/reset/send-code", emailLimiter, async (req, res) => {
               <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
                 <div style="background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
                   <h1 style="color: #FF7B22; margin-top: 0;">🔑 Password Reset Request</h1>
-                  <p style="color: #333; font-size: 16px;">Hello <strong>${userName}</strong>,</p>
+                  <p style="color: #333; font-size: 16px;">Hello <strong>${escapeHtml(userName)}</strong>,</p>
                   <p style="color: #666;">You requested to reset your password. Use the code below to complete the process:</p>
                   <div style="background-color: #f9f9f9; padding: 20px; border-radius: 5px; margin: 20px 0; text-align: center; border: 2px dashed #FF7B22;">
                     <p style="margin: 0; font-size: 32px; font-weight: bold; color: #FF7B22; letter-spacing: 5px;">${code}</p>

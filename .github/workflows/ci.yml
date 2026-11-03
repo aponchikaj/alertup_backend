@@ -1,0 +1,50 @@
+# FX-025: lint/tests gate every push and PR. Make "test" a required check on
+# pre-prod and main in the GitHub branch-protection settings.
+name: CI
+
+on:
+  push:
+    branches: [stage, pre-prod, main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: alertup_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Tests refuse any non-localhost database (src/tests/globalSetup.js).
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/alertup_test
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/alertup_test
+      JWT_SECRET: ci-only-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - name: Schema matches migrations (no drift)
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -c 'CREATE DATABASE alertup_shadow'
+          npx prisma migrate diff --from-migrations prisma/migrations \
+            --to-schema-datamodel prisma/schema.prisma \
+            --shadow-database-url postgresql://postgres:postgres@localhost:5432/alertup_shadow \
+            --exit-code
+      - run: npm test

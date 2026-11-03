@@ -18,6 +18,7 @@ import { displayName } from '../../services/displayName.js';
 import { publicReadLimiter } from '../../services/rateLimiter.js';
 import { publish } from '../../features/realtime/broadcaster.js';
 import { invalidate } from '../../features/wayfinding/graphCache.js';
+import { archiveIncidents } from '../../services/incidentArchive.js';
 
 const router = express.Router();
 
@@ -100,10 +101,10 @@ const normalizeFloorNames = (floorNames) => {
 };
 
 /** Best-effort S3 cleanup — never lets a failed delete break the request. */
-const deleteAssetQuietly = async (url) => {
+const deleteAssetQuietly = async (url, buildingId) => {
   if (!url) return;
   try {
-    await deleteByUrl(url);
+    await deleteByUrl(url, { buildingId });
   } catch (err) {
     console.error('Asset cleanup failed:', err.message);
   }
@@ -252,7 +253,7 @@ router.put('/api/building/:id', whoami, requireOwner, upload.array('maps'), asyn
     await prisma.floor.deleteMany({
       where: { buildingId: building.id, id: { notIn: keepIds } },
     });
-    for (const f of dropped) await deleteAssetQuietly(f.mapImageUrl);
+    for (const f of dropped) await deleteAssetQuietly(f.mapImageUrl, building.id);
 
     // Two-phase renumbering keeps @@unique(buildingId, floorNumber) happy
     // while floors move positions.
@@ -290,7 +291,7 @@ router.put('/api/building/:id', whoami, requireOwner, upload.array('maps'), asyn
           mapUrl = null;
         }
       }
-      if (mapUrl) await deleteAssetQuietly(p.row.mapImageUrl);
+      if (mapUrl) await deleteAssetQuietly(p.row.mapImageUrl, building.id);
 
       await prisma.floor.update({
         where: { id: p.row.id },
@@ -389,6 +390,16 @@ router.get('/api/building/my', whoami, async (req, res) => {
   }
 });
 
+/** The signed-in user id from a session cookie, or null. Never throws. */
+const userIdFromToken = (token) => {
+  if (!token) return null;
+  try {
+    return jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'] })?.userID || null;
+  } catch {
+    return null;
+  }
+};
+
 /* ---------------- SCAN FLOOR (legacy scheme B: floor by NAME) ---------------- */
 router.get('/api/building/scan/:id/:floor', publicReadLimiter, async (req, res) => {
   const { id, floor } = req.params;
@@ -424,6 +435,31 @@ router.get('/api/building/scan/:id/:floor', publicReadLimiter, async (req, res) 
     if (!floorRow)
       return res.status(404).send({ Success: false, Message: 'Floor not found.' });
 
+    // FX-022: this page is both the landing page for a printed floor QR AND
+    // the admin floor view. Only a visitor's scan counts — the building's own
+    // owner or members looking at their map in the dashboard must not inflate
+    // scanCount, ScanEvents, or (during an emergency) the incident log.
+    const viewerId = userIdFromToken(req.cookies?.['userToken']);
+    const isStaffView =
+      Boolean(viewerId) &&
+      (building.ownerId === viewerId ||
+        Boolean(
+          await prisma.buildingMember.findUnique({
+            where: { buildingId_userId: { buildingId: building.id, userId: viewerId } },
+            select: { userId: true },
+          })
+        ));
+    if (isStaffView) {
+      return res.send({
+        Success: true,
+        Message: {
+          buildingName: building.name,
+          floorData: legacyMapEntry(floorRow),
+          scannedCount: floorRow.scanCount,
+        },
+      });
+    }
+
     const updatedFloor = await prisma.floor.update({
       where: { id: floorRow.id },
       data: { scanCount: { increment: 1 } },
@@ -456,7 +492,7 @@ router.get('/api/building/scan/:id/:floor', publicReadLimiter, async (req, res) 
     const userToken = req.cookies['userToken'];
     if (userToken) {
       try {
-        const decoded = jwt.verify(userToken, config.jwt.secret);
+        const decoded = jwt.verify(userToken, config.jwt.secret, { algorithms: ['HS256'] });
         if (decoded?.userID) {
           await prisma.scanEvent.create({
             data: {
@@ -503,12 +539,17 @@ router.delete('/api/building/delete/:buildingId', whoami, requireOwner, async (r
     // FK cascades replace the manual multi-collection cleanup: floors, nodes,
     // edges, roles, members, invites, logs, emergencies and scan events all go
     // with the building row.
-    await prisma.building.delete({ where: { id: building.id } });
+    // D3: incident history outlives the building — archived in the same
+    // transaction, before the cascade removes it.
+    await prisma.$transaction(async (tx) => {
+      await archiveIncidents(tx, { where: { id: building.id }, reason: 'building_deleted' });
+      await tx.building.delete({ where: { id: building.id } });
+    });
     invalidate(building.id);
 
     // Best-effort S3/Cloudinary cleanup — data is already gone, assets are
     // just storage cost, so failures are logged and ignored.
-    for (const f of floors) await deleteAssetQuietly(f.mapImageUrl);
+    for (const f of floors) await deleteAssetQuietly(f.mapImageUrl, building.id);
 
     return res.send({
       Success: true,
@@ -550,7 +591,7 @@ router.delete(
         nodeCount = await prisma.node.count({ where: { floorId: floor.id } });
         await prisma.floor.delete({ where: { id: floor.id } }); // cascades nodes/edges
         floorDeleted = 1;
-        await deleteAssetQuietly(floor.mapImageUrl);
+        await deleteAssetQuietly(floor.mapImageUrl, req.building.id);
         invalidate(req.building.id);
       }
 
@@ -565,90 +606,6 @@ router.delete(
     } catch (err) {
       console.error('Floor Delete Error:', err);
       return res.status(500).send({ Success: false, Message: 'Server error.' });
-    }
-  }
-);
-
-/* ---------------- UPDATE FLOOR MAP ---------------- */
-router.put(
-  '/api/building/:buildingId/floor/:floorNumber/map',
-  whoami,
-  requirePermission(PERMISSIONS.CAN_EDIT_MAP),
-  async (req, res) => {
-    try {
-      const { svgContent, svgMapUrl, width, height } = req.body;
-
-      const floorNum = parseInt(req.params.floorNumber, 10);
-      if (Number.isNaN(floorNum) || floorNum < 1) {
-        return res.status(400).json({ Success: false, Message: 'Invalid floor number.' });
-      }
-
-      // The row must exist (or be created) before the upload so the S3 key can
-      // embed the floor id.
-      const floor = await prisma.floor.upsert({
-        where: {
-          buildingId_floorNumber: { buildingId: req.building.id, floorNumber: floorNum },
-        },
-        create: { buildingId: req.building.id, floorNumber: floorNum },
-        update: {},
-      });
-
-      let mapUrl = typeof svgMapUrl === 'string' && svgMapUrl ? svgMapUrl : null;
-
-      if (svgContent && typeof svgContent === 'string') {
-        try {
-          mapUrl = await uploadBuffer({
-            key: keys.floorMap(req.building.id, floor.id, 'svg'),
-            buffer: Buffer.from(svgContent),
-            contentType: 'image/svg+xml',
-          });
-        } catch (uploadError) {
-          console.error('Floor SVG upload failed:', uploadError);
-          return res.status(500).json({
-            Success: false,
-            Message: 'Failed to upload SVG',
-          });
-        }
-      }
-
-      // A floor map needs a resolvable URL — a request carrying neither
-      // svgContent nor svgMapUrl would store an unrenderable floor.
-      if (!mapUrl) {
-        return res.status(400).json({
-          Success: false,
-          Message: 'A floor map requires either svgContent or svgMapUrl.',
-        });
-      }
-
-      const mapWidth = parseInt(width) || 1000;
-      const mapHeight = parseInt(height) || 800;
-
-      await prisma.floor.update({
-        where: { id: floor.id },
-        data: {
-          svgContent: typeof svgContent === 'string' ? svgContent : null,
-          mapImageUrl: mapUrl,
-          width: mapWidth,
-          height: mapHeight,
-        },
-      });
-
-      return res.json({
-        Success: true,
-        Message: 'Floor map updated successfully.',
-        Data: {
-          floorNumber: floorNum,
-          mapUrl,
-          width: mapWidth,
-          height: mapHeight,
-        },
-      });
-    } catch (error) {
-      console.error('Error updating floor map:', error);
-      return res.status(500).json({
-        Success: false,
-        Message: 'Server error while updating floor map.',
-      });
     }
   }
 );

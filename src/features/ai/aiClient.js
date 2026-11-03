@@ -149,4 +149,30 @@ export function visionAvailable() {
   return chain().some((name) => Boolean(modelFor(name, 'vision')));
 }
 
-export { FIRST_TOKEN_TIMEOUT_MS } from './groqClient.js';
+/**
+ * One tool-capable, non-streaming turn across the provider chain.
+ *
+ * Safe to retry outright, and for the same reason chatOnce is: the tool phase
+ * emits nothing to the client, so falling over to the other provider cannot
+ * append a second answer to a half-rendered one. That is what keeps the
+ * "no fallback after the first token" rule intact once tools are in play.
+ */
+export async function callWithTools({ role = 'chat', ...params }) {
+  const providers = chain();
+  if (!providers.length) throw new Error('No AI provider is configured');
+
+  let lastError = null;
+
+  for (const name of providers) {
+    try {
+      const model = params.model || modelFor(name, role);
+      return await PROVIDERS[name].callWithTools({ ...params, model });
+    } catch (error) {
+      lastError = error;
+      if (!isRetryable(error)) throw error;
+      console.warn(`[ai] ${name} callWithTools failed, trying next:`, error?.message);
+    }
+  }
+
+  throw lastError ?? new Error('Every AI provider failed');
+}
